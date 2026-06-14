@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1f7a65" />
+    <title>Alpaca Paper Trader</title>
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/alpaca-paper-trader-32.png" />
+    <link rel="apple-touch-icon" href="/static/alpaca-paper-trader-192.png" />
+    <link rel="manifest" href="/static/site.webmanifest" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Alpaca Paper Trader</h1>
+          <p id="statusText">Not connected</p>
+        </div>
+        <div class="topbar-actions">
+          <nav class="topnav" aria-label="App views">
+            <button class="nav-button active" data-view="dashboardView" type="button">Dashboard</button>
+            <button class="nav-button" data-view="accountsView" type="button">Accounts</button>
+          </nav>
+          <div class="mode-pill">Paper API</div>
+        </div>
+      </header>
+
+      <section id="dashboardView" class="view dashboard-view active">
+        <section class="dashboard-grid">
+          <article class="dashboard-card market-status dashboard-market" id="dashboardMarketStatus">
+            <div>
+              <span>Market Status</span>
+              <strong id="dashboardMarketStatusText">Not connected</strong>
+            </div>
+            <small id="dashboardMarketStatusDetail">Connect an account on the Accounts page.</small>
+          </article>
+
+          <article class="dashboard-card halt-card" id="dashboardHaltStatus">
+            <span>Trade Halts</span>
+            <strong id="dashboardHaltStatusText">No active halts detected</strong>
+            <small id="dashboardHaltStatusDetail">Subscribed top-volume symbols only.</small>
+          </article>
+
+          <article class="dashboard-card stream-card" id="dashboardStreamStatus">
+            <div class="card-heading">
+              <span>Data Stream</span>
+              <button id="reconnectStreamButton" class="secondary mini-button" type="button">Reconnect</button>
+            </div>
+            <strong id="dashboardStreamStatusText">Stopped</strong>
+            <small id="dashboardStreamStatusDetail">Shared market websocket idle.</small>
+          </article>
+
+          <article class="dashboard-card trader-card" id="dashboardTraderStatus">
+            <span>Trader</span>
+            <strong id="dashboardTraderStatusText">Stopped</strong>
+            <small id="dashboardTraderStatusDetail">No account running.</small>
+          </article>
+
+          <article class="dashboard-card lookup-card">
+            <div class="lookup-row">
+              <label>
+                Ticker lookup
+                <input id="lookupSymbol" placeholder="AAPL" spellcheck="false" />
+              </label>
+              <button id="lookupButton" type="button">Fetch</button>
+            </div>
+            <div id="lookupResult" class="lookup-result">No lookup loaded.</div>
+          </article>
+        </section>
+
+        <section class="dashboard-table panel">
+          <div class="table-heading">
+            <div>
+              <h2>Top 25 By Volume</h2>
+              <p id="topVolumeUpdated">Waiting for a connected account.</p>
+            </div>
+            <button id="refreshTopVolumeButton" class="secondary" type="button">Refresh List</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th><button class="sort-button" data-sort="rank_raw" type="button">#</button></th>
+                <th><button class="sort-button" data-sort="symbol" type="button">Symbol</button></th>
+                <th><button class="sort-button" data-sort="buy_volume_raw" type="button">Buy Vol</button></th>
+                <th><button class="sort-button" data-sort="sell_volume_raw" type="button">Sell Vol</button></th>
+                <th><button class="sort-button" data-sort="unclassified_volume_raw" type="button">Other Vol</button></th>
+                <th><button class="sort-button" data-sort="stream_volume_raw" type="button">Stream Total</button></th>
+                <th><button class="sort-button" data-sort="total_volume_raw" type="button">Total Vol</button></th>
+                <th><button class="sort-button" data-sort="trade_count_raw" type="button">Trades</button></th>
+                <th><button class="sort-button" data-sort="last_price_raw" type="button">Last Price</button></th>
+                <th><button class="sort-button" data-sort="last_trade_side" type="button">Last Side</button></th>
+                <th><button class="sort-button" data-sort="trading_status" type="button">Status</button></th>
+                <th><button class="sort-button" data-sort="halted_raw" type="button">Halt</button></th>
+              </tr>
+            </thead>
+            <tbody id="topVolumeRows"></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section id="accountsView" class="view accounts-view">
+      <section class="layout">
+        <aside class="sidebar">
+          <section class="panel">
+            <h2>Account & Keys</h2>
+            <label>
+              Active account
+              <select id="accountSelect"></select>
+            </label>
+            <label>
+              Account name
+              <input id="accountName" value="Account 1" spellcheck="false" />
+            </label>
+            <div class="button-row">
+              <button id="newAccountButton" class="secondary">New</button>
+              <button id="saveAccountButton" class="secondary">Save</button>
+              <button id="removeAccountButton" class="danger">Remove</button>
+            </div>
+            <div class="compact-section">
+              <h3>Credentials</h3>
+              <div id="credentialStatus" class="credential-status">No saved credentials</div>
+              <label>
+                API key
+                <input id="apiKey" name="alpaca-api-key-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter API key" />
+              </label>
+              <label>
+                Secret key
+                <input id="secretKey" name="alpaca-secret-key-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter secret key" />
+              </label>
+              <label class="check-row">
+                <input id="remember" type="checkbox" checked />
+                <span>Store encrypted for auto-connect</span>
+              </label>
+              <label class="check-row">
+                <input id="autoConnect" type="checkbox" checked />
+                <span>Connect this account on launch</span>
+              </label>
+              <label class="check-row">
+                <input id="autoStartTrading" type="checkbox" />
+                <span>Start trading on launch</span>
+              </label>
+              <div class="button-row">
+                <button id="connectButton">Connect</button>
+                <button id="refreshButton" class="secondary">Refresh</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel trading-setup-panel">
+            <div class="market-status" id="marketStatus">
+              <div>
+                <span>Market Status</span>
+                <strong id="marketStatusText">Not connected</strong>
+              </div>
+              <small id="marketStatusDetail">Connect an account to read Alpaca market hours.</small>
+            </div>
+            <h2>Trading Setup</h2>
+            <label>
+              Trading profile
+              <select id="profile">
+                <option value="conservative">Conservative</option>
+                <option value="neutral" selected>Neutral</option>
+                <option value="aggressive">Aggressive</option>
+              </select>
+            </label>
+            <div class="setup-toolbar">
+              <div class="button-row setup-actions">
+                <button id="applyParametersButton">Apply Changes</button>
+                <button id="tradingToggleButton" disabled>Start Trading</button>
+              </div>
+              <small id="parameterStatus" class="helper-text">Live parameters load after selecting an account.</small>
+            </div>
+
+            <div class="compact-section">
+              <h3>Custom Profile</h3>
+              <div class="two-col uneven">
+                <label>
+                  Profile name
+                  <input id="customProfileName" value="Custom Profile" spellcheck="false" />
+                </label>
+                <button id="saveCustomProfileButton" class="secondary align-input">Save Custom</button>
+              </div>
+              <small id="profileStatus" class="helper-text">Built-in profiles can be adjusted and saved as custom.</small>
+            </div>
+
+            <div class="compact-section">
+              <h3>Strategy Parameters</h3>
+              <input id="shortPeriod" type="hidden" value="9" />
+              <input id="longPeriod" type="hidden" value="21" />
+              <input id="sellRsi" type="hidden" value="72" />
+              <input id="cooldownMinutes" type="hidden" value="0" />
+              <div class="strategy-grid">
+                <label>
+                  RSI Period
+                  <input id="rsiPeriod" type="number" min="1" step="1" value="14" />
+                </label>
+                <label>
+                  Buy RSI Min
+                  <input id="buyRsiMin" type="number" min="0" max="100" step="0.5" value="40" />
+                </label>
+                <label>
+                  Buy RSI Max
+                  <input id="buyRsiMax" type="number" min="0" max="100" step="0.5" value="68" />
+                </label>
+                <label>
+                  Min Score
+                  <input id="minEntryScore" type="number" min="0" max="100" step="0.5" value="38" />
+                </label>
+                <label>
+                  Momentum Bars
+                  <input id="momentumPeriod" type="number" min="1" step="1" value="6" />
+                </label>
+                <label>
+                  Min Momentum %
+                  <input id="minMomentumPercent" type="number" step="0.01" value="0.05" />
+                </label>
+                <label>
+                  SMI Bars
+                  <input id="smiPeriod" type="number" min="1" step="1" value="10" />
+                </label>
+                <label>
+                  Min SMI
+                  <input id="minSmi" type="number" min="-100" max="100" step="0.5" value="5" />
+                </label>
+                <label>
+                  ATR Bars
+                  <input id="atrPeriod" type="number" min="1" step="1" value="14" />
+                </label>
+                <label>
+                  Buy Flow Ratio
+                  <input id="minBuyVolumeRatio" type="number" min="0" max="1" step="0.01" value="0.5" />
+                </label>
+                <label>
+                  Re-entry Boost
+                  <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="10" />
+                </label>
+                <label>
+                  Inverse ETFs
+                  <select id="inverseEtfMode">
+                    <option value="exclude">Exclude</option>
+                    <option value="allow">Allow</option>
+                    <option value="inverse_only">Inverse only</option>
+                  </select>
+                </label>
+                <label>
+                  Vol Period
+                  <input id="volumePeriod" type="number" min="1" step="1" value="20" />
+                </label>
+                <label>
+                  Vol Mult
+                  <input id="volumeMultiplier" type="number" min="0" step="0.05" value="1" />
+                </label>
+                <label>
+                  Min Avg Vol
+                  <input id="minAvgVolume" type="number" min="0" step="1000" value="0" />
+                </label>
+                <label>
+                  Profit %
+                  <input id="takeProfitPercent" type="number" min="0" step="0.05" value="4.5" />
+                </label>
+                <label>
+                  Stop %
+                  <input id="stopLossPercent" type="number" min="0" step="0.05" value="3" />
+                </label>
+                <input id="profitTrailStartPercent" type="hidden" value="0" />
+                <input id="profitTrailDropPercent" type="hidden" value="0" />
+                <input id="stopLossGraceMinutes" type="hidden" value="0" />
+                <label>
+                  Open Guard
+                  <input id="entryOpenGuardMinutes" type="number" min="0" step="1" value="10" />
+                </label>
+                <label>
+                  Close Guard
+                  <input id="entryCloseGuardMinutes" type="number" min="0" step="1" value="15" />
+                </label>
+              </div>
+            </div>
+
+            <div class="compact-section">
+              <h3>Symbols & Data</h3>
+              <label class="check-row">
+                <input id="useTopVolumeSymbols" type="checkbox" checked />
+                <span>Trade dashboard top 25</span>
+              </label>
+              <label>
+                Fallback tickers
+                <input id="symbols" value="SPY,QQQ" spellcheck="false" />
+              </label>
+              <div class="two-col">
+                <label>
+                  Feed
+                  <select id="feed">
+                    <option value="iex">IEX</option>
+                    <option value="sip">SIP</option>
+                    <option value="delayed_sip">Delayed SIP</option>
+                    <option value="otc">OTC</option>
+                    <option value="boats">BOATS</option>
+                    <option value="overnight">Overnight</option>
+                  </select>
+                </label>
+                <label>
+                  REST refresh
+                  <input id="pollSeconds" type="number" min="5" step="1" value="15" />
+                </label>
+              </div>
+              <label class="check-row">
+                <input id="useMarketStream" type="checkbox" checked />
+                <span>Stream minute bars</span>
+              </label>
+            </div>
+
+            <div class="compact-section">
+              <h3>Risk & Size</h3>
+              <input id="maxPositionNotional" type="hidden" value="0" />
+              <input id="maxPositionPercent" type="hidden" value="0" />
+              <input id="dailyLossLimit" type="hidden" value="0" />
+              <input id="dailyLossLimitPercent" type="hidden" value="0" />
+              <input id="riskPerTradePercent" type="hidden" value="0" />
+              <input id="exitTimeInForce" type="hidden" value="day" />
+              <div class="setup-checks">
+                <label class="check-row">
+                  <input id="dryRun" type="checkbox" checked />
+                  <span>Dry run</span>
+                </label>
+                <label class="check-row">
+                  <input id="marketHoursOnly" type="checkbox" checked />
+                  <span>Market hours only</span>
+                </label>
+                <label class="check-row">
+                  <input id="useBracketOrders" type="checkbox" checked />
+                  <span>Manual exit orders</span>
+                </label>
+              </div>
+              <div class="two-col">
+                <label>
+                  Trade $
+                  <input id="maxTradeNotional" type="number" min="0" step="1" value="35" />
+                </label>
+                <label>
+                  Trade % Eq
+                  <input id="maxTradePercent" type="number" min="0" step="0.05" value="7" />
+                </label>
+              </div>
+              <div class="two-col">
+                <label>
+                  Total Exposure %
+                  <input id="maxTotalExposurePercent" type="number" min="0" step="0.5" value="25" />
+                </label>
+                <label>
+                  Max pos
+                  <input id="maxOpenPositions" type="number" min="1" step="1" value="3" />
+                </label>
+              </div>
+            </div>
+
+            <div class="compact-section">
+              <h3>Trading Actions</h3>
+              <div class="button-row">
+                <button id="cancelOrdersButton" class="warning">Cancel Selected Orders</button>
+                <button id="refreshAllButton" class="secondary">Refresh All Accounts</button>
+                <button id="purgeAccountButton" class="danger">Purge Selected</button>
+              </div>
+            </div>
+          </section>
+        </aside>
+
+        <section class="workspace">
+          <section class="account-strip" id="accountCards"></section>
+
+          <section class="metrics">
+            <article>
+              <span>Equity</span>
+              <strong id="equity">$0.00</strong>
+            </article>
+            <article>
+              <span>Daily P/L</span>
+              <strong id="dailyPl">$0.00</strong>
+            </article>
+            <article class="realized-pl-card">
+              <div class="metric-heading">
+                <span>Realized P/L</span>
+                <label class="check-row compact-toggle metric-toggle">
+                  <input id="realizedPercentToggle" type="checkbox" />
+                  <span>%</span>
+                </label>
+              </div>
+              <strong id="realizedPl">$0.00</strong>
+            </article>
+            <article>
+              <span>Buying Power</span>
+              <strong id="buyingPower">$0.00</strong>
+            </article>
+            <article>
+              <span>Cash</span>
+              <strong id="cash">$0.00</strong>
+            </article>
+            <article>
+              <span>Refresh</span>
+              <strong id="lastRefresh">-</strong>
+            </article>
+          </section>
+
+          <section class="tabs">
+            <div class="tab-list">
+              <button class="tab active" data-tab="strategyPanel">Strategy</button>
+              <button class="tab" data-tab="positionsPanel">Positions</button>
+              <button class="tab" data-tab="tradeHistoryPanel">Trade History</button>
+              <button class="tab" data-tab="protectionPanel">Protection</button>
+              <button class="tab" data-tab="ordersPanel">Open Orders</button>
+              <button class="tab" data-tab="ledgerPanel">Ledger</button>
+              <button class="tab" data-tab="replayPanel">Replay</button>
+              <button class="tab" data-tab="logPanel">Log</button>
+            </div>
+
+            <section id="strategyPanel" class="tab-panel active">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Price</th>
+                    <th>RSI</th>
+                    <th>Volume</th>
+                    <th>Rel Vol</th>
+                    <th>Vol Swing</th>
+                    <th>Momentum</th>
+                    <th>Long Mom</th>
+                    <th>Day</th>
+                    <th>VWAP</th>
+                    <th>SMI</th>
+                    <th>ATR</th>
+                    <th>Vol OK</th>
+                    <th>Score</th>
+                    <th>Bars</th>
+                    <th>Last Action</th>
+                  </tr>
+                </thead>
+                <tbody id="strategyRows"></tbody>
+              </table>
+            </section>
+
+            <section id="positionsPanel" class="tab-panel">
+              <div class="table-tools">
+                <label class="check-row compact-toggle">
+                  <input id="positionsPercentToggle" type="checkbox" />
+                  <span>Show P/L %</span>
+                </label>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th><button class="position-sort-button" data-sort="symbol" type="button">Symbol</button></th>
+                    <th><button class="position-sort-button" data-sort="side" type="button">Side</button></th>
+                    <th><button class="position-sort-button" data-sort="qty_raw" type="button">Qty</button></th>
+                    <th><button class="position-sort-button" data-sort="avg_entry_raw" type="button">Avg Entry</button></th>
+                    <th><button class="position-sort-button" data-sort="cost_basis_raw" type="button">Cost Basis</button></th>
+                    <th><button class="position-sort-button" data-sort="current_price_raw" type="button">Price</button></th>
+                    <th><button class="position-sort-button" data-sort="market_value_raw" type="button">Market Value</button></th>
+                    <th><button class="position-sort-button" data-sort="unrealized_pl_raw" type="button">Unrealized P/L</button></th>
+                    <th><button class="position-sort-button" data-sort="intraday_pl_raw" type="button">Intraday P/L</button></th>
+                  </tr>
+                </thead>
+                <tbody id="positionRows"></tbody>
+              </table>
+            </section>
+
+            <section id="tradeHistoryPanel" class="tab-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Filled</th>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Filled Qty</th>
+                    <th>Avg Fill</th>
+                    <th>Value</th>
+                    <th>Cost Basis</th>
+                    <th>Realized P/L</th>
+                    <th>P/L %</th>
+                    <th>Result</th>
+                    <th>Exit Reason</th>
+                    <th>Status</th>
+                    <th>Source</th>
+                  </tr>
+                </thead>
+                <tbody id="tradeHistoryRows"></tbody>
+              </table>
+            </section>
+
+            <section id="ordersPanel" class="tab-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Type</th>
+                    <th>Qty</th>
+                    <th>Status</th>
+                    <th>Role</th>
+                    <th>TIF</th>
+                    <th>Class</th>
+                    <th>Submitted</th>
+                    <th>Client ID</th>
+                  </tr>
+                </thead>
+                <tbody id="orderRows"></tbody>
+              </table>
+            </section>
+
+            <section id="protectionPanel" class="tab-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Qty</th>
+                    <th>Market Value</th>
+                    <th>Unrealized P/L</th>
+                    <th>Status</th>
+                    <th>Protective</th>
+                    <th>Strategy Exits</th>
+                    <th>Manual</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody id="protectionRows"></tbody>
+              </table>
+            </section>
+
+            <section id="ledgerPanel" class="tab-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Qty</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Client ID</th>
+                    <th>Order ID</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="intentRows"></tbody>
+              </table>
+            </section>
+
+            <section id="replayPanel" class="tab-panel">
+              <div id="replayStatus" class="replay-status">Replay file not initialized.</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Kind</th>
+                    <th>Summary</th>
+                  </tr>
+                </thead>
+                <tbody id="replayRows"></tbody>
+              </table>
+            </section>
+
+            <section id="logPanel" class="tab-panel">
+              <div id="logRows" class="log-view"></div>
+            </section>
+          </section>
+        </section>
+      </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "name": "Alpaca Paper Trader",
+  "short_name": "Alpaca Trader",
+  "description": "Local Alpaca paper trading dashboard",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#17202a",
+  "theme_color": "#1f7a65",
+  "icons": [
+    {
+      "src": "/static/alpaca-paper-trader-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/alpaca-paper-trader-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

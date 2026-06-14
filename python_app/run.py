@@ -1,0 +1,218 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import socket
+import sys
+import threading
+import time
+import urllib.request
+import webbrowser
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import uvicorn
+
+
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from alpaca_desktop.server import app  # noqa: E402
+
+
+APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "AlpacaPaperTrader"
+INSTANCE_PATH = APP_DATA_DIR / "instance.json"
+DEFAULT_PORT = 8765
+SOURCE_SUFFIXES = {".py", ".html", ".js", ".css", ".webmanifest"}
+
+
+def find_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
+
+
+def port_is_free(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def preferred_port(host: str) -> int:
+    raw_port = os.environ.get("ALPACA_TRADER_PORT", str(DEFAULT_PORT))
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = DEFAULT_PORT
+    if port > 0 and port_is_free(host, port):
+        return port
+    return find_port(host)
+
+
+def source_stamp() -> str:
+    latest = 0
+    total_size = 0
+    file_count = 0
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        latest = max(latest, stat.st_mtime_ns)
+        total_size += stat.st_size
+        file_count += 1
+    return f"{latest}:{file_count}:{total_size}"
+
+
+def load_instance() -> dict[str, Any]:
+    try:
+        raw = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def instance_url(raw: dict[str, Any]) -> str:
+    return str(raw.get("url") or "")
+
+
+def instance_pid(raw: dict[str, Any]) -> int:
+    try:
+        return int(raw.get("pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def url_is_alive(url: str, timeout: float = 1.0) -> bool:
+    if not url:
+        return False
+    try:
+        with urllib.request.urlopen(f"{url}/api/state", timeout=timeout) as response:
+            return response.status < 400
+    except Exception:
+        return False
+
+
+def stop_instance(raw: dict[str, Any], url: str) -> bool:
+    pid = instance_pid(raw)
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception as exc:
+        safe_print(f"Could not stop stale Alpaca Paper Trader backend pid {pid}: {exc}")
+        return False
+
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if not url_is_alive(url, timeout=0.3):
+            return True
+        time.sleep(0.25)
+    return not url_is_alive(url, timeout=0.3)
+
+
+def active_instance_url(restart_stale: bool = True) -> str:
+    try:
+        raw = load_instance()
+        url = instance_url(raw)
+        if not url:
+            return ""
+        if not url_is_alive(url):
+            return ""
+        running_stamp = str(raw.get("source_stamp") or "")
+        current_stamp = source_stamp()
+        if running_stamp != current_stamp:
+            safe_print("Existing Alpaca Paper Trader backend is stale; restarting it.")
+            if restart_stale and stop_instance(raw, url):
+                return ""
+            if restart_stale:
+                safe_print("Stale backend did not stop cleanly; reusing existing instance.")
+        return url
+    except Exception:
+        return ""
+    return ""
+
+
+def save_instance_url(url: str) -> None:
+    try:
+        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        INSTANCE_PATH.write_text(
+            json.dumps(
+                {
+                    "url": url,
+                    "pid": os.getpid(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "source_stamp": source_stamp(),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def clear_instance_url(url: str) -> None:
+    try:
+        raw = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
+        if str(raw.get("url") or "") == url:
+            INSTANCE_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def safe_print(message: str) -> None:
+    try:
+        print(message)
+    except OSError:
+        pass
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Launch Alpaca Paper Trader")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-restart-stale", action="store_true")
+    parser.add_argument("--smoke", action="store_true")
+    args = parser.parse_args()
+
+    if args.smoke:
+        safe_print("Alpaca Paper Trader Python app imports OK.")
+        return
+
+    existing_url = active_instance_url(restart_stale=not args.no_restart_stale)
+    if existing_url:
+        if not args.no_browser:
+            webbrowser.open(existing_url)
+        safe_print(f"Alpaca Paper Trader already running at {existing_url}")
+        return
+
+    if args.port is None:
+        port = preferred_port(args.host)
+    elif args.port == 0:
+        port = find_port(args.host)
+    else:
+        port = args.port
+    url = f"http://{args.host}:{port}"
+    save_instance_url(url)
+    if not args.no_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+
+    safe_print(f"Alpaca Paper Trader running at {url}")
+    try:
+        uvicorn.run(app, host=args.host, port=port, log_level="warning", log_config=None, access_log=False)
+    finally:
+        clear_instance_url(url)
+
+
+if __name__ == "__main__":
+    main()
