@@ -117,6 +117,34 @@ The included strategy is intentionally conservative and transparent:
 
 The **Replay** tab shows recent debug events and the JSONL replay file path under your Windows local app data folder. The replay log records market bars, trading-status events, stream/backfill events, and strategy order intents without writing API keys or secrets.
 
+## Backtest Day Tape
+
+The app also writes a local day tape for offline backtesting:
+
+```text
+%LOCALAPPDATA%\AlpacaPaperTrader\day-tape\tape-YYYYMMDD.jsonl
+```
+
+The day tape records data the app is already using: market bars, trades, quotes, trading-status events, top-volume dashboard snapshots, ticker lookups, order intents, stream/backfill events, and sanitized strategy scan snapshots with account balances, positions, open/closed orders, strategy rows, and live config. It does not record API keys or secret keys, and it does not make extra Alpaca API calls.
+
+By default, day-tape files are kept for 14 days. Set `ALPACA_TRADER_DAY_TAPE_RETENTION_DAYS` to change retention, or set `ALPACA_TRADER_DISABLE_DAY_TAPE=1` to disable tape writing.
+
+To summarize local tape size:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\day_tape_summary.py
+```
+
+To fast-forward a week of tape without touching Alpaca:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\day_tape_fast_forward.py --days 7
+```
+
+That fast-forward pass is the event-flow foundation. A fake broker/profit simulator can be layered on top of it once the tape has enough real market days.
+
+Expected storage depends on scan frequency, market activity, and how many symbols are streaming. The old replay logs are small, but a full day tape with trades and quotes can be much larger. Budget roughly 5-10 GB for two weeks at first; after one full market day, run the summary command above and use the real number.
+
 The volume fields are also the foundation for a later automatic symbol source that can replace the manual ticker list with the top daily volume names.
 
 No strategy guarantees profit. Paper test it before trusting any automation.

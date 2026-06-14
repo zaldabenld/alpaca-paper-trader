@@ -34,6 +34,20 @@ from alpaca.trading.requests import (
 )
 from pydantic import BaseModel, Field, field_validator
 
+from .day_tape import (
+    append_day_tape_event,
+    append_market_bar_once,
+    append_market_quote,
+    append_market_status,
+    append_market_trade,
+    clean_payload as clean_day_tape_value,
+    compact_account_snapshot,
+    compact_order_intent,
+    compact_orders,
+    compact_positions,
+    compact_top_volume_rows,
+    day_tape_file_path,
+)
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
 
 
@@ -1247,6 +1261,7 @@ class TraderEngine:
                         fetch_stock_bars_chunked(data_client, missing_symbols, required_bars, config.feed)
                     )
 
+            self.record_day_tape_bars(bars_data, "historical_refresh")
             for symbol, symbol_bars in bars_data.items():
                 for bar in symbol_bars:
                     self.strategy_state.add_bar(
@@ -1419,6 +1434,17 @@ class TraderEngine:
                 elif self.trading_enabled and market_clock["is_open"]:
                     mode = "dry-run" if self.config.dry_run else "paper-order"
                     self.status = f"Auto trading running in {mode} mode"
+            self.record_day_tape_scan(
+                should_trade=should_trade,
+                entries_allowed=entries_allowed,
+                entry_guard_detail=entry_guard_detail,
+                market_clock=market_clock,
+                account=account_dict,
+                positions=position_dicts,
+                open_orders=flat_orders,
+                closed_orders=closed_order_dicts,
+                strategy_rows=rows,
+            )
         except Exception as exc:
             with self.lock:
                 self.last_error = str(exc)
@@ -1437,6 +1463,7 @@ class TraderEngine:
             if self.top_volume_rows and now - self.top_volume_last_fetch_at < cache_seconds:
                 return
             client = self.screener_client
+            feed = self.config.feed
             existing_rows = {row.get("symbol"): row for row in self.top_volume_rows}
             cached_rows = load_dashboard_cache_rows()
             latest_statuses = dict(self.latest_trading_statuses)
@@ -1509,6 +1536,17 @@ class TraderEngine:
                 self.top_volume_updated = updated_at
                 self.top_volume_error = ""
             self.persist_dashboard_cache(force=True)
+            append_day_tape_event(
+                "top_volume_snapshot",
+                {
+                    "source": "screener",
+                    "feed": feed,
+                    "force": force,
+                    "updated_at": updated_at,
+                    "symbols": symbols,
+                    "rows": compact_top_volume_rows(rows),
+                },
+            )
 
             if restart_stream and symbols != old_symbols:
                 self.log("info", "Top-volume symbols refreshed; shared market-data websocket will resubscribe.")
@@ -1516,7 +1554,51 @@ class TraderEngine:
         except Exception as exc:
             with self.lock:
                 self.top_volume_error = str(exc)
+            append_day_tape_event(
+                "top_volume_error",
+                {"source": "screener", "feed": feed, "error": str(exc)},
+            )
             self.log("error", f"Top-volume dashboard refresh failed: {exc}")
+
+    def record_day_tape_bars(self, bars_data: dict[str, list[Any]], source: str) -> None:
+        try:
+            for symbol_bars in bars_data.values():
+                for bar in symbol_bars:
+                    append_market_bar_once(bar, feed=self.config.feed, source=source)
+        except Exception:
+            pass
+
+    def record_day_tape_scan(
+        self,
+        should_trade: bool,
+        entries_allowed: bool,
+        entry_guard_detail: str,
+        market_clock: dict[str, Any],
+        account: dict[str, Any],
+        positions: list[dict[str, Any]],
+        open_orders: list[dict[str, Any]],
+        closed_orders: list[dict[str, Any]],
+        strategy_rows: list[dict[str, Any]],
+    ) -> None:
+        try:
+            append_day_tape_event(
+                "strategy_scan",
+                {
+                    "trading_enabled": self.trading_enabled,
+                    "should_trade": should_trade,
+                    "entries_allowed": entries_allowed,
+                    "entry_guard_detail": entry_guard_detail,
+                    "market_clock": clean_day_tape_value(market_clock),
+                    "config": self.config.model_dump(mode="json"),
+                    "account": compact_account_snapshot(account),
+                    "positions": compact_positions(positions),
+                    "open_orders": compact_orders(open_orders),
+                    "closed_orders": compact_orders(closed_orders),
+                    "strategy": clean_day_tape_value(strategy_rows),
+                },
+            )
+        except Exception:
+            pass
 
     def apply_shared_top_volume(
         self,
@@ -1733,6 +1815,7 @@ class TraderEngine:
         payload = self.format_lookup_snapshot(target, snapshot, feed)
         with self.lock:
             self.lookup_cache[target] = (time.monotonic(), payload)
+        append_day_tape_event("lookup_snapshot", clean_day_tape_value(payload))
         return payload
 
     def format_lookup_snapshot(self, symbol: str, snapshot: Any, feed: str) -> dict[str, Any]:
@@ -2836,6 +2919,7 @@ class TraderEngine:
                 StockLatestTradeRequest(symbol_or_symbols=symbol, feed=DataFeed(self.config.feed))
             )
             trade = trades.get(symbol) if isinstance(trades, dict) else None
+            append_market_trade(trade, feed=self.config.feed, source="order_price_lookup")
             raw = model_dict(trade)
             price = decimal_value(raw.get("price"))
             if price > 0:
@@ -2847,6 +2931,7 @@ class TraderEngine:
                 StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed(self.config.feed))
             )
             quote = quotes.get(symbol) if isinstance(quotes, dict) else None
+            append_market_quote(quote, feed=self.config.feed, source="order_price_lookup")
             raw_quote = model_dict(quote)
             bid = decimal_value(raw_quote.get("bid_price"))
             ask = decimal_value(raw_quote.get("ask_price"))
@@ -3148,6 +3233,7 @@ class TraderEngine:
             "order_id": order_id,
             "reason": reason,
         }
+        append_day_tape_event("order_intent", compact_order_intent(event))
         with self.lock:
             self.order_intents.append(event)
             self.order_intents = self.order_intents[-REPLAY_EVENT_LIMIT:]
@@ -3904,6 +3990,8 @@ class TraderManager:
 
     def record_replay_event(self, kind: str, payload: dict[str, Any]) -> None:
         event = append_replay_event(kind, payload)
+        if kind in {"market_backfill", "market_stream_error", "market_subscription"}:
+            append_day_tape_event(kind, clean_day_tape_value(payload))
         with self.lock:
             self.replay_events.append(event)
             self.replay_events = self.replay_events[-REPLAY_EVENT_LIMIT:]
@@ -3913,6 +4001,7 @@ class TraderManager:
             events = list(self.replay_events[-120:])
         return {
             "path": str(replay_file_path()),
+            "day_tape_path": str(day_tape_file_path()),
             "events": [
                 {
                     "time": event.get("time_display", ""),
@@ -4377,6 +4466,7 @@ class TraderManager:
             count = 0
             for symbol_bars in data.values():
                 for bar in symbol_bars:
+                    append_market_bar_once(bar, feed=feed, source="market_backfill")
                     self.record_replay_event("market_bar", compact_bar_payload(bar, daily=False))
                     for engine in self.connected_engines():
                         engine.ingest_market_bar(bar, daily=False)
@@ -4414,6 +4504,7 @@ class TraderManager:
             count = 0
             engines = self.connected_engines()
             for _, trade in trade_items:
+                append_market_trade(trade, feed=feed, source="latest_trade_backfill")
                 for engine in engines:
                     engine.update_dashboard_trade(trade, count_volume=False)
                 count += 1
@@ -4468,6 +4559,7 @@ class TraderManager:
             if isinstance(data, dict):
                 for symbol_trades in data.values():
                     for trade in symbol_trades or []:
+                        append_market_trade(trade, feed=feed, source="recent_trade_backfill")
                         for engine in engines:
                             engine.update_dashboard_trade(trade, count_volume=True)
                         trade_count += 1
@@ -4490,17 +4582,33 @@ class TraderManager:
 
     def handle_shared_market_bar(self, bar: Any, daily: bool = False) -> None:
         self.record_market_stream_message("daily_bar" if daily else "bar", bar)
+        append_market_bar_once(
+            bar,
+            feed=self.market_stream.feed if self.market_stream else "",
+            source="market_stream",
+            daily=daily,
+        )
         self.record_replay_event("market_bar", compact_bar_payload(bar, daily=daily))
         for engine in self.connected_engines():
             engine.ingest_market_bar(bar, daily=daily)
 
     def handle_shared_market_quote(self, quote: Any) -> None:
         self.record_market_stream_message("quote", quote)
+        append_market_quote(
+            quote,
+            feed=self.market_stream.feed if self.market_stream else "",
+            source="market_stream",
+        )
         for engine in self.connected_engines():
             engine.update_dashboard_quote(quote)
 
     def handle_shared_market_trade(self, trade: Any) -> None:
         self.record_market_stream_message("trade", trade)
+        append_market_trade(
+            trade,
+            feed=self.market_stream.feed if self.market_stream else "",
+            source="market_stream",
+        )
         with self.lock:
             self.dashboard_trade_backfill_cursor = datetime.now(timezone.utc)
         for engine in self.connected_engines():
@@ -4509,6 +4617,12 @@ class TraderManager:
     def handle_shared_trading_status(self, status: Any) -> None:
         raw = model_dict(status)
         self.record_market_stream_message("status", status)
+        append_market_status(
+            status,
+            feed=self.market_stream.feed if self.market_stream else "",
+            source="market_stream",
+            detail=self.dashboard_engine(None).trading_status_label(raw),
+        )
         self.record_replay_event(
             "market_status",
             {

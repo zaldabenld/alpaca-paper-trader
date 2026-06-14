@@ -19,6 +19,8 @@ __pycache__/
 instance.json
 dashboard-cache.json
 events-*.jsonl
+day-tape/
+tape-*.jsonl
 python-settings.json
 
 dist/
