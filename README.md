@@ -51,11 +51,11 @@ If **Store encrypted for auto-connect** is checked, credentials are stored with 
 
 Use **Connect this account on launch** to control auto-connect per saved account. Existing saved accounts default to connecting on launch unless you turn that off.
 
-The **Dashboard** is the landing page. Once any account is connected, it shows Alpaca market status, the cached top-25 stocks by daily volume, a ticker lookup panel, and a trade-halt monitor for the subscribed dashboard symbols. The top-volume table can be sorted by clicking its column headers.
+The **Dashboard** is the landing page. Once any account is connected, it shows Alpaca market status, the cached top-25 S&P 500 stocks by daily volume, a ticker lookup panel, and a trade-halt monitor for the subscribed dashboard symbols. The top-volume table can be sorted by clicking its column headers.
 
-The top-volume list is seeded from Alpaca's screener endpoint and cached for 10 minutes to avoid unnecessary REST calls. After the list is seeded, the app subscribes only to those 25 symbols over websocket for bars, quotes, trades, and trading-status updates. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
+The top-volume list is ranked from S&P 500 stock snapshots and cached for 10 minutes to avoid unnecessary REST calls. After the list is seeded, the app subscribes only to those 25 symbols over websocket for bars, quotes, trades, and trading-status updates. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
 
-By default, each account trades the dashboard top-25 volume symbols. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade dashboard top 25** is unchecked.
+By default, each account trades the dashboard top-25 S&P 500 volume symbols. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade S&P 500 top 25** is unchecked.
 
 ## Operating Rules
 

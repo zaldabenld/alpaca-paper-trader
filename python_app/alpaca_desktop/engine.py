@@ -11,12 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from alpaca.common.enums import Sort
-from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
+from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.live import StockDataStream
 from alpaca.data.requests import (
-    MostActivesRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
     StockLatestTradeRequest,
@@ -49,9 +48,11 @@ from .day_tape import (
     day_tape_file_path,
 )
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
+from .sp500 import SP500_SYMBOLS
 
 
 DASHBOARD_TOP_LIMIT = 25
+SP500_SNAPSHOT_BATCH_SIZE = 100
 TOP_VOLUME_CACHE_SECONDS = 10 * 60
 TOP_VOLUME_FORCE_COOLDOWN_SECONDS = 2 * 60
 LOOKUP_CACHE_SECONDS = 60
@@ -829,6 +830,40 @@ def fetch_stock_bars_chunked(
     return data
 
 
+def fetch_stock_snapshots_chunked(
+    data_client: StockHistoricalDataClient,
+    symbols: list[str],
+    feed: str,
+) -> dict[str, Any]:
+    snapshots: dict[str, Any] = {}
+    clean_symbols_list = sorted(set(clean_symbols(symbols)))
+    for index in range(0, len(clean_symbols_list), SP500_SNAPSHOT_BATCH_SIZE):
+        batch = clean_symbols_list[index : index + SP500_SNAPSHOT_BATCH_SIZE]
+        if not batch:
+            continue
+        try:
+            response = data_client.get_stock_snapshot(
+                StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed(feed))
+            )
+        except Exception:
+            for symbol in batch:
+                try:
+                    response = data_client.get_stock_snapshot(
+                        StockSnapshotRequest(symbol_or_symbols=symbol, feed=DataFeed(feed))
+                    )
+                except Exception:
+                    continue
+                if isinstance(response, dict):
+                    snapshot = response.get(symbol)
+                    if snapshot is not None:
+                        snapshots[str(symbol).upper()] = snapshot
+            continue
+        if isinstance(response, dict):
+            for symbol, snapshot in response.items():
+                snapshots[str(symbol).upper()] = snapshot
+    return snapshots
+
+
 def merged_symbols(*groups: Any) -> list[str]:
     symbols: list[str] = []
     for group in groups:
@@ -1462,40 +1497,52 @@ class TraderEngine:
             cache_seconds = TOP_VOLUME_FORCE_COOLDOWN_SECONDS if force else TOP_VOLUME_CACHE_SECONDS
             if self.top_volume_rows and now - self.top_volume_last_fetch_at < cache_seconds:
                 return
-            client = self.screener_client
             feed = self.config.feed
+            data_client = self.data_client
             existing_rows = {row.get("symbol"): row for row in self.top_volume_rows}
             cached_rows = load_dashboard_cache_rows()
             latest_statuses = dict(self.latest_trading_statuses)
             halted_symbols = dict(self.halted_symbols)
 
-        if client is None:
+        if data_client is None:
             with self.lock:
                 self.top_volume_error = "Connect an account to populate the dashboard."
             return
 
         try:
-            result = client.get_most_actives(
-                MostActivesRequest(top=DASHBOARD_TOP_LIMIT, by=MostActivesBy.VOLUME)
-            )
-            most_actives = list(getattr(result, "most_actives", []) or [])
-            updated_at = format_timestamp(getattr(result, "last_updated", None)) or datetime.now().strftime(
-                "%b %d, %I:%M:%S %p"
-            )
+            snapshots = fetch_stock_snapshots_chunked(data_client, list(SP500_SYMBOLS), feed)
+            ranked: list[dict[str, Any]] = []
+            for symbol, snapshot in snapshots.items():
+                daily_bar = model_dict(getattr(snapshot, "daily_bar", None))
+                latest_trade = model_dict(getattr(snapshot, "latest_trade", None))
+                daily_volume_raw = whole_number_value(daily_bar.get("volume"))
+                if daily_volume_raw <= 0:
+                    continue
+                ranked.append(
+                    {
+                        "symbol": symbol,
+                        "daily_volume_raw": daily_volume_raw,
+                        "trade_count_raw": whole_number_value(daily_bar.get("trade_count")),
+                        "last_price_raw": latest_trade.get("price") or daily_bar.get("close"),
+                    }
+                )
+
+            ranked.sort(key=lambda item: (-decimal_value(item.get("daily_volume_raw")), str(item.get("symbol"))))
+            updated_at = datetime.now().strftime("%b %d, %I:%M:%S %p")
 
             rows: list[dict[str, Any]] = []
             symbols: list[str] = []
-            for index, item in enumerate(most_actives[:DASHBOARD_TOP_LIMIT], start=1):
-                raw = model_dict(item)
-                symbol = str(raw.get("symbol", "")).strip().upper()
+            for index, item in enumerate(ranked[:DASHBOARD_TOP_LIMIT], start=1):
+                symbol = str(item.get("symbol", "")).strip().upper()
                 if not symbol:
                     continue
                 symbols.append(symbol)
                 previous = existing_rows.get(symbol) or cached_rows.get(symbol, {})
                 status = latest_statuses.get(symbol, {})
                 halted = symbol in halted_symbols
-                daily_volume_raw = whole_number_value(raw.get("volume"))
-                trade_count_raw = whole_number_value(raw.get("trade_count"))
+                daily_volume_raw = whole_number_value(item.get("daily_volume_raw"))
+                trade_count_raw = whole_number_value(item.get("trade_count_raw"))
+                last_price_raw = item.get("last_price_raw") or previous.get("last_price_raw", 0)
                 rows.append(
                     {
                         "rank": index,
@@ -1516,8 +1563,8 @@ class TraderEngine:
                         "stream_volume": previous.get("stream_volume", "0"),
                         "stream_volume_raw": previous.get("stream_volume_raw", 0),
                         "last_trade_side": previous.get("last_trade_side", "-"),
-                        "last_price": previous.get("last_price", "-"),
-                        "last_price_raw": previous.get("last_price_raw", 0),
+                        "last_price": money_or_dash(last_price_raw),
+                        "last_price_raw": last_price_raw,
                         "minute_volume": previous.get("minute_volume", "-"),
                         "minute_volume_raw": previous.get("minute_volume_raw", 0),
                         "last_update": previous.get("last_update", "-"),
@@ -1527,6 +1574,9 @@ class TraderEngine:
                         "halt_reason": halted_symbols.get(symbol, {}).get("detail", ""),
                     }
                 )
+
+            if not rows:
+                raise RuntimeError("No S&P 500 snapshot volume data returned.")
 
             with self.lock:
                 old_symbols = list(self.top_volume_symbols)
@@ -1539,7 +1589,7 @@ class TraderEngine:
             append_day_tape_event(
                 "top_volume_snapshot",
                 {
-                    "source": "screener",
+                    "source": "sp500_snapshot_volume",
                     "feed": feed,
                     "force": force,
                     "updated_at": updated_at,
@@ -1556,7 +1606,7 @@ class TraderEngine:
                 self.top_volume_error = str(exc)
             append_day_tape_event(
                 "top_volume_error",
-                {"source": "screener", "feed": feed, "error": str(exc)},
+                {"source": "sp500_snapshot_volume", "feed": feed, "error": str(exc)},
             )
             self.log("error", f"Top-volume dashboard refresh failed: {exc}")
 
