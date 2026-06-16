@@ -135,6 +135,16 @@ To summarize local tape size:
 .\.venv\Scripts\python.exe scripts\day_tape_summary.py
 ```
 
+To review strategy behavior and tape quality for the latest day:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\day_tape_review.py --days 1
+```
+
+The reviewer calls out strategy buckets that stayed flat all day, dominant hold reasons,
+top-volume universe issues such as too many sub-$5 symbols, stream/top-volume errors,
+parse errors, order-intent counts, and concrete follow-ups for the next tuning pass.
+
 To fast-forward a week of tape without touching Alpaca:
 
 ```powershell
