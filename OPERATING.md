@@ -43,6 +43,6 @@ Use **Purge Selected** when strategy changes require a clean run:
 - High trade volume must never override direction. A short-window bounce in an all-day loser is not a valid entry unless the broader session trend and VWAP relationship have also turned positive.
 - Same-symbol re-entry is score based: after any strategy/protective exit is submitted or filled, that symbol must return with the configured score boost before it can be bought again. This is intended to stop same-day churn without adding blind PDT/cooldown logic.
 - Filled exits, including broker/protective stop fills and take-profit/winner exits, also create the re-entry score boost.
-- Inverse ETFs are controlled by the profile's inverse ETF mode: exclude, allow, or inverse-only. They should not be mixed into the normal bullish strategy by accident.
+- Inverse ETFs are controlled by the profile's inverse ETF mode: exclude, allow, or inverse-only. They should not be mixed into the normal bullish strategy by accident, except for the bounded SPY/QQQ downturn overlay that deliberately scans a small inverse ETF watchlist when broad-market conditions are weak.
 - PDT guards, day-entry locks, day-exit locks, daily-loss stops, and risk-per-trade sizing must not be added back into the entry path for this version.
 - Existing long positions are skipped by the entry path and handled only by the exit manager.

@@ -53,9 +53,9 @@ Use **Connect this account on launch** to control auto-connect per saved account
 
 The **Dashboard** is the landing page. Once any account is connected, it shows Alpaca market status, the cached top-25 S&P 500 stocks by daily volume, a ticker lookup panel, and a trade-halt monitor for the subscribed dashboard symbols. The top-volume table can be sorted by clicking its column headers.
 
-The top-volume list is ranked from S&P 500 stock snapshots and cached for 10 minutes to avoid unnecessary REST calls. After the list is seeded, the app subscribes only to those 25 symbols over websocket for bars, quotes, trades, and trading-status updates. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
+The top-volume list is ranked from S&P 500 stock snapshots and cached for 10 minutes to avoid unnecessary REST calls. After the list is seeded, the app subscribes to those 25 symbols over websocket for bars, quotes, trades, and trading-status updates. If SPY/QQQ show a broad intraday downturn, a small inverse ETF overlay can be added to the scan and stream universe. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
 
-By default, each account trades the dashboard top-25 S&P 500 volume symbols. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade S&P 500 top 25** is unchecked.
+By default, each account trades the dashboard top-25 S&P 500 volume symbols. During a broad SPY/QQQ selloff, the app can also scan a bounded inverse ETF watchlist (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`) so the strategy has bearish-market candidates without replacing the S&P stock universe. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade S&P 500 top 25** is unchecked.
 
 ## Operating Rules
 
@@ -71,7 +71,7 @@ See `OPERATING.md` for the short operating checklist that should guide future ch
 
 Profiles set the main trading parameters:
 
-- **Conservative**: smaller trade size, tighter exposure, stricter volume confirmation.
+- **Conservative**: smaller trade size and tighter exposure, with less brittle signal gates than before so it can still take high-quality candidates.
 - **Neutral**: balanced defaults.
 - **Aggressive**: larger trade size, wider exposure, looser volume confirmation.
 
@@ -105,7 +105,7 @@ The included strategy is intentionally conservative and transparent:
 - It sorts the eligible pool by score and buys the best candidates until max slots or block budget are full.
 - It skips symbols already owned or already pending entry.
 - It blocks same-symbol churn by requiring a higher score after an exit before that symbol can be re-entered.
-- It has an inverse ETF mode so inverse funds can be excluded from the normal bullish profile, allowed manually, or used by an inverse-only profile.
+- It has an inverse ETF mode so inverse funds can be excluded from the normal bullish profile, allowed manually, used by an inverse-only profile, or temporarily scanned during a broad SPY/QQQ downturn.
 - It uses market orders against the Alpaca paper endpoint.
 - It keeps entries fractional and manages exits with fractional DAY stop/limit orders using the configured take-profit and stop-loss percentages.
 - It classifies open orders as pending entries, strategy exits, protective exits, or manual/unknown orders so protective stop/limit orders do not count as new entries.

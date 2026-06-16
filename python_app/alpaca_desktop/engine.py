@@ -132,6 +132,12 @@ INVERSE_ETF_SYMBOLS = {
     "SARK",
 }
 
+DOWNTURN_PROXY_SYMBOLS = ("SPY", "QQQ")
+DOWNTURN_INVERSE_ETF_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")
+DOWNTURN_SESSION_DROP_PERCENT = Decimal("-0.75")
+DOWNTURN_BROAD_DROP_PERCENT = Decimal("-0.35")
+DOWNTURN_MOMENTUM_DROP_PERCENT = Decimal("-0.10")
+
 LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
     "BOIL",
     "BULZ",
@@ -167,12 +173,12 @@ LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
 ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
     "conservative": {
         "min_price": Decimal("5"),
-        "min_recent_momentum": Decimal("0.05"),
+        "min_recent_momentum": Decimal("0.03"),
         "max_vwap_extension": Decimal("3.0"),
         "max_session_extension": Decimal("6.0"),
         "max_session_pullback": Decimal("1.5"),
         "max_recent_pullback": Decimal("0.75"),
-        "late_momentum_floor": Decimal("0.65"),
+        "late_momentum_floor": Decimal("0.50"),
     },
     "neutral": {
         "min_price": Decimal("3"),
@@ -215,23 +221,23 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "risk_per_trade_percent": "0",
         "max_total_exposure_percent": "12",
         "max_open_positions": 2,
-        "short_period": 14,
-        "long_period": 35,
+        "short_period": 9,
+        "long_period": 21,
         "rsi_period": 14,
-        "buy_rsi_min": "45",
-        "buy_rsi_max": "60",
+        "buy_rsi_min": "40",
+        "buy_rsi_max": "70",
         "sell_rsi": "70",
-        "min_entry_score": "45",
-        "momentum_period": 10,
-        "min_momentum_percent": "0.15",
+        "min_entry_score": "38",
+        "momentum_period": 6,
+        "min_momentum_percent": "0.05",
         "smi_period": 10,
-        "min_smi": "15",
+        "min_smi": "5",
         "atr_period": 14,
-        "min_buy_volume_ratio": "0.52",
+        "min_buy_volume_ratio": "0.50",
         "reentry_score_boost": "12",
         "inverse_etf_mode": "exclude",
         "volume_period": 20,
-        "volume_multiplier": "1.15",
+        "volume_multiplier": "1.0",
         "min_avg_volume": "0",
         "take_profit_percent": "3.0",
         "profit_trail_start_percent": "0",
@@ -241,7 +247,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "exit_time_in_force": "day",
         "cooldown_minutes": 0,
         "entry_open_guard_minutes": 15,
-        "entry_close_guard_minutes": 30,
+        "entry_close_guard_minutes": 15,
     },
     "neutral": {
         "profile": "neutral",
@@ -550,9 +556,60 @@ class AccountSettings(BaseModel):
     config: AppConfig
 
 
+LEGACY_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
+    "short_period": 14,
+    "long_period": 35,
+    "buy_rsi_min": Decimal("45"),
+    "buy_rsi_max": Decimal("60"),
+    "min_entry_score": Decimal("45"),
+    "momentum_period": 10,
+    "min_momentum_percent": Decimal("0.15"),
+    "min_smi": Decimal("15"),
+    "min_buy_volume_ratio": Decimal("0.52"),
+    "volume_multiplier": Decimal("1.15"),
+    "entry_close_guard_minutes": 30,
+}
+
+RETUNED_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
+    "short_period": 9,
+    "long_period": 21,
+    "buy_rsi_min": Decimal("40"),
+    "buy_rsi_max": Decimal("70"),
+    "min_entry_score": Decimal("38"),
+    "momentum_period": 6,
+    "min_momentum_percent": Decimal("0.05"),
+    "min_smi": Decimal("5"),
+    "min_buy_volume_ratio": Decimal("0.50"),
+    "volume_multiplier": Decimal("1.0"),
+    "entry_close_guard_minutes": 15,
+}
+
+
 def sanitize_profile_key(value: str) -> str:
     raw = str(value or "").strip().lower().replace(" ", "-")
     return "".join(ch for ch in raw if ch.isalnum() or ch in "-_")
+
+
+def config_value_matches(value: Any, expected: Any) -> bool:
+    if isinstance(expected, Decimal):
+        return decimal_value(value) == expected
+    return value == expected
+
+
+def retune_legacy_conservative_config(config: AppConfig) -> AppConfig:
+    if config.profile != "conservative":
+        return config
+    updates: dict[str, Any] = {}
+    for key, retuned_value in RETUNED_CONSERVATIVE_SIGNAL_DEFAULTS.items():
+        legacy_value = LEGACY_CONSERVATIVE_SIGNAL_DEFAULTS.get(key)
+        if config_value_matches(getattr(config, key), legacy_value):
+            updates[key] = retuned_value
+    if not updates:
+        return config
+    try:
+        return AppConfig(**(config.model_dump(mode="json") | updates))
+    except Exception:
+        return config
 
 
 def config_from_profile(
@@ -563,7 +620,7 @@ def config_from_profile(
     profile_key = sanitize_profile_key(profile) or "neutral"
     catalog = profiles or PROFILE_PRESETS
     if profile_key not in catalog and current:
-        return AppConfig(**(current | {"profile": profile_key}))
+        return retune_legacy_conservative_config(AppConfig(**(current | {"profile": profile_key})))
     preset = dict(catalog.get(profile_key, catalog.get("neutral", PROFILE_PRESETS["neutral"])))
     if current:
         base = dict(current)
@@ -571,10 +628,10 @@ def config_from_profile(
             if key in preset:
                 base[key] = preset[key]
         base["profile"] = profile_key
-        return AppConfig(**base)
+        return retune_legacy_conservative_config(AppConfig(**base))
     base = dict(preset)
     base["profile"] = profile_key
-    return AppConfig(**base)
+    return retune_legacy_conservative_config(AppConfig(**base))
 
 
 def model_dict(model: Any) -> dict[str, Any]:
@@ -952,7 +1009,7 @@ class TraderEngine:
         validation_error = credential_validation_error(api_key, secret_key) if api_key or secret_key else ""
         with self.lock:
             self.name = settings.name.strip() or "Paper Account"
-            self.config = settings.config
+            self.config = retune_legacy_conservative_config(settings.config)
             self.api_key = api_key if not validation_error else ""
             self.secret_key = secret_key if looks_like_secret_key(secret_key) else ""
             self.remember = settings.remember
@@ -971,7 +1028,7 @@ class TraderEngine:
             raise RuntimeError(validation_error)
         with self.lock:
             self.name = payload.name.strip() or "Paper Account"
-            self.config = payload.config
+            self.config = retune_legacy_conservative_config(payload.config)
             if api_key:
                 self.api_key = api_key
             if secret_key:
@@ -992,8 +1049,58 @@ class TraderEngine:
     def trading_symbols(self) -> list[str]:
         with self.lock:
             if self.config.use_top_volume_symbols and self.top_volume_symbols:
-                return list(self.top_volume_symbols[:DASHBOARD_TOP_LIMIT])
-            return list(self.config.symbols)
+                base_symbols = list(self.top_volume_symbols[:DASHBOARD_TOP_LIMIT])
+            else:
+                base_symbols = list(self.config.symbols)
+        return merged_symbols(base_symbols, self.active_downturn_inverse_symbols())
+
+    def active_downturn_inverse_symbols(self) -> list[str]:
+        with self.lock:
+            config = self.config
+            use_top_volume = config.use_top_volume_symbols
+            mode = config.inverse_etf_mode
+        if mode == "inverse_only":
+            return list(DOWNTURN_INVERSE_ETF_SYMBOLS)
+        if use_top_volume and self.market_downturn_active():
+            return list(DOWNTURN_INVERSE_ETF_SYMBOLS)
+        return []
+
+    def downturn_analysis_symbols(self) -> list[str]:
+        with self.lock:
+            use_top_volume = self.config.use_top_volume_symbols
+            mode = self.config.inverse_etf_mode
+        if not use_top_volume and mode != "inverse_only":
+            return []
+        return list(DOWNTURN_PROXY_SYMBOLS) + list(DOWNTURN_INVERSE_ETF_SYMBOLS)
+
+    def market_downturn_active(self) -> bool:
+        decisive_proxy_count = 0
+        broad_weak_proxy_count = 0
+        for symbol in DOWNTURN_PROXY_SYMBOLS:
+            snapshot = self.snapshot(symbol)
+            session_change = getattr(snapshot, "session_change_percent", None)
+            vwap_distance = getattr(snapshot, "vwap_distance_percent", None)
+            if session_change is None or vwap_distance is None:
+                continue
+            below_vwap = vwap_distance < 0
+            if session_change <= DOWNTURN_BROAD_DROP_PERCENT and below_vwap:
+                broad_weak_proxy_count += 1
+            momentum = getattr(snapshot, "momentum_percent", None)
+            long_momentum = getattr(snapshot, "long_momentum_percent", None)
+            momentum_down = momentum is not None and momentum <= DOWNTURN_MOMENTUM_DROP_PERCENT
+            long_down = long_momentum is not None and long_momentum < 0
+            bias_down = snapshot.bias == "Bearish"
+            if session_change <= DOWNTURN_SESSION_DROP_PERCENT and below_vwap and (momentum_down or long_down or bias_down):
+                decisive_proxy_count += 1
+        return decisive_proxy_count >= 1 or broad_weak_proxy_count >= 2
+
+    def downturn_inverse_allowed(self, symbol: str, config: AppConfig) -> bool:
+        clean_symbol = symbol.strip().upper()
+        if clean_symbol not in DOWNTURN_INVERSE_ETF_SYMBOLS:
+            return False
+        if config.inverse_etf_mode == "inverse_only":
+            return True
+        return config.use_top_volume_symbols and self.market_downturn_active()
 
     def position_symbols_for_market_data(self) -> list[str]:
         with self.lock:
@@ -1004,7 +1111,11 @@ class TraderEngine:
             ]
 
     def scan_symbols(self, position_symbols: Any = None) -> list[str]:
-        return merged_symbols(self.trading_symbols(), position_symbols or self.position_symbols_for_market_data())
+        return merged_symbols(
+            self.trading_symbols(),
+            position_symbols or self.position_symbols_for_market_data(),
+            self.downturn_analysis_symbols(),
+        )
 
     def clear_entry_score(self, symbol: str) -> None:
         self.strategy_state.entry_score.pop(symbol.strip().upper(), None)
@@ -1049,7 +1160,7 @@ class TraderEngine:
             self.stop_streams_locked()
             self.close_api_clients_locked()
             self.name = payload.name.strip() or "Paper Account"
-            self.config = payload.config
+            self.config = retune_legacy_conservative_config(payload.config)
             self.api_key = api_key
             self.secret_key = secret_key
             self.remember = payload.remember
@@ -1307,6 +1418,7 @@ class TraderEngine:
                         getattr(bar, "high", None),
                         getattr(bar, "low", None),
                     )
+            entry_symbols = self.trading_symbols()
 
             self.sync_loss_reentry_floors_from_closed_orders(closed_order_dicts)
 
@@ -1419,6 +1531,10 @@ class TraderEngine:
             for symbol in symbols:
                 if should_trade and symbol not in position_symbols and symbol not in entry_symbols:
                     self.clear_entry_score(symbol)
+                    if symbol in DOWNTURN_INVERSE_ETF_SYMBOLS:
+                        self.strategy_state.last_action[symbol] = "Hold (inverse overlay inactive)"
+                    elif symbol in DOWNTURN_PROXY_SYMBOLS and self.config.use_top_volume_symbols:
+                        self.strategy_state.last_action[symbol] = "Hold (market proxy only)"
                 rows.append(self.snapshot(symbol).as_dict())
 
             if should_trade and time.monotonic() - self.last_scan_log_at >= 60:
@@ -1953,7 +2069,7 @@ class TraderEngine:
         return {
             "count": len(items),
             "status": "Halt detected" if items else "No active halts detected",
-            "detail": "Subscribed top-volume symbols only." if not items else "; ".join(
+            "detail": "Subscribed dashboard symbols." if not items else "; ".join(
                 f"{item.get('symbol')}: {item.get('detail')}" for item in items[:3]
             ),
             "items": items,
@@ -2110,6 +2226,8 @@ class TraderEngine:
         clean_symbol = symbol.strip().upper()
         is_inverse = clean_symbol in INVERSE_ETF_SYMBOLS
         is_leveraged_or_volatility = clean_symbol in LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS
+        if self.downturn_inverse_allowed(clean_symbol, config):
+            return ""
         if config.inverse_etf_mode == "exclude" and is_inverse:
             return "Hold (inverse ETF excluded)"
         if config.inverse_etf_mode == "exclude" and is_leveraged_or_volatility:
@@ -4320,13 +4438,13 @@ class TraderManager:
         source = self.shared_market_source()
         ordered_engines = ([source] if source in engines else []) + [engine for engine in engines if engine is not source]
         for engine in ordered_engines:
-            symbols = engine.top_volume_symbols or engine.trading_symbols()
+            symbols = engine.trading_symbols()
             dashboard_symbols = []
             for symbol in symbols:
                 clean = str(symbol or "").strip().upper()
                 if clean and clean not in dashboard_symbols:
                     dashboard_symbols.append(clean)
-                if len(dashboard_symbols) >= DASHBOARD_TOP_LIMIT:
+                if len(dashboard_symbols) >= MARKET_STREAM_SYMBOL_LIMIT:
                     break
             if dashboard_symbols:
                 return dashboard_symbols, list(dashboard_symbols)

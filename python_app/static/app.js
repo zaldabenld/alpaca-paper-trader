@@ -1016,7 +1016,7 @@ function renderDashboard(dashboard) {
   const halt = dashboard.halt_summary || {};
   const haltCount = Number(halt.count || 0);
   els.dashboardHaltStatusText.textContent = halt.status || "No active halts detected";
-  els.dashboardHaltStatusDetail.textContent = halt.detail || "Subscribed S&P 500 top-volume symbols only.";
+  els.dashboardHaltStatusDetail.textContent = halt.detail || "Subscribed dashboard symbols.";
   els.dashboardHaltStatus.classList.toggle("halted", haltCount > 0);
 
   renderMarketStream(dashboard.market_stream || {});
