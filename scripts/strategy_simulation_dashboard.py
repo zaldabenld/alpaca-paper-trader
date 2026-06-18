@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "reports" / "manual"
 JOB_DIR = REPORT_DIR / "dashboard-jobs"
 HUB_SCRIPT = ROOT / "scripts" / "strategy_simulation_hub.py"
-DASHBOARD_VERSION = "2026.06.18-controls-v2"
+DASHBOARD_VERSION = "2026.06.18-profile-builder-v3"
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -323,12 +323,15 @@ INDEX_HTML = r"""<!doctype html>
         <div id="strategySummary" class="summary">No strategy config loaded.</div>
         <div class="editor">
           <div class="editor-head">
-            <label class="inline-check"><input id="useEditedStrategy" type="checkbox" checked /> Use edited controls</label>
+            <label class="inline-check"><input id="useEditedStrategy" type="checkbox" checked /> Use trade profile controls</label>
             <button class="secondary" type="button" onclick="resetEditor()">Reset</button>
           </div>
           <div class="editor-body">
-            <div id="editorEmpty" class="empty-editor">Choose one strategy to edit thresholds, weights, and exits.</div>
-            <div id="editorControls" hidden>
+            <div id="editorEmpty" class="empty-editor" hidden></div>
+            <div id="editorControls">
+              <label>Trade profile name
+                <input id="profileName" value="manual-trade-profile" />
+              </label>
               <details class="editor-group" open>
                 <summary>Entry Thresholds</summary>
                 <div id="entryFields"></div>
@@ -340,6 +343,21 @@ INDEX_HTML = r"""<!doctype html>
               <details class="editor-group" open>
                 <summary>Exit Settings</summary>
                 <div id="exitFields"></div>
+              </details>
+              <details class="editor-group" open>
+                <summary>Replay Settings</summary>
+                <label>Inverse ETFs
+                  <select id="profileInverseMode">
+                    <option value="allow">Allow</option>
+                    <option value="">Use tape setting</option>
+                    <option value="exclude">Exclude</option>
+                    <option value="inverse_only">Inverse only</option>
+                  </select>
+                </label>
+                <div id="simulationFields"></div>
+                <div class="checks">
+                  <label><input id="profileLiquidateOnClose" type="checkbox" checked /> Close liquidation</label>
+                </div>
               </details>
             </div>
           </div>
@@ -417,6 +435,7 @@ INDEX_HTML = r"""<!doctype html>
   </main>
   <script>
     let state = {};
+    let editorInitialized = false;
     const ENTRY_FIELDS = [
       {key: "min_entry_score", label: "Min score", help: "Higher is stricter", min: 0, max: 100, step: 1, off: 0},
       {key: "rsi_min", label: "RSI min", help: "Lower bull-range bound", min: 0, max: 100, step: 1, off: 0},
@@ -463,6 +482,74 @@ INDEX_HTML = r"""<!doctype html>
       {key: "trail_distance_percent", label: "Trail distance %", help: "For trailing exit", min: 0, max: 10, step: 0.05},
       {key: "profit_lock_percent", label: "Profit lock %", help: "For lock exit", min: 0, max: 10, step: 0.05}
     ];
+    const SIMULATION_FIELDS = [
+      {key: "entry_open_guard_minutes", label: "Open guard min", help: "Skip new entries after open", min: 0, max: 120, step: 1, off: 0},
+      {key: "max_hold_minutes", label: "Max hold min", help: "0 disables time exit", min: 0, max: 390, step: 1, off: 0},
+      {key: "min_stop_hold_minutes", label: "Min stop hold min", help: "Delay stop exits", min: 0, max: 120, step: 1, off: 0}
+    ];
+    const DEFAULT_TRADE_PROFILE = {
+      name: "manual-trade-profile",
+      entry: {
+        rsi_min: 40,
+        rsi_max: 70,
+        min_entry_score: 38,
+        min_momentum: 0.05,
+        min_recent_momentum: 0,
+        min_long_momentum: 0,
+        min_session_change: 0,
+        min_vwap_distance: 0,
+        max_vwap_distance: 99,
+        max_session_pullback: 99,
+        max_recent_pullback: 99,
+        min_smi: 5,
+        min_relative_volume: 1,
+        min_price: 0,
+        max_price: 0,
+        max_relative_volume: 0,
+        max_atr_percent: 0,
+        max_volatility_percent: 0
+      },
+      score_weights: {
+        momentum: 18,
+        recent_momentum: 10,
+        long_momentum: 12,
+        session_change: 18,
+        relative_volume: 10,
+        vwap_distance: 8,
+        smi: 8,
+        rsi_fit: 6,
+        buy_flow: 4,
+        volatility: 0,
+        volatility_penalty: 3,
+        session_pullback_penalty: 10,
+        recent_pullback_penalty: 7,
+        vwap_extension_penalty: 8,
+        session_extension_penalty: 4,
+        smi_overheat_penalty: 4
+      },
+      exits: [
+        {
+          name: "profile_exit",
+          exit_style: "fixed",
+          take_profit_percent: 3,
+          stop_loss_percent: 2,
+          reentry_score_boost: 12,
+          trail_activation_percent: 0,
+          trail_distance_percent: 0,
+          profit_lock_percent: 0
+        }
+      ],
+      simulation: {
+        simulation_inverse_etf_mode: "allow",
+        entry_open_guard_minutes: 15,
+        max_hold_minutes: 0,
+        min_stop_hold_minutes: 0,
+        liquidate_on_close: true,
+        liquidate_at_end: true,
+        simulation_max_positions: 20,
+        simulation_sizing_positions: 20
+      }
+    };
     function fmtTime(value) {
       if (!value) return "";
       const d = new Date(value * 1000);
@@ -478,6 +565,7 @@ INDEX_HTML = r"""<!doctype html>
       state = await api("/api/state");
       populateConfigs();
       populateStrategyControls({preserve: true});
+      if (!editorInitialized) renderEditor();
       renderJobs();
       renderReports();
       document.querySelector("#refreshStatus").textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -506,6 +594,12 @@ INDEX_HTML = r"""<!doctype html>
       const selected = document.querySelector("#exitSelect").value;
       if (!strategy || !selected) return null;
       return (strategy.exits || []).find(exit => exit.name === selected) || null;
+    }
+    function activeProfileSource() {
+      return selectedStrategyItem() || DEFAULT_TRADE_PROFILE;
+    }
+    function activeExitSource() {
+      return selectedExitItem() || (activeProfileSource().exits || DEFAULT_TRADE_PROFILE.exits)[0] || DEFAULT_TRADE_PROFILE.exits[0];
     }
     function numericValue(value, fallback = 0) {
       const parsed = Number(value);
@@ -610,22 +704,27 @@ INDEX_HTML = r"""<!doctype html>
       container.insertBefore(styleRow, container.firstChild);
     }
     function resetEditor() {
+      editorInitialized = false;
       renderEditor();
     }
     function renderEditor() {
-      const strategy = selectedStrategyItem();
+      const strategy = activeProfileSource();
       const empty = document.querySelector("#editorEmpty");
       const controls = document.querySelector("#editorControls");
-      if (!strategy) {
-        empty.hidden = false;
-        controls.hidden = true;
-        return;
-      }
       empty.hidden = true;
       controls.hidden = false;
+      const profileName = document.querySelector("#profileName");
+      if (!editorInitialized || profileName.value.trim() === "") {
+        profileName.value = strategy.name || DEFAULT_TRADE_PROFILE.name;
+      }
       renderNumericControls(document.querySelector("#entryFields"), ENTRY_FIELDS, strategy.entry || {}, "entry", true);
       renderWeightControls(document.querySelector("#weightFields"), strategy.score_weights || {});
-      renderExitControls(document.querySelector("#exitFields"), selectedExitItem());
+      renderExitControls(document.querySelector("#exitFields"), activeExitSource());
+      const simulation = {...DEFAULT_TRADE_PROFILE.simulation, ...(strategy.simulation || {})};
+      document.querySelector("#profileInverseMode").value = simulation.simulation_inverse_etf_mode ?? "allow";
+      document.querySelector("#profileLiquidateOnClose").checked = simulation.liquidate_on_close !== false;
+      renderNumericControls(document.querySelector("#simulationFields"), SIMULATION_FIELDS, simulation, "simulation", true);
+      editorInitialized = true;
     }
     function collectNumericFields(fields, section, fallback, withToggle) {
       const result = {};
@@ -658,19 +757,34 @@ INDEX_HTML = r"""<!doctype html>
       const style = document.querySelector("#exit_exit_style_value");
       result.exit_style = style ? style.value : (exit ? exit.exit_style : "fixed");
       Object.assign(result, collectNumericFields(EXIT_FIELDS, "exit", exit || {}, false));
-      result.name = exit && exit.name ? exit.name : `${result.exit_style || "fixed"}_custom`;
+      result.name = "profile_exit";
+      return result;
+    }
+    function editedSimulationPayload() {
+      const source = activeProfileSource();
+      const simulation = {...DEFAULT_TRADE_PROFILE.simulation, ...(source.simulation || {})};
+      const result = {
+        ...simulation,
+        ...collectNumericFields(SIMULATION_FIELDS, "simulation", simulation, true)
+      };
+      result.simulation_inverse_etf_mode = document.querySelector("#profileInverseMode").value;
+      result.liquidate_on_close = document.querySelector("#profileLiquidateOnClose").checked;
+      result.liquidate_at_end = true;
+      result.simulation_max_positions = 20;
+      result.simulation_sizing_positions = 20;
       return result;
     }
     function editedStrategyPayload() {
-      const strategy = selectedStrategyItem();
-      if (!strategy || !document.querySelector("#useEditedStrategy").checked) return null;
-      const selectedExit = selectedExitItem();
+      const strategy = activeProfileSource();
+      if (!document.querySelector("#useEditedStrategy").checked) return null;
+      const selectedExit = activeExitSource();
+      const profileName = document.querySelector("#profileName").value.trim() || DEFAULT_TRADE_PROFILE.name;
       return {
         source_name: strategy.name,
-        name: strategy.name,
+        name: profileName,
         entry: collectNumericFields(ENTRY_FIELDS, "entry", strategy.entry || {}, true),
         score_weights: collectWeightFields(strategy.score_weights || {}),
-        exits: selectedExit ? [collectExitFields(selectedExit)] : (strategy.exits || []).map(exit => ({...exit}))
+        exits: [collectExitFields(selectedExit)]
       };
     }
     function populateConfigs() {
@@ -696,7 +810,7 @@ INDEX_HTML = r"""<!doctype html>
       strategySelect.innerHTML = "";
       const all = document.createElement("option");
       all.value = "";
-      all.textContent = item ? `All strategies (${item.strategy_count || 0})` : "All strategies";
+      all.textContent = "New trade profile";
       strategySelect.appendChild(all);
       for (const strategy of (item ? item.strategies || [] : [])) {
         const opt = document.createElement("option");
@@ -709,7 +823,6 @@ INDEX_HTML = r"""<!doctype html>
       }
       populateExitControls(preserve ? document.querySelector("#exitSelect").value : "");
       renderStrategySummary();
-      renderEditor();
     }
     function populateExitControls(preferred = "") {
       const exitSelect = document.querySelector("#exitSelect");
@@ -719,16 +832,13 @@ INDEX_HTML = r"""<!doctype html>
       if (strategy) {
         for (const exit of strategy.exits || []) exitNames.add(exit.name);
         for (const name of strategy.exit_names || []) exitNames.add(name);
-      } else if (item) {
-        for (const rawStrategy of item.strategies || []) {
-          for (const exit of rawStrategy.exits || []) exitNames.add(exit.name);
-          for (const name of rawStrategy.exit_names || []) exitNames.add(name);
-        }
+      } else {
+        for (const exit of DEFAULT_TRADE_PROFILE.exits || []) exitNames.add(exit.name);
       }
       exitSelect.innerHTML = "";
       const all = document.createElement("option");
       all.value = "";
-      all.textContent = `All exits (${exitNames.size})`;
+      all.textContent = strategy ? `All exits (${exitNames.size})` : "Profile exit";
       exitSelect.appendChild(all);
       for (const name of Array.from(exitNames).sort()) {
         const opt = document.createElement("option");
@@ -830,7 +940,8 @@ INDEX_HTML = r"""<!doctype html>
         scan_interval_seconds: Number(document.querySelector("#scanInterval").value || 15),
         allow_partial: document.querySelector("#allowPartial").checked,
         collect_trades: document.querySelector("#collectTrades").checked,
-        custom_strategy: editedStrategyPayload()
+        custom_strategy: editedStrategyPayload(),
+        custom_simulation: document.querySelector("#useEditedStrategy").checked ? editedSimulationPayload() : null
       };
     }
     function presetScreen() {
@@ -843,6 +954,7 @@ INDEX_HTML = r"""<!doctype html>
       document.querySelector("#collectTrades").checked = false;
       document.querySelector("#runName").value = "dashboard-bars-screen";
       renderStrategySummary();
+      editorInitialized = false;
       renderEditor();
     }
     function presetValidate() {
@@ -860,22 +972,26 @@ INDEX_HTML = r"""<!doctype html>
       document.querySelector("#collectTrades").checked = false;
       document.querySelector("#runName").value = "dashboard-trade-validate";
       renderStrategySummary();
+      editorInitialized = false;
       renderEditor();
     }
     document.querySelector("#config").addEventListener("change", () => {
       populateStrategyControls({preserve: false});
       syncCandidateFromMenus();
+      editorInitialized = false;
       renderEditor();
     });
     document.querySelector("#strategySelect").addEventListener("change", () => {
       populateExitControls("");
       syncCandidateFromMenus();
       renderStrategySummary();
+      editorInitialized = false;
       renderEditor();
     });
     document.querySelector("#exitSelect").addEventListener("change", () => {
       syncCandidateFromMenus();
       renderStrategySummary();
+      editorInitialized = false;
       renderEditor();
     });
     document.querySelector("#runForm").addEventListener("submit", async (event) => {
@@ -1078,6 +1194,13 @@ def write_dashboard_config(base_config: Path, payload: dict[str, Any], job_id: s
     config["run_name"] = str(payload.get("run_name") or f"dashboard-custom-{job_id}")
     config["notes"] = "Dashboard-generated replay config. Source config is unchanged."
     config["strategies"] = [strategy]
+    settings = config.get("simulation") if isinstance(config.get("simulation"), dict) else {}
+    custom_settings = payload.get("custom_simulation") if isinstance(payload.get("custom_simulation"), dict) else {}
+    if custom_settings:
+        settings = {**settings, **scalar_map(custom_settings)}
+        settings["simulation_max_positions"] = 20
+        settings["simulation_sizing_positions"] = 20
+        config["simulation"] = settings
     JOB_DIR.mkdir(parents=True, exist_ok=True)
     path = JOB_DIR / f"{job_id}-config.json"
     path.write_text(json.dumps(config, indent=2), encoding="utf-8")
