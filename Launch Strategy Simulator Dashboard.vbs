@@ -7,25 +7,35 @@ pythonExe = fso.BuildPath(root, ".venv\Scripts\python.exe")
 dashboardScript = fso.BuildPath(root, "scripts\strategy_simulation_dashboard.py")
 cmdLauncher = fso.BuildPath(root, "Launch Strategy Simulator Dashboard.cmd")
 dashboardUrl = "http://127.0.0.1:8787/"
+expectedVersion = "2026.06.18-controls-v2"
 edgeProfile = shell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\AlpacaPaperTrader\StrategySimulatorEdgeProfile"
 
 Function Quote(value)
     Quote = Chr(34) & value & Chr(34)
 End Function
 
-Function IsAlive(url)
-    IsAlive = False
+Function DashboardState(url)
+    DashboardState = ""
     On Error Resume Next
     Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
     http.setTimeouts 500, 500, 500, 500
     http.open "GET", url & "api/state", False
     http.send
     If Err.Number = 0 And http.status >= 200 And http.status < 500 Then
-        IsAlive = True
+        DashboardState = http.responseText
     End If
     Err.Clear
     On Error GoTo 0
 End Function
+
+Function IsAlive(url)
+    IsAlive = Len(DashboardState(url)) > 0
+End Function
+
+Sub StopStaleDashboard()
+    ps = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*strategy_simulation_dashboard.py*' -and $_.CommandLine -like '*--port 8787*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " & Quote(ps), 0, True
+End Sub
 
 Function EdgePath()
     candidates = Array( _
@@ -54,9 +64,14 @@ Sub OpenDashboard(url)
     End If
 End Sub
 
-If IsAlive(dashboardUrl) Then
-    OpenDashboard dashboardUrl
-    WScript.Quit
+stateText = DashboardState(dashboardUrl)
+If Len(stateText) > 0 Then
+    If InStr(1, stateText, expectedVersion, vbTextCompare) > 0 Or InStr(1, stateText, """status"": ""running""", vbTextCompare) > 0 Then
+        OpenDashboard dashboardUrl
+        WScript.Quit
+    End If
+    StopStaleDashboard
+    WScript.Sleep 800
 End If
 
 If fso.FileExists(pythonw) Then
