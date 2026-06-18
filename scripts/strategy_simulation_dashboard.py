@@ -188,6 +188,16 @@ INDEX_HTML = r"""<!doctype html>
       white-space: pre-wrap;
     }
     .muted { color: var(--muted); }
+    .summary {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      margin: -2px 0 12px;
+      background: #fbfcfe;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .summary strong { color: var(--text); }
     @media (max-width: 900px) {
       main { grid-template-columns: 1fr; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -208,6 +218,15 @@ INDEX_HTML = r"""<!doctype html>
         <label>Config
           <select id="config"></select>
         </label>
+        <div class="grid">
+          <label>Strategy
+            <select id="strategySelect"></select>
+          </label>
+          <label>Exit
+            <select id="exitSelect"></select>
+          </label>
+        </div>
+        <div id="strategySummary" class="summary">No strategy config loaded.</div>
         <label>Run name
           <input id="runName" value="manual-dashboard-run" />
         </label>
@@ -233,8 +252,8 @@ INDEX_HTML = r"""<!doctype html>
         <label>Bucket contains
           <input id="bucketContains" placeholder="profile=aggressive, max_trade=50" />
         </label>
-        <label>Candidate contains
-          <input id="candidateContains" placeholder="h2-relative-strength-vwap" />
+        <label>Candidate filter
+          <input id="candidateContains" placeholder="h2-relative-strength-vwap|fixed_2.5_1.25" />
         </label>
         <div class="grid">
           <label>Top rows
@@ -294,17 +313,134 @@ INDEX_HTML = r"""<!doctype html>
     }
     async function refresh() {
       state = await api("/api/state");
-      const config = document.querySelector("#config");
-      config.innerHTML = "";
-      for (const item of state.configs) {
-        const opt = document.createElement("option");
-        opt.value = item.path;
-        opt.textContent = item.name;
-        if (item.name === "researched-weighted-strategies.json") opt.selected = true;
-        config.appendChild(opt);
-      }
+      populateConfigs();
+      populateStrategyControls({preserve: true});
       renderJobs();
       renderReports();
+    }
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[ch]));
+    }
+    function selectedConfigItem() {
+      const config = document.querySelector("#config");
+      return (state.configs || []).find(item => item.path === config.value) || null;
+    }
+    function selectedStrategyItem() {
+      const item = selectedConfigItem();
+      const selected = document.querySelector("#strategySelect").value;
+      if (!item || !selected) return null;
+      return (item.strategies || []).find(strategy => strategy.name === selected) || null;
+    }
+    function populateConfigs() {
+      const config = document.querySelector("#config");
+      const previous = config.value;
+      config.innerHTML = "";
+      const configs = state.configs || [];
+      const fallback = configs.find(item => item.name === "researched-weighted-strategies.json") || configs[0];
+      let selected = previous && configs.some(item => item.path === previous) ? previous : (fallback ? fallback.path : "");
+      for (const item of configs) {
+        const opt = document.createElement("option");
+        opt.value = item.path;
+        opt.textContent = `${item.name} (${item.candidate_count || 0})`;
+        if (item.path === selected) opt.selected = true;
+        config.appendChild(opt);
+      }
+    }
+    function populateStrategyControls(options = {}) {
+      const preserve = options.preserve !== false;
+      const strategySelect = document.querySelector("#strategySelect");
+      const previous = preserve ? strategySelect.value : "";
+      const item = selectedConfigItem();
+      strategySelect.innerHTML = "";
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = item ? `All strategies (${item.strategy_count || 0})` : "All strategies";
+      strategySelect.appendChild(all);
+      for (const strategy of (item ? item.strategies || [] : [])) {
+        const opt = document.createElement("option");
+        opt.value = strategy.name;
+        opt.textContent = `${strategy.name} (${(strategy.exit_names || []).length} exits)`;
+        strategySelect.appendChild(opt);
+      }
+      if (previous && Array.from(strategySelect.options).some(opt => opt.value === previous)) {
+        strategySelect.value = previous;
+      }
+      populateExitControls(preserve ? document.querySelector("#exitSelect").value : "");
+      renderStrategySummary();
+    }
+    function populateExitControls(preferred = "") {
+      const exitSelect = document.querySelector("#exitSelect");
+      const item = selectedConfigItem();
+      const strategy = selectedStrategyItem();
+      const exitNames = new Set();
+      if (strategy) {
+        for (const name of strategy.exit_names || []) exitNames.add(name);
+      } else if (item) {
+        for (const rawStrategy of item.strategies || []) {
+          for (const name of rawStrategy.exit_names || []) exitNames.add(name);
+        }
+      }
+      exitSelect.innerHTML = "";
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = `All exits (${exitNames.size})`;
+      exitSelect.appendChild(all);
+      for (const name of Array.from(exitNames).sort()) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        exitSelect.appendChild(opt);
+      }
+      if (preferred && Array.from(exitSelect.options).some(opt => opt.value === preferred)) {
+        exitSelect.value = preferred;
+      }
+    }
+    function candidateFromMenus() {
+      const strategy = document.querySelector("#strategySelect").value;
+      const exit = document.querySelector("#exitSelect").value;
+      if (strategy && exit) return `${strategy}|${exit}`;
+      if (strategy) return strategy;
+      if (exit) return `|${exit}`;
+      return "";
+    }
+    function syncCandidateFromMenus() {
+      document.querySelector("#candidateContains").value = candidateFromMenus();
+    }
+    function renderStrategySummary() {
+      const el = document.querySelector("#strategySummary");
+      const item = selectedConfigItem();
+      const strategy = selectedStrategyItem();
+      if (!item) {
+        el.textContent = "No strategy config loaded.";
+        return;
+      }
+      if (!strategy) {
+        el.innerHTML = `<strong>${escapeHtml(item.name)}</strong><br>${item.strategy_count || 0} strategies, ${item.candidate_count || 0} candidate/exit combinations.`;
+        return;
+      }
+      const entry = strategy.entry || {};
+      const weights = Object.entries(strategy.score_weights || {})
+        .sort((a, b) => Math.abs(Number(b[1] || 0)) - Math.abs(Number(a[1] || 0)))
+        .slice(0, 5)
+        .map(([key, value]) => `${key} ${value}`)
+        .join(", ");
+      const parts = [
+        `score ${entry.min_entry_score ?? ""}`,
+        `RSI ${entry.rsi_min ?? ""}-${entry.rsi_max ?? ""}`,
+        `mom ${entry.min_momentum ?? ""}`,
+        `recent ${entry.min_recent_momentum ?? ""}`,
+        `session ${entry.min_session_change ?? ""}`,
+        `VWAP ${entry.min_vwap_distance ?? ""}-${entry.max_vwap_distance ?? ""}`,
+        `SMI ${entry.min_smi ?? ""}`,
+        `rel vol ${entry.min_relative_volume ?? ""}`
+      ].filter(part => !part.endsWith(" "));
+      el.innerHTML = `<strong>${escapeHtml(strategy.name)}</strong><br>${escapeHtml(parts.join(" | "))}<br>Top weights: ${escapeHtml(weights || "none")}`;
     }
     function statusClass(status) {
       if (status === "running") return "running";
@@ -360,17 +496,43 @@ INDEX_HTML = r"""<!doctype html>
     function presetScreen() {
       document.querySelector("#priceSource").value = "bars";
       document.querySelector("#slippage").value = "10";
+      document.querySelector("#strategySelect").value = "";
+      populateExitControls("");
+      document.querySelector("#exitSelect").value = "";
       document.querySelector("#candidateContains").value = "";
       document.querySelector("#collectTrades").checked = false;
       document.querySelector("#runName").value = "dashboard-bars-screen";
+      renderStrategySummary();
     }
     function presetValidate() {
       document.querySelector("#priceSource").value = "trades";
       document.querySelector("#slippage").value = "5,10,15";
-      document.querySelector("#candidateContains").value = "h2-relative-strength-vwap";
+      const strategySelect = document.querySelector("#strategySelect");
+      if (Array.from(strategySelect.options).some(opt => opt.value === "h2-relative-strength-vwap")) {
+        strategySelect.value = "h2-relative-strength-vwap";
+        populateExitControls("");
+        document.querySelector("#exitSelect").value = "";
+        syncCandidateFromMenus();
+      } else {
+        document.querySelector("#candidateContains").value = "h2-relative-strength-vwap";
+      }
       document.querySelector("#collectTrades").checked = false;
       document.querySelector("#runName").value = "dashboard-trade-validate";
+      renderStrategySummary();
     }
+    document.querySelector("#config").addEventListener("change", () => {
+      populateStrategyControls({preserve: false});
+      syncCandidateFromMenus();
+    });
+    document.querySelector("#strategySelect").addEventListener("change", () => {
+      populateExitControls("");
+      syncCandidateFromMenus();
+      renderStrategySummary();
+    });
+    document.querySelector("#exitSelect").addEventListener("change", () => {
+      syncCandidateFromMenus();
+      renderStrategySummary();
+    });
     document.querySelector("#runForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       const job = await api("/api/run", {
@@ -422,12 +584,60 @@ def file_item(path: Path) -> dict[str, Any]:
     }
 
 
+def scalar_map(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key, raw in value.items():
+        if isinstance(raw, (str, int, float, bool)) or raw is None:
+            result[str(key)] = raw
+    return result
+
+
+def config_strategy_items(path: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    strategies = payload.get("strategies")
+    if not isinstance(strategies, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for raw_strategy in strategies:
+        if not isinstance(raw_strategy, dict):
+            continue
+        entry = raw_strategy.get("entry") if isinstance(raw_strategy.get("entry"), dict) else {}
+        name = str(raw_strategy.get("name") or entry.get("name") or "manual")
+        exits = raw_strategy.get("exits")
+        exit_names: list[str] = []
+        if isinstance(exits, list):
+            for raw_exit in exits:
+                if isinstance(raw_exit, dict):
+                    exit_names.append(str(raw_exit.get("name") or "manual_exit"))
+        items.append(
+            {
+                "name": name,
+                "entry": scalar_map(entry),
+                "score_weights": scalar_map(raw_strategy.get("score_weights")),
+                "exit_names": exit_names or ["manual_exit"],
+            }
+        )
+    return items
+
+
 def list_configs() -> list[dict[str, Any]]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(
-        [file_item(path) for path in REPORT_DIR.glob("*.json") if "T" not in path.stem],
-        key=lambda item: item["name"].lower(),
-    )
+    items: list[dict[str, Any]] = []
+    for path in REPORT_DIR.glob("*.json"):
+        if "T" in path.stem:
+            continue
+        item = file_item(path)
+        strategies = config_strategy_items(path)
+        item["strategies"] = strategies
+        item["strategy_count"] = len(strategies)
+        item["candidate_count"] = sum(len(strategy["exit_names"]) for strategy in strategies)
+        items.append(item)
+    return sorted(items, key=lambda item: item["name"].lower())
 
 
 def list_reports() -> list[dict[str, Any]]:

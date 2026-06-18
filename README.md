@@ -195,7 +195,7 @@ To use a local dashboard for manual replay runs:
 .\.venv\Scripts\python.exe scripts\strategy_simulation_dashboard.py --port 8787 --open
 ```
 
-The dashboard is localhost-only and runs replay jobs in the background through `strategy_simulation_hub.py`. It does not connect to Alpaca, change credentials, or alter saved account settings. Use the **Bar Screen** preset for fast candidate shortlisting, then the **Trade Validate** preset for trade-price replay at 5/10/15 bps. Dashboard job logs are stored in `reports\manual\dashboard-jobs\`.
+The dashboard is localhost-only and runs replay jobs in the background through `strategy_simulation_hub.py`. It does not connect to Alpaca, change credentials, or alter saved account settings. Pick the strategy and exit from the selected config, or leave both set to all to test every candidate/exit combination in that file. Use the **Bar Screen** preset for fast candidate shortlisting, then the **Trade Validate** preset for trade-price replay at 5/10/15 bps. Dashboard job logs are stored in `reports\manual\dashboard-jobs\`.
 
 To audit selected candidate reports for risk-adjusted paper-test readiness:
 
