@@ -65,8 +65,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 30,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -138,8 +138,8 @@
         "max_recent_pullback": 0.55,
         "min_smi": 40,
         "min_relative_volume": 1.2,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -211,8 +211,8 @@
         "max_recent_pullback": 0.45,
         "min_smi": 35,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 250,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -284,8 +284,8 @@
         "max_recent_pullback": 0.45,
         "min_smi": 50,
         "min_relative_volume": 1.2,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -357,8 +357,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 35,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -430,8 +430,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 30,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -478,8 +478,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 30,
         "min_relative_volume": 0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -526,8 +526,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 30,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -574,8 +574,8 @@
         "max_recent_pullback": 1.25,
         "min_smi": 30,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -622,8 +622,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 0,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -670,8 +670,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 30,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {
@@ -718,8 +718,8 @@
         "max_recent_pullback": 0.6,
         "min_smi": 30,
         "min_relative_volume": 1.0,
-        "min_price": 2,
-        "max_price": 300,
+        "min_price": 0,
+        "max_price": 0,
         "score_bias": 0
       },
       "score_weights": {

@@ -20,7 +20,6 @@ COMPARE_KEYS = [
     "min_session_change_percent",
     "min_vwap_distance_percent",
     "max_vwap_distance_percent",
-    "max_entry_price",
     "max_session_pullback_percent",
     "max_recent_pullback_percent",
     "late_momentum_floor_percent",

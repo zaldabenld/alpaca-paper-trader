@@ -7,7 +7,7 @@ pythonExe = fso.BuildPath(root, ".venv\Scripts\python.exe")
 dashboardScript = fso.BuildPath(root, "scripts\strategy_simulation_dashboard.py")
 cmdLauncher = fso.BuildPath(root, "Launch Strategy Simulator Dashboard.cmd")
 dashboardUrl = "http://127.0.0.1:8787/"
-expectedVersion = "2026.06.18-profile-builder-v3"
+expectedVersion = "2026.06.18-profile-builder-v4"
 edgeProfile = shell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\AlpacaPaperTrader\StrategySimulatorEdgeProfile"
 
 Function Quote(value)

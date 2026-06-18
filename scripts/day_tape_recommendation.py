@@ -29,7 +29,6 @@ def candidate_summary(item: dict[str, Any]) -> dict[str, Any]:
             "pullback_max": [entry.get("max_session_pullback"), entry.get("max_recent_pullback")],
             "min_smi": entry.get("min_smi"),
             "min_relative_volume": entry.get("min_relative_volume"),
-            "max_price": entry.get("max_price") or "0",
         },
         "exit": {
             "style": candidate.get("exit_style"),
@@ -130,7 +129,6 @@ def app_config_patch(candidate: dict[str, Any]) -> dict[str, Any]:
         "min_session_change_percent": entry.get("min_session_change"),
         "min_vwap_distance_percent": vwap[0],
         "max_vwap_distance_percent": vwap[1],
-        "max_entry_price": entry.get("max_price") or "0",
         "max_session_pullback_percent": pullback[0],
         "max_recent_pullback_percent": pullback[1],
         "late_momentum_floor_percent": "0",
@@ -198,7 +196,6 @@ def markdown_report(source: Path, candidates: list[dict[str, Any]], top: int) ->
                 f"- Pullback max: `{best['entry']['pullback_max'][0]}` / `{best['entry']['pullback_max'][1]}`",
                 f"- SMI: `>= {best['entry']['min_smi']}`",
                 f"- Relative volume: `>= {best['entry']['min_relative_volume']}`",
-                f"- Max entry price: `{best['entry']['max_price']}`",
                 "",
                 "Exit:",
                 f"- Style: `{best['exit']['style']}`",

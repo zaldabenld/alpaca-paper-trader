@@ -248,7 +248,7 @@ The parameter evidence report compares trade-level entry features, selected-gate
 To run leave-one-day-out walk-forward selection, where each held-out tape day is tested using only candidates selected from the other days:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\day_tape_walk_forward.py --days 3 --end-date 20260617 --candidate-mode pricebox --exit-mode fixed --bucket-contains "profile=aggressive, max_trade=50, max_positions=20" --slippage-bps 10 --price-source trades --liquidate-on-close --no-liquidate-at-end
+.\.venv\Scripts\python.exe scripts\day_tape_walk_forward.py --days 3 --end-date 20260617 --candidate-mode broad --exit-mode adaptive --bucket-contains "profile=aggressive, max_trade=50, max_positions=20" --slippage-bps 10 --price-source trades --liquidate-on-close --no-liquidate-at-end
 ```
 
 Use walk-forward output to reject candidates that only look good after seeing every fold. A family that passes cross-validation but fails walk-forward should stay in research, not paper-test rollout.
@@ -261,13 +261,13 @@ To combine risk, walk-forward, and neighborhood reports into one promotion decis
 
 The promotion gate outputs `research only`, `config not aligned`, `paper-test provisional`, or `paper-test`. Thin day/trade counts, concentration flags, and weak confidence can still allow provisional paper testing, but any hard replay, fragility, confidence, or app-compatibility failure keeps the candidate in research, and any supplied config-alignment failure blocks readiness.
 
-To regenerate the full current aggressive session-pricebox evidence bundle after a new completed tape day:
+To regenerate the current weighted no-price strategy evidence bundle after a new completed tape day:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\strategy_validation_pipeline.py --end-date YYYYMMDD --days 4
+.\.venv\Scripts\python.exe scripts\strategy_simulation_hub.py --config reports\manual\researched-weighted-strategies.json --run-name weekly-trade-validate-YYYYMMDD --price-source trades --slippage-bps-list 5,10,15 --bucket-contains "profile=aggressive, max_trade=50, max_positions=20" --top 8
 ```
 
-Use `--dry-run` first to print the commands without running the heavy replay steps. The pipeline currently validates the `$300` / SMI50 / `0.30%` session-change candidate at a 15-second scan stress cadence. It requires `--end-date` so a partial current-day tape is not included by accident. It also includes a profit-vs-risk scorecard, trade diagnostics, failed-neighbor parameter evidence, fragility, confidence, app-compatibility, and config-alignment checks before the final promotion gate.
+Use `--end-date YYYYMMDD` when a partial current-day tape exists and should be excluded. Keep replay capacity fixed at 20 positions and adjust only movement, volume, flow, trend, VWAP, volatility, inverse-ETF, and exit logic. The old price-cap validation pipeline is retained only as an explicit diagnostic and requires `--allow-price-diagnostic`.
 
 By default, the pipeline rejects today's tape because it can still be partial. Pass `--allow-partial` only for explicit research runs; promotion decisions should use completed prior dates.
 

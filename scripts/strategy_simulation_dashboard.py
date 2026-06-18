@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "reports" / "manual"
 JOB_DIR = REPORT_DIR / "dashboard-jobs"
 HUB_SCRIPT = ROOT / "scripts" / "strategy_simulation_hub.py"
-DASHBOARD_VERSION = "2026.06.18-profile-builder-v3"
+DASHBOARD_VERSION = "2026.06.18-profile-builder-v4"
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -450,8 +450,6 @@ INDEX_HTML = r"""<!doctype html>
       {key: "max_recent_pullback", label: "Recent pullback max", help: "Reject short-term fade", min: 0, max: 10, step: 0.05, off: 99},
       {key: "min_smi", label: "SMI min", help: "Momentum oscillator gate", min: -100, max: 100, step: 1, off: -100},
       {key: "min_relative_volume", label: "Relative volume min", help: "Activity confirmation", min: 0, max: 10, step: 0.05, off: 0},
-      {key: "min_price", label: "Min price", help: "Avoid tiny stocks", min: 0, max: 50, step: 0.25, off: 0},
-      {key: "max_price", label: "Max price", help: "0 disables cap", min: 0, max: 500, step: 1, off: 0},
       {key: "max_relative_volume", label: "Relative volume cap", help: "0 disables cap", min: 0, max: 25, step: 0.1, off: 0},
       {key: "max_atr_percent", label: "ATR cap", help: "0 disables cap", min: 0, max: 10, step: 0.05, off: 0},
       {key: "max_volatility_percent", label: "Volatility cap", help: "0 disables cap", min: 0, max: 10, step: 0.05, off: 0}
@@ -503,8 +501,6 @@ INDEX_HTML = r"""<!doctype html>
         max_recent_pullback: 99,
         min_smi: 5,
         min_relative_volume: 1,
-        min_price: 0,
-        max_price: 0,
         max_relative_volume: 0,
         max_atr_percent: 0,
         max_volatility_percent: 0

@@ -172,7 +172,6 @@ LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
 
 ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
     "conservative": {
-        "min_price": Decimal("5"),
         "min_recent_momentum": Decimal("0.03"),
         "max_vwap_extension": Decimal("3.0"),
         "max_session_extension": Decimal("6.0"),
@@ -181,7 +180,6 @@ ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
         "late_momentum_floor": Decimal("0.50"),
     },
     "neutral": {
-        "min_price": Decimal("3"),
         "min_recent_momentum": Decimal("0.03"),
         "max_vwap_extension": Decimal("4.0"),
         "max_session_extension": Decimal("8.0"),
@@ -190,7 +188,6 @@ ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
         "late_momentum_floor": Decimal("0.50"),
     },
     "aggressive": {
-        "min_price": Decimal("2"),
         "min_recent_momentum": Decimal("0.02"),
         "max_vwap_extension": Decimal("5.0"),
         "max_session_extension": Decimal("10.0"),
@@ -235,7 +232,6 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_session_change_percent": "0",
         "min_vwap_distance_percent": "0",
         "max_vwap_distance_percent": "3.0",
-        "max_entry_price": "0",
         "max_session_pullback_percent": "1.5",
         "max_recent_pullback_percent": "0.75",
         "late_momentum_floor_percent": "0.50",
@@ -292,7 +288,6 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_session_change_percent": "0",
         "min_vwap_distance_percent": "0",
         "max_vwap_distance_percent": "4.0",
-        "max_entry_price": "0",
         "max_session_pullback_percent": "2.0",
         "max_recent_pullback_percent": "1.0",
         "late_momentum_floor_percent": "0.50",
@@ -349,7 +344,6 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_session_change_percent": "0",
         "min_vwap_distance_percent": "0",
         "max_vwap_distance_percent": "5.0",
-        "max_entry_price": "0",
         "max_session_pullback_percent": "2.5",
         "max_recent_pullback_percent": "1.25",
         "late_momentum_floor_percent": "0.50",
@@ -391,7 +385,6 @@ PROFILE_STRATEGY_KEYS = {
     "min_session_change_percent",
     "min_vwap_distance_percent",
     "max_vwap_distance_percent",
-    "max_entry_price",
     "max_session_pullback_percent",
     "max_recent_pullback_percent",
     "late_momentum_floor_percent",
@@ -449,7 +442,6 @@ class AppConfig(BaseModel):
     min_session_change_percent: Decimal = Decimal("0")
     min_vwap_distance_percent: Decimal = Decimal("0")
     max_vwap_distance_percent: Decimal = Decimal("4.0")
-    max_entry_price: Decimal = Decimal("0")
     max_session_pullback_percent: Decimal = Decimal("2.0")
     max_recent_pullback_percent: Decimal = Decimal("1.0")
     late_momentum_floor_percent: Decimal = Decimal("0.50")
@@ -537,7 +529,6 @@ class AppConfig(BaseModel):
         "min_session_change_percent",
         "min_vwap_distance_percent",
         "max_vwap_distance_percent",
-        "max_entry_price",
         "max_session_pullback_percent",
         "max_recent_pullback_percent",
         "late_momentum_floor_percent",
@@ -2276,10 +2267,6 @@ class TraderEngine:
         halt_reason = self.halt_hold_reason(symbol)
         if halt_reason:
             return halt_reason
-        if snapshot.price is not None and snapshot.price < limits["min_price"]:
-            return f"Hold (price {money(snapshot.price)} < {money(limits['min_price'])})"
-        if config.max_entry_price > 0 and snapshot.price is not None and snapshot.price > config.max_entry_price:
-            return f"Hold (price {money(snapshot.price)} > {money(config.max_entry_price)})"
         if snapshot.rsi is None:
             return "Hold (RSI warming)"
         if not (config.buy_rsi_min <= snapshot.rsi <= config.buy_rsi_max):

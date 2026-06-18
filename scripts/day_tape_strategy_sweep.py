@@ -47,21 +47,21 @@ ADAPTIVE_EXIT_PLANS = (
 
 PROFILE_LIMITS = {
     "conservative": {
-        "min_price": Decimal("5"),
+        "min_price": ZERO,
         "min_recent_momentum": Decimal("0.03"),
         "max_vwap_extension": Decimal("3.0"),
         "max_session_pullback": Decimal("1.5"),
         "max_recent_pullback": Decimal("0.75"),
     },
     "neutral": {
-        "min_price": Decimal("3"),
+        "min_price": ZERO,
         "min_recent_momentum": Decimal("0.03"),
         "max_vwap_extension": Decimal("4.0"),
         "max_session_pullback": Decimal("2.0"),
         "max_recent_pullback": Decimal("1.0"),
     },
     "aggressive": {
-        "min_price": Decimal("2"),
+        "min_price": ZERO,
         "min_recent_momentum": Decimal("0.02"),
         "max_vwap_extension": Decimal("5.0"),
         "max_session_pullback": Decimal("2.5"),
@@ -1191,7 +1191,7 @@ def conservative_bridge_entry_templates(config: dict[str, Any]) -> list[EntryTem
                         min_smi=smi,
                         min_relative_volume=Decimal("1.0"),
                         min_price=base_min_price,
-                        max_price=Decimal("300"),
+                        max_price=ZERO,
                     )
                 )
     return templates
@@ -2112,7 +2112,7 @@ def main() -> int:
         "--candidate-mode",
         choices=("standard", "broad", "research", "impulse", "riskbox", "pricebox", "pricebox_session", "conservative_bridge"),
         default="standard",
-        help="standard uses curated templates; broad expands score bands; research derives thresholds from train folds; impulse tests high-session/high-SMI filters; riskbox tests moderate SMI/session filters mined from diagnostics; pricebox tests the same riskbox idea with max-price caps; pricebox_session adds a stronger session-change floor; conservative_bridge tests lower-score conservative top-row ranges.",
+        help="standard uses curated templates; broad expands score bands; research derives thresholds from train folds; impulse tests high-session/high-SMI filters; riskbox tests moderate SMI/session filters mined from diagnostics; conservative_bridge tests lower-score conservative top-row ranges. pricebox modes are explicit price-cap diagnostics only, not stock-selection strategy candidates.",
     )
     parser.add_argument(
         "--exit-mode",

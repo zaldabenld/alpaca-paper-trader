@@ -34,4 +34,6 @@ This is a local Windows Alpaca paper-trading app. Treat it as a trading and cred
 - Preserve historical data during strategy resets unless the user explicitly asks to delete it.
 - Keep strategy execution serialized per account to avoid duplicate entries.
 - High trade volume must not override direction, session trend, or VWAP requirements.
+- Stock selection must be independent of share price, account size, buying power, max trade dollars, exposure, and max open positions. Those values may only control quantity, sizing, and capacity after the trade engine has ranked candidates.
+- Do not add or tune min/max share-price gates, max-entry-price filters, account-size filters, or max-position filters as strategy variables unless the user explicitly asks for a separate diagnostic.
 - Do not add PDT guards, day-entry locks, day-exit locks, daily-loss stops, or risk-per-trade sizing back into the entry path for this version.

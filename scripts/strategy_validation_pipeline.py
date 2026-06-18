@@ -586,14 +586,26 @@ def validate_completed_tapes(args: argparse.Namespace) -> list[Path]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the current aggressive pricebox validation evidence pipeline.")
+    parser = argparse.ArgumentParser(description="Run the legacy aggressive price-cap diagnostic evidence pipeline.")
     parser.add_argument("--path", default=str(default_tape_dir()), help="Tape directory or one tape file.")
     parser.add_argument("--end-date", required=True, help="Completed tape end date, YYYYMMDD. Required to avoid partial tapes.")
     parser.add_argument("--days", type=int, default=4, help="Most recent completed tapes up through --end-date.")
     parser.add_argument("--reports-dir", default="reports")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
     parser.add_argument("--allow-partial", action="store_true", help="Allow --end-date to be today. Use only for intentional research.")
+    parser.add_argument(
+        "--allow-price-diagnostic",
+        action="store_true",
+        help="Required because this legacy pipeline uses price-cap candidates.",
+    )
     args = parser.parse_args()
+    if not args.allow_price_diagnostic:
+        raise SystemExit(
+            "This legacy pipeline uses price-cap candidate modes and is not part of the stock-selection "
+            "strategy workflow. Use scripts\\strategy_simulation_hub.py with "
+            "reports\\manual\\researched-weighted-strategies.json, or rerun with "
+            "--allow-price-diagnostic only for an explicit price diagnostic."
+        )
 
     files = validate_completed_tapes(args)
     commands = build_commands(args)
