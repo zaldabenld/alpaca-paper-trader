@@ -1,0 +1,89 @@
+{
+  "run_name": "manual-swing-momentum-v1",
+  "notes": "Research-weighted momentum/relative-strength replay. Edit thresholds and weights, then rerun.",
+  "simulation": {
+    "days": 3,
+    "end_date": "",
+    "allow_partial": false,
+    "price_source": "trades",
+    "scan_interval_seconds": 15,
+    "slippage_bps_list": [
+      5,
+      10,
+      15
+    ],
+    "bucket_contains": "",
+    "top": 8,
+    "simulation_max_positions": 20,
+    "simulation_sizing_positions": 20,
+    "simulation_inverse_etf_mode": "",
+    "liquidate_at_end": true,
+    "liquidate_on_close": true,
+    "max_hold_minutes": 0,
+    "min_stop_hold_minutes": 0,
+    "entry_open_guard_minutes": 15,
+    "min_fold_trades": 1,
+    "min_profit_factor": 1.2,
+    "max_drawdown_percent": 3.0
+  },
+  "strategies": [
+    {
+      "name": "weighted-session-momentum",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 42,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 30,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "max_relative_volume": 0,
+        "max_atr_percent": 0,
+        "max_volatility_percent": 0,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 8,
+        "smi": 8,
+        "rsi_fit": 6,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "balanced_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "trend_3_1.5",
+          "take_profit_percent": 3.0,
+          "stop_loss_percent": 1.5,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    }
+  ]
+}

@@ -26,5 +26,15 @@ python-settings.json
 dist/
 build/
 
+reports/**/*.json
+reports/**/*.jsonl
+reports/**/*.csv
+reports/**/*.log
+reports/**/*.md
+reports/manual/dashboard-jobs/
+!reports/manual/
+!reports/manual/manual-strategy-template.json
+!reports/manual/researched-weighted-strategies.json
+
 .DS_Store
 Thumbs.db

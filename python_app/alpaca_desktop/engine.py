@@ -230,6 +230,15 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_entry_score": "38",
         "momentum_period": 6,
         "min_momentum_percent": "0.05",
+        "min_recent_momentum_percent": "0.03",
+        "min_long_momentum_percent": "0",
+        "min_session_change_percent": "0",
+        "min_vwap_distance_percent": "0",
+        "max_vwap_distance_percent": "3.0",
+        "max_entry_price": "0",
+        "max_session_pullback_percent": "1.5",
+        "max_recent_pullback_percent": "0.75",
+        "late_momentum_floor_percent": "0.50",
         "smi_period": 10,
         "min_smi": "5",
         "atr_period": 14,
@@ -248,6 +257,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "cooldown_minutes": 0,
         "entry_open_guard_minutes": 15,
         "entry_close_guard_minutes": 15,
+        "exit_close_guard_minutes": 0,
     },
     "neutral": {
         "profile": "neutral",
@@ -277,6 +287,15 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_entry_score": "38",
         "momentum_period": 6,
         "min_momentum_percent": "0.05",
+        "min_recent_momentum_percent": "0.03",
+        "min_long_momentum_percent": "0",
+        "min_session_change_percent": "0",
+        "min_vwap_distance_percent": "0",
+        "max_vwap_distance_percent": "4.0",
+        "max_entry_price": "0",
+        "max_session_pullback_percent": "2.0",
+        "max_recent_pullback_percent": "1.0",
+        "late_momentum_floor_percent": "0.50",
         "smi_period": 10,
         "min_smi": "5",
         "atr_period": 14,
@@ -295,6 +314,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "cooldown_minutes": 0,
         "entry_open_guard_minutes": 10,
         "entry_close_guard_minutes": 15,
+        "exit_close_guard_minutes": 0,
     },
     "aggressive": {
         "profile": "aggressive",
@@ -324,6 +344,15 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_entry_score": "35",
         "momentum_period": 6,
         "min_momentum_percent": "0.05",
+        "min_recent_momentum_percent": "0.02",
+        "min_long_momentum_percent": "0",
+        "min_session_change_percent": "0",
+        "min_vwap_distance_percent": "0",
+        "max_vwap_distance_percent": "5.0",
+        "max_entry_price": "0",
+        "max_session_pullback_percent": "2.5",
+        "max_recent_pullback_percent": "1.25",
+        "late_momentum_floor_percent": "0.50",
         "smi_period": 10,
         "min_smi": "5",
         "atr_period": 14,
@@ -342,6 +371,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "cooldown_minutes": 0,
         "entry_open_guard_minutes": 10,
         "entry_close_guard_minutes": 5,
+        "exit_close_guard_minutes": 0,
     },
 }
 
@@ -356,6 +386,15 @@ PROFILE_STRATEGY_KEYS = {
     "min_entry_score",
     "momentum_period",
     "min_momentum_percent",
+    "min_recent_momentum_percent",
+    "min_long_momentum_percent",
+    "min_session_change_percent",
+    "min_vwap_distance_percent",
+    "max_vwap_distance_percent",
+    "max_entry_price",
+    "max_session_pullback_percent",
+    "max_recent_pullback_percent",
+    "late_momentum_floor_percent",
     "smi_period",
     "min_smi",
     "atr_period",
@@ -373,6 +412,7 @@ PROFILE_STRATEGY_KEYS = {
     "cooldown_minutes",
     "entry_open_guard_minutes",
     "entry_close_guard_minutes",
+    "exit_close_guard_minutes",
 }
 
 
@@ -404,6 +444,15 @@ class AppConfig(BaseModel):
     min_entry_score: Decimal = Decimal("38")
     momentum_period: int = 6
     min_momentum_percent: Decimal = Decimal("0.05")
+    min_recent_momentum_percent: Decimal = Decimal("0.03")
+    min_long_momentum_percent: Decimal = Decimal("0")
+    min_session_change_percent: Decimal = Decimal("0")
+    min_vwap_distance_percent: Decimal = Decimal("0")
+    max_vwap_distance_percent: Decimal = Decimal("4.0")
+    max_entry_price: Decimal = Decimal("0")
+    max_session_pullback_percent: Decimal = Decimal("2.0")
+    max_recent_pullback_percent: Decimal = Decimal("1.0")
+    late_momentum_floor_percent: Decimal = Decimal("0.50")
     smi_period: int = 10
     min_smi: Decimal = Decimal("5")
     atr_period: int = 14
@@ -422,6 +471,7 @@ class AppConfig(BaseModel):
     cooldown_minutes: int = 0
     entry_open_guard_minutes: int = 10
     entry_close_guard_minutes: int = 15
+    exit_close_guard_minutes: int = 0
 
     @field_validator("profile")
     @classmethod
@@ -460,7 +510,13 @@ class AppConfig(BaseModel):
     def validate_positions(cls, value: int) -> int:
         return max(1, int(value))
 
-    @field_validator("cooldown_minutes", "entry_open_guard_minutes", "entry_close_guard_minutes", "stop_loss_grace_minutes")
+    @field_validator(
+        "cooldown_minutes",
+        "entry_open_guard_minutes",
+        "entry_close_guard_minutes",
+        "exit_close_guard_minutes",
+        "stop_loss_grace_minutes",
+    )
     @classmethod
     def validate_cooldown(cls, value: int) -> int:
         return max(0, int(value))
@@ -476,6 +532,15 @@ class AppConfig(BaseModel):
         "max_total_exposure_percent",
         "min_entry_score",
         "min_momentum_percent",
+        "min_recent_momentum_percent",
+        "min_long_momentum_percent",
+        "min_session_change_percent",
+        "min_vwap_distance_percent",
+        "max_vwap_distance_percent",
+        "max_entry_price",
+        "max_session_pullback_percent",
+        "max_recent_pullback_percent",
+        "late_momentum_floor_percent",
         "min_buy_volume_ratio",
         "reentry_score_boost",
         "take_profit_percent",
@@ -509,6 +574,18 @@ class AppConfig(BaseModel):
         return tif
 
     def model_post_init(self, __context: Any) -> None:
+        fields_set = set(getattr(self, "model_fields_set", set()))
+        profile_limits = ENTRY_PROFILE_LIMITS.get(self.profile, ENTRY_PROFILE_LIMITS["neutral"])
+        if "min_recent_momentum_percent" not in fields_set:
+            self.min_recent_momentum_percent = profile_limits["min_recent_momentum"]
+        if "max_vwap_distance_percent" not in fields_set:
+            self.max_vwap_distance_percent = profile_limits["max_vwap_extension"]
+        if "max_session_pullback_percent" not in fields_set:
+            self.max_session_pullback_percent = profile_limits["max_session_pullback"]
+        if "max_recent_pullback_percent" not in fields_set:
+            self.max_recent_pullback_percent = profile_limits["max_recent_pullback"]
+        if "late_momentum_floor_percent" not in fields_set:
+            self.late_momentum_floor_percent = profile_limits["late_momentum_floor"]
         if self.long_period <= self.short_period:
             raise ValueError("Long SMA must be greater than short SMA.")
         rsi_values = (self.buy_rsi_min, self.buy_rsi_max, self.sell_rsi)
@@ -527,8 +604,6 @@ class AppConfig(BaseModel):
         self.daily_loss_limit = Decimal("0")
         self.daily_loss_limit_percent = Decimal("0")
         self.risk_per_trade_percent = Decimal("0")
-        self.profit_trail_start_percent = Decimal("0")
-        self.profit_trail_drop_percent = Decimal("0")
         self.stop_loss_grace_minutes = 0
         self.cooldown_minutes = 0
         self.exit_time_in_force = "day"
@@ -944,7 +1019,26 @@ def percent_change(value: Decimal, basis: Decimal) -> Decimal:
 
 
 def entry_profile_limits(config: AppConfig) -> dict[str, Decimal]:
-    return ENTRY_PROFILE_LIMITS.get(config.profile, ENTRY_PROFILE_LIMITS["neutral"])
+    limits = dict(ENTRY_PROFILE_LIMITS.get(config.profile, ENTRY_PROFILE_LIMITS["neutral"]))
+    if config.min_recent_momentum_percent > 0:
+        limits["min_recent_momentum"] = config.min_recent_momentum_percent
+    limits["min_long_momentum"] = config.min_long_momentum_percent
+    limits["min_session_change"] = config.min_session_change_percent
+    limits["min_vwap_distance"] = config.min_vwap_distance_percent
+    if config.max_vwap_distance_percent > 0:
+        limits["max_vwap_extension"] = max(config.max_vwap_distance_percent, limits["min_vwap_distance"])
+    if config.max_session_pullback_percent > 0:
+        limits["max_session_pullback"] = config.max_session_pullback_percent
+    if config.max_recent_pullback_percent > 0:
+        limits["max_recent_pullback"] = config.max_recent_pullback_percent
+    limits["late_momentum_floor"] = config.late_momentum_floor_percent
+    return limits
+
+
+def below_entry_floor(value: Decimal, floor: Decimal) -> bool:
+    if floor <= 0:
+        return value <= 0
+    return value < floor
 
 
 class TraderEngine:
@@ -1430,8 +1524,11 @@ class TraderEngine:
             opening_guard_detail = self.entry_open_guard_message(clock, config)
             closing_guard_detail = self.entry_close_guard_message(clock, config)
             entry_guard_detail = opening_guard_detail or closing_guard_detail
+            exit_guard_detail = self.exit_close_guard_message(clock, config)
             entries_allowed = not entry_guard_detail
-            if should_trade and entry_guard_detail:
+            if should_trade and exit_guard_detail:
+                status_message = f"Close exit guard active: {exit_guard_detail}"
+            elif should_trade and entry_guard_detail:
                 status_message = f"New entries paused: {entry_guard_detail}"
 
             position_map = {str(item.get("symbol", "")).upper(): item for item in position_dicts}
@@ -1470,6 +1567,7 @@ class TraderEngine:
                         entry_guard_detail,
                         opening_guard_detail,
                         allow_entries=False,
+                        force_exit_reason=exit_guard_detail,
                     )
                     for level, message in events:
                         self.log(level, message)
@@ -1589,6 +1687,7 @@ class TraderEngine:
                 should_trade=should_trade,
                 entries_allowed=entries_allowed,
                 entry_guard_detail=entry_guard_detail,
+                exit_guard_detail=exit_guard_detail,
                 market_clock=market_clock,
                 account=account_dict,
                 positions=position_dicts,
@@ -1739,6 +1838,7 @@ class TraderEngine:
         should_trade: bool,
         entries_allowed: bool,
         entry_guard_detail: str,
+        exit_guard_detail: str,
         market_clock: dict[str, Any],
         account: dict[str, Any],
         positions: list[dict[str, Any]],
@@ -1754,6 +1854,7 @@ class TraderEngine:
                     "should_trade": should_trade,
                     "entries_allowed": entries_allowed,
                     "entry_guard_detail": entry_guard_detail,
+                    "exit_guard_detail": exit_guard_detail,
                     "market_clock": clean_day_tape_value(market_clock),
                     "config": self.config.model_dump(mode="json"),
                     "account": compact_account_snapshot(account),
@@ -2153,6 +2254,20 @@ class TraderEngine:
         minutes_left = max(0, int((seconds_left + 59) // 60))
         return f"market closes in {minutes_left} min; entry guard is {guard_minutes} min"
 
+    def exit_close_guard_message(self, clock: Any, config: AppConfig) -> str:
+        guard_minutes = int(config.exit_close_guard_minutes or 0)
+        if guard_minutes <= 0 or not bool(getattr(clock, "is_open", False)):
+            return ""
+        next_close = getattr(clock, "next_close", None)
+        if not hasattr(next_close, "astimezone"):
+            return ""
+        now = datetime.now(next_close.tzinfo) if getattr(next_close, "tzinfo", None) else datetime.now()
+        seconds_left = (next_close - now).total_seconds()
+        if seconds_left < 0 or seconds_left > guard_minutes * 60:
+            return ""
+        minutes_left = max(0, int((seconds_left + 59) // 60))
+        return f"market closes in {minutes_left} min; exit guard is {guard_minutes} min"
+
     def entry_quality_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
         limits = entry_profile_limits(config)
         inverse_reason = self.inverse_etf_hold_reason(symbol, config)
@@ -2163,6 +2278,8 @@ class TraderEngine:
             return halt_reason
         if snapshot.price is not None and snapshot.price < limits["min_price"]:
             return f"Hold (price {money(snapshot.price)} < {money(limits['min_price'])})"
+        if config.max_entry_price > 0 and snapshot.price is not None and snapshot.price > config.max_entry_price:
+            return f"Hold (price {money(snapshot.price)} > {money(config.max_entry_price)})"
         if snapshot.rsi is None:
             return "Hold (RSI warming)"
         if not (config.buy_rsi_min <= snapshot.rsi <= config.buy_rsi_max):
@@ -2180,23 +2297,24 @@ class TraderEngine:
             return "Hold (recent momentum warming)"
         if recent_momentum < limits["min_recent_momentum"]:
             return f"Hold (recent momentum {recent_momentum:+.2f}%)"
-        if snapshot.rsi >= config.buy_rsi_max - Decimal("3") and snapshot.momentum_percent < limits["late_momentum_floor"]:
+        late_floor = limits["late_momentum_floor"]
+        if late_floor > 0 and snapshot.rsi >= config.buy_rsi_max - Decimal("3") and snapshot.momentum_percent < late_floor:
             return f"Hold (late RSI {snapshot.rsi:.1f}, momentum {snapshot.momentum_percent:+.2f}%)"
-        if snapshot.smi is not None and snapshot.smi >= Decimal("90") and snapshot.momentum_percent < limits["late_momentum_floor"]:
+        if late_floor > 0 and snapshot.smi is not None and snapshot.smi >= Decimal("90") and snapshot.momentum_percent < late_floor:
             return f"Hold (late SMI {snapshot.smi:.1f}, momentum {snapshot.momentum_percent:+.2f}%)"
         if getattr(snapshot, "long_momentum_percent", None) is None:
             return "Hold (long momentum warming)"
-        if snapshot.long_momentum_percent <= 0:
+        if below_entry_floor(snapshot.long_momentum_percent, limits["min_long_momentum"]):
             return f"Hold (long momentum {snapshot.long_momentum_percent:+.2f}%)"
         if getattr(snapshot, "session_change_percent", None) is None:
             return "Hold (session trend warming)"
-        if snapshot.session_change_percent <= 0:
+        if below_entry_floor(snapshot.session_change_percent, limits["min_session_change"]):
             return f"Hold (session trend {snapshot.session_change_percent:+.2f}%)"
         if snapshot.session_change_percent > limits["max_session_extension"]:
             return f"Hold (session extended {snapshot.session_change_percent:+.2f}%)"
         if getattr(snapshot, "vwap_distance_percent", None) is None:
             return "Hold (VWAP warming)"
-        if snapshot.vwap_distance_percent <= 0:
+        if below_entry_floor(snapshot.vwap_distance_percent, limits["min_vwap_distance"]):
             return f"Hold (below VWAP {snapshot.vwap_distance_percent:+.2f}%)"
         if snapshot.vwap_distance_percent > limits["max_vwap_extension"]:
             return f"Hold (extended above VWAP {snapshot.vwap_distance_percent:+.2f}%)"
@@ -2229,9 +2347,9 @@ class TraderEngine:
         if self.downturn_inverse_allowed(clean_symbol, config):
             return ""
         if config.inverse_etf_mode == "exclude" and is_inverse:
-            return "Hold (inverse ETF excluded)"
+            return "Hold (inverse ETF waits for downturn)"
         if config.inverse_etf_mode == "exclude" and is_leveraged_or_volatility:
-            return "Hold (leveraged/volatility ETP excluded)"
+            return "Hold (leveraged/volatility ETP waits for downturn)"
         if config.inverse_etf_mode == "inverse_only" and not is_inverse:
             return "Hold (inverse-only profile)"
         return ""
@@ -2427,6 +2545,7 @@ class TraderEngine:
         entry_guard_detail: str = "",
         opening_guard_detail: str = "",
         allow_entries: bool = True,
+        force_exit_reason: str = "",
     ) -> tuple[list[tuple[str, str]], bool, dict[str, Any] | None]:
         config = self.config
         snapshot = self.snapshot(symbol)
@@ -2451,6 +2570,24 @@ class TraderEngine:
         sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
 
         protection_active = bool(protective_orders)
+        if has_long and force_exit_reason:
+            if pending_strategy_exit:
+                self.strategy_state.last_action[symbol] = "Hold (exit pending)"
+                return events, False, None
+            if unknown_orders:
+                self.strategy_state.last_action[symbol] = "Hold (manual order)"
+                return events, False, None
+            if sell_hold:
+                self.strategy_state.last_action[symbol] = sell_hold
+                return events, False, None
+            cancelled = self.cancel_orders_for_symbol(protective_orders, symbol)
+            if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol):
+                self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
+                return events, False, None
+            qty_to_sell = abs(qty)
+            events.extend(self.submit_exit_order(symbol, qty_to_sell, snapshot, f"market-close guard: {force_exit_reason}"))
+            return events, False, None
+
         if has_long and config.use_bracket_orders and not pending_strategy_exit:
             protection_events, exit_submitted, protection_active = self.ensure_position_exit_orders(
                 symbol,
@@ -2875,6 +3012,7 @@ class TraderEngine:
         try:
             submitted = self.require_trading_client().submit_order(order)
         except Exception as exc:
+            message = str(exc)
             self.hold_rejected_protective_order(symbol, kind)
             self.record_order_intent(
                 symbol,
@@ -2882,10 +3020,22 @@ class TraderEngine:
                 qty,
                 role,
                 "error",
-                f"{intent_reason}; {exc}",
+                f"{intent_reason}; {message}",
                 client_order_id,
             )
-            events.append(("error", f"Protective {kind.replace('_', ' ')} rejected for {symbol}: {exc}"))
+            events.append(("error", f"Protective {kind.replace('_', ' ')} rejected for {symbol}: {message}"))
+            if kind == "stop_loss" and self.is_stop_price_crossed_rejection(message):
+                fallback_events = self.submit_exit_order(
+                    symbol,
+                    qty,
+                    snapshot,
+                    f"{reason} crossed before protective stop was accepted",
+                )
+                if fallback_events:
+                    events.append(("warn", f"Submitted market-exit fallback for {symbol} after stop rejection."))
+                    events.extend(fallback_events)
+                fallback_submitted = any(level == "success" for level, _ in fallback_events)
+                return fallback_submitted, events
             return False, events
         submitted_id = getattr(submitted, "id", "")
         self.record_order_intent(
@@ -2923,6 +3073,8 @@ class TraderEngine:
             return "", ""
 
         current_gain = percent_change(current_price, entry_price)
+        peak_price = self.update_position_peak(symbol, entry_price, current_price)
+        peak_gain = percent_change(peak_price, entry_price)
 
         if config.take_profit_percent > 0 and current_gain >= config.take_profit_percent and not has_take_profit_order:
             return (
@@ -2935,10 +3087,28 @@ class TraderEngine:
             stop_price = entry_price * (Decimal("1") - config.stop_loss_percent / Decimal("100"))
             if current_price <= stop_price and not has_stop_loss_order:
                 return f"local stop-loss {config.stop_loss_percent}% (gain {current_gain:.2f}%)", ""
+        if config.profit_trail_start_percent > 0 and config.profit_trail_drop_percent > 0:
+            if peak_gain >= config.profit_trail_start_percent:
+                trail_price = peak_price * (Decimal("1") - config.profit_trail_drop_percent / Decimal("100"))
+                if current_price <= trail_price:
+                    return (
+                        f"local trailing-profit {config.profit_trail_start_percent}%/"
+                        f"{config.profit_trail_drop_percent}%"
+                        f" (peak {peak_gain:.2f}%, gain {current_gain:.2f}%)",
+                        "",
+                    )
+                return (
+                    "",
+                    f"Hold (trail armed {peak_gain:.2f}% peak, gain {current_gain:.2f}%)",
+                )
         return "", ""
 
     def is_stop_loss_exit_reason(self, reason: str) -> bool:
         return "stop-loss" in str(reason or "").lower()
+
+    def is_stop_price_crossed_rejection(self, message: str) -> bool:
+        clean = str(message or "").lower()
+        return "stop price must be less than current price" in clean or "42210000" in clean
 
     def is_take_profit_exit_reason(self, reason: str) -> bool:
         return "take-profit" in str(reason or "").lower()

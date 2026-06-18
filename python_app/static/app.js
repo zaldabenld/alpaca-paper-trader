@@ -33,6 +33,15 @@ const fields = {
   minEntryScore: document.querySelector("#minEntryScore"),
   momentumPeriod: document.querySelector("#momentumPeriod"),
   minMomentumPercent: document.querySelector("#minMomentumPercent"),
+  minRecentMomentumPercent: document.querySelector("#minRecentMomentumPercent"),
+  minLongMomentumPercent: document.querySelector("#minLongMomentumPercent"),
+  minSessionChangePercent: document.querySelector("#minSessionChangePercent"),
+  minVwapDistancePercent: document.querySelector("#minVwapDistancePercent"),
+  maxVwapDistancePercent: document.querySelector("#maxVwapDistancePercent"),
+  maxEntryPrice: document.querySelector("#maxEntryPrice"),
+  maxSessionPullbackPercent: document.querySelector("#maxSessionPullbackPercent"),
+  maxRecentPullbackPercent: document.querySelector("#maxRecentPullbackPercent"),
+  lateMomentumFloorPercent: document.querySelector("#lateMomentumFloorPercent"),
   smiPeriod: document.querySelector("#smiPeriod"),
   minSmi: document.querySelector("#minSmi"),
   atrPeriod: document.querySelector("#atrPeriod"),
@@ -52,6 +61,7 @@ const fields = {
   cooldownMinutes: document.querySelector("#cooldownMinutes"),
   entryOpenGuardMinutes: document.querySelector("#entryOpenGuardMinutes"),
   entryCloseGuardMinutes: document.querySelector("#entryCloseGuardMinutes"),
+  exitCloseGuardMinutes: document.querySelector("#exitCloseGuardMinutes"),
   lookupSymbol: document.querySelector("#lookupSymbol"),
 };
 
@@ -143,6 +153,15 @@ const configKeys = [
   "min_entry_score",
   "momentum_period",
   "min_momentum_percent",
+  "min_recent_momentum_percent",
+  "min_long_momentum_percent",
+  "min_session_change_percent",
+  "min_vwap_distance_percent",
+  "max_vwap_distance_percent",
+  "max_entry_price",
+  "max_session_pullback_percent",
+  "max_recent_pullback_percent",
+  "late_momentum_floor_percent",
   "smi_period",
   "min_smi",
   "atr_period",
@@ -162,6 +181,7 @@ const configKeys = [
   "cooldown_minutes",
   "entry_open_guard_minutes",
   "entry_close_guard_minutes",
+  "exit_close_guard_minutes",
 ];
 
 const strategyProfileKeys = new Set([
@@ -173,6 +193,15 @@ const strategyProfileKeys = new Set([
   "min_entry_score",
   "momentum_period",
   "min_momentum_percent",
+  "min_recent_momentum_percent",
+  "min_long_momentum_percent",
+  "min_session_change_percent",
+  "min_vwap_distance_percent",
+  "max_vwap_distance_percent",
+  "max_entry_price",
+  "max_session_pullback_percent",
+  "max_recent_pullback_percent",
+  "late_momentum_floor_percent",
   "smi_period",
   "min_smi",
   "atr_period",
@@ -191,6 +220,7 @@ const strategyProfileKeys = new Set([
   "cooldown_minutes",
   "entry_open_guard_minutes",
   "entry_close_guard_minutes",
+  "exit_close_guard_minutes",
 ]);
 
 let savedAccounts = [];
@@ -608,6 +638,15 @@ function readConfig() {
     min_entry_score: readNumber("minEntryScore", 38),
     momentum_period: readInt("momentumPeriod", 6),
     min_momentum_percent: readNumber("minMomentumPercent", 0.05),
+    min_recent_momentum_percent: readNumber("minRecentMomentumPercent", 0.03),
+    min_long_momentum_percent: readNumber("minLongMomentumPercent", 0),
+    min_session_change_percent: readNumber("minSessionChangePercent", 0),
+    min_vwap_distance_percent: readNumber("minVwapDistancePercent", 0),
+    max_vwap_distance_percent: readNumber("maxVwapDistancePercent", 4),
+    max_entry_price: readNumber("maxEntryPrice", 0),
+    max_session_pullback_percent: readNumber("maxSessionPullbackPercent", 2),
+    max_recent_pullback_percent: readNumber("maxRecentPullbackPercent", 1),
+    late_momentum_floor_percent: readNumber("lateMomentumFloorPercent", 0.5),
     smi_period: readInt("smiPeriod", 10),
     min_smi: readNumber("minSmi", 5),
     atr_period: readInt("atrPeriod", 14),
@@ -627,6 +666,7 @@ function readConfig() {
     cooldown_minutes: readInt("cooldownMinutes", 0),
     entry_open_guard_minutes: readInt("entryOpenGuardMinutes", 10),
     entry_close_guard_minutes: readInt("entryCloseGuardMinutes", 15),
+    exit_close_guard_minutes: readInt("exitCloseGuardMinutes", 0),
   };
 }
 
@@ -861,6 +901,15 @@ function presetConfig(profile) {
     min_entry_score: 38,
     momentum_period: 6,
     min_momentum_percent: 0.05,
+    min_recent_momentum_percent: 0.03,
+    min_long_momentum_percent: 0,
+    min_session_change_percent: 0,
+    min_vwap_distance_percent: 0,
+    max_vwap_distance_percent: 4,
+    max_entry_price: 0,
+    max_session_pullback_percent: 2,
+    max_recent_pullback_percent: 1,
+    late_momentum_floor_percent: 0.5,
     smi_period: 10,
     min_smi: 5,
     atr_period: 14,
@@ -880,6 +929,7 @@ function presetConfig(profile) {
     cooldown_minutes: 0,
     entry_open_guard_minutes: 10,
     entry_close_guard_minutes: 15,
+    exit_close_guard_minutes: 0,
   };
 }
 

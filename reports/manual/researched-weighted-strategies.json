@@ -1,0 +1,754 @@
+{
+  "run_name": "researched-weighted-strategies-v1",
+  "notes": "Completed-tape replay set built from momentum, relative-strength, RSI-range confirmation, and volatility-adjusted trend-following research. Position count and sizing are fixed at 20; tested knobs are entry thresholds, feature weights, and exits.",
+  "research_sources": [
+    {
+      "name": "Jegadeesh and Titman 1993",
+      "url": "https://www.bauer.uh.edu/rsusmel/phd/jegadeesh-titman93.pdf",
+      "use": "Cross-sectional momentum: rank/select prior winners rather than random high-volume names."
+    },
+    {
+      "name": "Moskowitz, Ooi, and Pedersen Time Series Momentum",
+      "url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2089463",
+      "use": "Time-series trend direction and volatility-aware risk treatment."
+    },
+    {
+      "name": "Faber Relative Strength Strategies",
+      "url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1585517",
+      "use": "Relative-strength/rotation framing: compare candidates by strength and persistence."
+    },
+    {
+      "name": "Arthur Hill RSI for Trend-Following and Momentum",
+      "url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3412429",
+      "use": "RSI bull-range as confirmation, not the primary selection engine."
+    }
+  ],
+  "simulation": {
+    "days": 3,
+    "end_date": "20260617",
+    "allow_partial": false,
+    "price_source": "trades",
+    "scan_interval_seconds": 15,
+    "slippage_bps_list": [
+      5,
+      10,
+      15
+    ],
+    "bucket_contains": "",
+    "top": 10,
+    "simulation_max_positions": 20,
+    "simulation_sizing_positions": 20,
+    "simulation_inverse_etf_mode": "",
+    "liquidate_at_end": true,
+    "liquidate_on_close": true,
+    "max_hold_minutes": 0,
+    "min_stop_hold_minutes": 0,
+    "entry_open_guard_minutes": 15,
+    "min_fold_trades": 1,
+    "min_profit_factor": 1.2,
+    "max_drawdown_percent": 3.0
+  },
+  "strategies": [
+    {
+      "name": "h1-session-momentum-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 42,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 30,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 8,
+        "smi": 8,
+        "rsi_fit": 6,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "fixed_3_1.5",
+          "take_profit_percent": 3.0,
+          "stop_loss_percent": 1.5,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "trail_2_1",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "trail",
+          "trail_activation_percent": 2.0,
+          "trail_distance_percent": 1.0
+        },
+        {
+          "name": "lock_2_0.5",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "lock",
+          "trail_activation_percent": 2.0,
+          "profit_lock_percent": 0.5
+        }
+      ]
+    },
+    {
+      "name": "h2-relative-strength-vwap",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 68,
+        "min_entry_score": 44,
+        "min_momentum": 0.08,
+        "min_recent_momentum": 0.05,
+        "min_long_momentum": 0.05,
+        "min_session_change": 0.2,
+        "min_vwap_distance": 0.05,
+        "max_vwap_distance": 2.25,
+        "max_session_pullback": 0.9,
+        "max_recent_pullback": 0.55,
+        "min_smi": 40,
+        "min_relative_volume": 1.2,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 14,
+        "recent_momentum": 8,
+        "long_momentum": 14,
+        "session_change": 16,
+        "relative_volume": 13,
+        "vwap_distance": 14,
+        "smi": 7,
+        "rsi_fit": 5,
+        "buy_flow": 3,
+        "volatility": 0,
+        "volatility_penalty": 4,
+        "session_pullback_penalty": 9,
+        "recent_pullback_penalty": 6,
+        "vwap_extension_penalty": 10,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "fixed_3_1.5",
+          "take_profit_percent": 3.0,
+          "stop_loss_percent": 1.5,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "trail_2_1",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "trail",
+          "trail_activation_percent": 2.0,
+          "trail_distance_percent": 1.0
+        },
+        {
+          "name": "lock_2_0.5",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "lock",
+          "trail_activation_percent": 2.0,
+          "profit_lock_percent": 0.5
+        }
+      ]
+    },
+    {
+      "name": "h3-trend-clarity-low-chop",
+      "entry": {
+        "rsi_min": 45,
+        "rsi_max": 69,
+        "min_entry_score": 45,
+        "min_momentum": 0.08,
+        "min_recent_momentum": 0.08,
+        "min_long_momentum": 0.1,
+        "min_session_change": 0.15,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.0,
+        "max_session_pullback": 0.75,
+        "max_recent_pullback": 0.45,
+        "min_smi": 35,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 250,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 16,
+        "recent_momentum": 13,
+        "long_momentum": 15,
+        "session_change": 17,
+        "relative_volume": 8,
+        "vwap_distance": 7,
+        "smi": 6,
+        "rsi_fit": 6,
+        "buy_flow": 3,
+        "volatility": 0,
+        "volatility_penalty": 7,
+        "session_pullback_penalty": 13,
+        "recent_pullback_penalty": 10,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 6,
+        "smi_overheat_penalty": 5
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "fixed_3_1.5",
+          "take_profit_percent": 3.0,
+          "stop_loss_percent": 1.5,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "trail_2_1",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "trail",
+          "trail_activation_percent": 2.0,
+          "trail_distance_percent": 1.0
+        },
+        {
+          "name": "lock_2_0.5",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "lock",
+          "trail_activation_percent": 2.0,
+          "profit_lock_percent": 0.5
+        }
+      ]
+    },
+    {
+      "name": "h4-impulse-flow",
+      "entry": {
+        "rsi_min": 48,
+        "rsi_max": 72,
+        "min_entry_score": 45,
+        "min_momentum": 0.2,
+        "min_recent_momentum": 0.15,
+        "min_long_momentum": 0.1,
+        "min_session_change": 0.25,
+        "min_vwap_distance": 0.05,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 0.75,
+        "max_recent_pullback": 0.45,
+        "min_smi": 50,
+        "min_relative_volume": 1.2,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 17,
+        "recent_momentum": 15,
+        "long_momentum": 8,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 6,
+        "smi": 12,
+        "rsi_fit": 4,
+        "buy_flow": 7,
+        "volatility": 0,
+        "volatility_penalty": 4,
+        "session_pullback_penalty": 11,
+        "recent_pullback_penalty": 8,
+        "vwap_extension_penalty": 7,
+        "session_extension_penalty": 5,
+        "smi_overheat_penalty": 6
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "fixed_3_1.5",
+          "take_profit_percent": 3.0,
+          "stop_loss_percent": 1.5,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "trail_2_1",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "trail",
+          "trail_activation_percent": 2.0,
+          "trail_distance_percent": 1.0
+        },
+        {
+          "name": "lock_2_0.5",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "lock",
+          "trail_activation_percent": 2.0,
+          "profit_lock_percent": 0.5
+        }
+      ]
+    },
+    {
+      "name": "h5-rsi-confirmed-trend",
+      "entry": {
+        "rsi_min": 45,
+        "rsi_max": 68,
+        "min_entry_score": 40,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 35,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 15,
+        "recent_momentum": 9,
+        "long_momentum": 10,
+        "session_change": 15,
+        "relative_volume": 9,
+        "vwap_distance": 7,
+        "smi": 7,
+        "rsi_fit": 13,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "fixed_3_1.5",
+          "take_profit_percent": 3.0,
+          "stop_loss_percent": 1.5,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        },
+        {
+          "name": "trail_2_1",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "trail",
+          "trail_activation_percent": 2.0,
+          "trail_distance_percent": 1.0
+        },
+        {
+          "name": "lock_2_0.5",
+          "take_profit_percent": 0,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "lock",
+          "trail_activation_percent": 2.0,
+          "profit_lock_percent": 0.5
+        }
+      ]
+    },
+    {
+      "name": "ablate-no-rsi-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 38,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 30,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 8,
+        "smi": 8,
+        "rsi_fit": 0,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    },
+    {
+      "name": "ablate-no-volume-flow-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 32,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 30,
+        "min_relative_volume": 0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 0,
+        "vwap_distance": 8,
+        "smi": 8,
+        "rsi_fit": 6,
+        "buy_flow": 0,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    },
+    {
+      "name": "ablate-no-vwap-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 34,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 5.0,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 30,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 0,
+        "smi": 8,
+        "rsi_fit": 6,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 0,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    },
+    {
+      "name": "ablate-no-pullback-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 25,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 2.5,
+        "max_recent_pullback": 1.25,
+        "min_smi": 30,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 8,
+        "smi": 8,
+        "rsi_fit": 6,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 0,
+        "recent_pullback_penalty": 0,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    },
+    {
+      "name": "ablate-no-smi-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 34,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 0,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 8,
+        "smi": 0,
+        "rsi_fit": 6,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 0
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    },
+    {
+      "name": "ablate-no-long-momentum-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 30,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 30,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 0,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 8,
+        "smi": 8,
+        "rsi_fit": 6,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 3,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    },
+    {
+      "name": "ablate-no-volatility-penalty-core",
+      "entry": {
+        "rsi_min": 42,
+        "rsi_max": 70,
+        "min_entry_score": 39,
+        "min_momentum": 0.05,
+        "min_recent_momentum": 0.03,
+        "min_long_momentum": 0,
+        "min_session_change": 0.1,
+        "min_vwap_distance": 0,
+        "max_vwap_distance": 2.5,
+        "max_session_pullback": 1.0,
+        "max_recent_pullback": 0.6,
+        "min_smi": 30,
+        "min_relative_volume": 1.0,
+        "min_price": 2,
+        "max_price": 300,
+        "score_bias": 0
+      },
+      "score_weights": {
+        "momentum": 18,
+        "recent_momentum": 10,
+        "long_momentum": 12,
+        "session_change": 18,
+        "relative_volume": 10,
+        "vwap_distance": 8,
+        "smi": 8,
+        "rsi_fit": 6,
+        "buy_flow": 4,
+        "volatility": 0,
+        "volatility_penalty": 0,
+        "session_pullback_penalty": 10,
+        "recent_pullback_penalty": 7,
+        "vwap_extension_penalty": 8,
+        "session_extension_penalty": 4,
+        "smi_overheat_penalty": 4
+      },
+      "exits": [
+        {
+          "name": "fixed_2.5_1.25",
+          "take_profit_percent": 2.5,
+          "stop_loss_percent": 1.25,
+          "reentry_score_boost": 12,
+          "exit_style": "fixed"
+        }
+      ]
+    }
+  ]
+}

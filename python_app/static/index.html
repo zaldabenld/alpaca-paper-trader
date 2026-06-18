@@ -217,6 +217,42 @@
                   <input id="minMomentumPercent" type="number" step="0.01" value="0.05" />
                 </label>
                 <label>
+                  Recent Mom %
+                  <input id="minRecentMomentumPercent" type="number" min="0" step="0.01" value="0.03" />
+                </label>
+                <label>
+                  Long Mom %
+                  <input id="minLongMomentumPercent" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label>
+                  Session Min %
+                  <input id="minSessionChangePercent" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label>
+                  VWAP Min %
+                  <input id="minVwapDistancePercent" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label>
+                  VWAP Max %
+                  <input id="maxVwapDistancePercent" type="number" min="0" step="0.05" value="4" />
+                </label>
+                <label>
+                  Max Entry $
+                  <input id="maxEntryPrice" type="number" min="0" step="1" value="0" />
+                </label>
+                <label>
+                  Session Pullback %
+                  <input id="maxSessionPullbackPercent" type="number" min="0" step="0.05" value="2" />
+                </label>
+                <label>
+                  Recent Pullback %
+                  <input id="maxRecentPullbackPercent" type="number" min="0" step="0.05" value="1" />
+                </label>
+                <label>
+                  Late Mom %
+                  <input id="lateMomentumFloorPercent" type="number" min="0" step="0.05" value="0.5" />
+                </label>
+                <label>
                   SMI Bars
                   <input id="smiPeriod" type="number" min="1" step="1" value="10" />
                 </label>
@@ -239,8 +275,8 @@
                 <label>
                   Inverse ETFs
                   <select id="inverseEtfMode">
-                    <option value="exclude">Exclude</option>
-                    <option value="allow">Allow</option>
+                    <option value="exclude">Downturn only</option>
+                    <option value="allow">Allow listed</option>
                     <option value="inverse_only">Inverse only</option>
                   </select>
                 </label>
@@ -264,8 +300,14 @@
                   Stop %
                   <input id="stopLossPercent" type="number" min="0" step="0.05" value="3" />
                 </label>
-                <input id="profitTrailStartPercent" type="hidden" value="0" />
-                <input id="profitTrailDropPercent" type="hidden" value="0" />
+                <label>
+                  Trail Start %
+                  <input id="profitTrailStartPercent" type="number" min="0" step="0.05" value="0" />
+                </label>
+                <label>
+                  Trail Drop %
+                  <input id="profitTrailDropPercent" type="number" min="0" step="0.05" value="0" />
+                </label>
                 <input id="stopLossGraceMinutes" type="hidden" value="0" />
                 <label>
                   Open Guard
@@ -274,6 +316,10 @@
                 <label>
                   Close Guard
                   <input id="entryCloseGuardMinutes" type="number" min="0" step="1" value="15" />
+                </label>
+                <label>
+                  Exit Guard
+                  <input id="exitCloseGuardMinutes" type="number" min="0" step="1" value="0" />
                 </label>
               </div>
             </div>
