@@ -36,4 +36,7 @@ This is a local Windows Alpaca paper-trading app. Treat it as a trading and cred
 - High trade volume must not override direction, session trend, or VWAP requirements.
 - Stock selection must be independent of share price, account size, buying power, max trade dollars, exposure, and max open positions. Those values may only control quantity, sizing, and capacity after the trade engine has ranked candidates.
 - Do not add or tune min/max share-price gates, max-entry-price filters, account-size filters, or max-position filters as strategy variables unless the user explicitly asks for a separate diagnostic.
+- Simulator strategy searches may only vary the stock-selection layer: movement, trend/session direction, VWAP/extension, pullback, volume/liquidity/flow, volatility/chop, SMI/RSI confirmation, inverse ETF regime behavior, and exits.
+- Keep the simulator sizing/capacity layer as a base default for strategy comparisons. Default replay assumptions are 20 max positions and 20 sizing slots; account size, buying power, trade dollars, exposure, max positions, and share price are test-harness/sizing inputs, not knobs to optimize for what to buy.
+- If a sizing, exposure, max-position, or share-price experiment is ever needed, run it as a clearly labeled separate diagnostic after the selected strategy is fixed.
 - Do not add PDT guards, day-entry locks, day-exit locks, daily-loss stops, or risk-per-trade sizing back into the entry path for this version.
