@@ -159,8 +159,8 @@ $xaml = @'
                                 <ComboBoxItem Content="overnight"/>
                             </ComboBox>
                             <CheckBox x:Name="UseMarketStreamBox" Content="Stream minute bars over websocket" IsChecked="True"/>
-                            <TextBlock Text="REST refresh seconds"/>
-                            <TextBox x:Name="PollSecondsBox" Text="15"/>
+                            <TextBlock Text="Scan loop seconds"/>
+                            <TextBox x:Name="PollSecondsBox" Text="5"/>
                         </StackPanel>
                     </GroupBox>
 
@@ -400,7 +400,7 @@ function Get-AppConfig {
     [PSCustomObject]@{
         Symbols = $symbols
         Feed = Get-SelectedFeed
-        PollSeconds = Get-IntBoxValue -Box $PollSecondsBox -Default 15 -Minimum 5
+        PollSeconds = Get-IntBoxValue -Box $PollSecondsBox -Default 5 -Minimum 5
         DryRun = [bool]$DryRunBox.IsChecked
         MarketHoursOnly = [bool]$MarketHoursOnlyBox.IsChecked
         UseBracketOrders = [bool]$UseBracketBox.IsChecked

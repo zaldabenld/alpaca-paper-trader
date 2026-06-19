@@ -139,7 +139,7 @@ async def background_refresh_loop() -> None:
                 state = account_engine.state()
                 if not state.get("connected"):
                     continue
-                poll_seconds = max(5, int(state.get("config", {}).get("poll_seconds", 15) or 15))
+                poll_seconds = max(5, int(state.get("config", {}).get("poll_seconds", 5) or 5))
                 last = _last_refresh_by_account.get(account_engine.account_id, 0)
                 if now - last >= poll_seconds:
                     _last_refresh_by_account[account_engine.account_id] = now

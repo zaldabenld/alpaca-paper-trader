@@ -610,7 +610,7 @@ function readConfig() {
       .map((value) => value.trim().toUpperCase())
       .filter(Boolean),
     feed: fields.feed.value,
-    poll_seconds: readInt("pollSeconds", 15),
+    poll_seconds: readInt("pollSeconds", 5),
     dry_run: fields.dryRun.checked,
     market_hours_only: fields.marketHoursOnly.checked,
     use_market_stream: fields.useMarketStream.checked,
@@ -871,7 +871,7 @@ function presetConfig(profile) {
     use_top_volume_symbols: true,
     symbols: ["SPY", "QQQ"],
     feed: "iex",
-    poll_seconds: 15,
+    poll_seconds: 5,
     dry_run: true,
     market_hours_only: true,
     use_market_stream: true,

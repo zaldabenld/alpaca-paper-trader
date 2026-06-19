@@ -216,7 +216,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "symbols": ["SPY", "QQQ"],
         "use_top_volume_symbols": True,
         "feed": "iex",
-        "poll_seconds": 20,
+        "poll_seconds": 5,
         "dry_run": True,
         "market_hours_only": True,
         "use_market_stream": True,
@@ -271,7 +271,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "symbols": ["SPY", "QQQ"],
         "use_top_volume_symbols": True,
         "feed": "iex",
-        "poll_seconds": 15,
+        "poll_seconds": 5,
         "dry_run": True,
         "market_hours_only": True,
         "use_market_stream": True,
@@ -422,7 +422,7 @@ class AppConfig(BaseModel):
     symbols: list[str] = Field(default_factory=lambda: ["SPY", "QQQ"])
     use_top_volume_symbols: bool = True
     feed: str = "iex"
-    poll_seconds: int = 15
+    poll_seconds: int = 5
     dry_run: bool = True
     market_hours_only: bool = True
     use_market_stream: bool = True
