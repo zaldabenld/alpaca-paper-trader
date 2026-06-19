@@ -1855,6 +1855,8 @@ class TraderEngine:
         strategy_rows: list[dict[str, Any]],
     ) -> None:
         try:
+            if not bool(market_clock.get("is_open")):
+                return
             append_day_tape_event(
                 "strategy_scan",
                 {

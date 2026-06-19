@@ -125,7 +125,7 @@ The app also writes a local day tape for offline backtesting:
 %LOCALAPPDATA%\AlpacaPaperTrader\day-tape\tape-YYYYMMDD.jsonl
 ```
 
-The day tape records data the app is already using: market bars, trades, quotes, trading-status events, top-volume dashboard snapshots, ticker lookups, order intents, stream/backfill events, and sanitized strategy scan snapshots with account balances, positions, open/closed orders, strategy rows, and live config. It does not record API keys or secret keys, and it does not make extra Alpaca API calls.
+The day tape records data the app is already using: market bars, trades, quotes, trading-status events, top-volume dashboard snapshots, ticker lookups, order intents, stream/backfill events, and sanitized strategy scan snapshots with account balances, positions, open/closed orders, strategy rows, and live config. Full strategy scan snapshots are recorded only while Alpaca's market clock is open. It does not record API keys or secret keys, and it does not make extra Alpaca API calls.
 
 By default, day-tape files are kept for 14 days. Set `ALPACA_TRADER_DAY_TAPE_RETENTION_DAYS` to change retention, or set `ALPACA_TRADER_DISABLE_DAY_TAPE=1` to disable tape writing.
 
@@ -153,7 +153,7 @@ To fast-forward a week of tape without touching Alpaca:
 
 That fast-forward pass is the event-flow foundation. A fake broker/profit simulator can be layered on top of it once the tape has enough real market days.
 
-Expected storage depends on scan frequency, market activity, and how many symbols are streaming. The old replay logs are small, but a full day tape with trades and quotes can be much larger. Recent local tapes have been roughly 1.5-2.6 GB per full trading day, so the 14-day default can require roughly 25-40 GB. Run the summary command above after each new market day and lower `ALPACA_TRADER_DAY_TAPE_RETENTION_DAYS` if disk usage matters more than keeping a longer replay window.
+Expected storage depends on market activity, how many symbols are streaming, and how many market-hours scan snapshots are recorded. The old replay logs are small, but a full day tape with trades and market-hours scan snapshots can be much larger. Recent local tapes have been roughly 1.5-2.6 GB per full trading day before closed-market scan suppression, so the 14-day default can still require tens of GB on active days. Run the summary command above after each new market day and lower `ALPACA_TRADER_DAY_TAPE_RETENTION_DAYS` if disk usage matters more than keeping a longer replay window.
 
 The volume fields are also the foundation for a later automatic symbol source that can replace the manual ticker list with the top daily volume names.
 
