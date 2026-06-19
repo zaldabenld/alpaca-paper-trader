@@ -173,29 +173,38 @@ LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
 ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
     "conservative": {
         "min_price": Decimal("5"),
-        "min_recent_momentum": Decimal("0.03"),
-        "max_vwap_extension": Decimal("3.0"),
+        "min_recent_momentum": Decimal("0.05"),
+        "min_long_momentum": Decimal("0.05"),
+        "min_session_change": Decimal("1.35"),
+        "min_vwap_distance": Decimal("0.05"),
+        "max_vwap_extension": Decimal("2.25"),
         "max_session_extension": Decimal("6.0"),
-        "max_session_pullback": Decimal("1.5"),
-        "max_recent_pullback": Decimal("0.75"),
+        "max_session_pullback": Decimal("0.9"),
+        "max_recent_pullback": Decimal("0.55"),
         "late_momentum_floor": Decimal("0.50"),
     },
     "neutral": {
         "min_price": Decimal("3"),
-        "min_recent_momentum": Decimal("0.03"),
-        "max_vwap_extension": Decimal("4.0"),
+        "min_recent_momentum": Decimal("0.05"),
+        "min_long_momentum": Decimal("0.05"),
+        "min_session_change": Decimal("1.35"),
+        "min_vwap_distance": Decimal("0.05"),
+        "max_vwap_extension": Decimal("2.25"),
         "max_session_extension": Decimal("8.0"),
-        "max_session_pullback": Decimal("2.0"),
-        "max_recent_pullback": Decimal("1.0"),
+        "max_session_pullback": Decimal("0.9"),
+        "max_recent_pullback": Decimal("0.55"),
         "late_momentum_floor": Decimal("0.50"),
     },
     "aggressive": {
         "min_price": Decimal("2"),
-        "min_recent_momentum": Decimal("0.02"),
-        "max_vwap_extension": Decimal("5.0"),
+        "min_recent_momentum": Decimal("0.05"),
+        "min_long_momentum": Decimal("0.05"),
+        "min_session_change": Decimal("1.35"),
+        "min_vwap_distance": Decimal("0.05"),
+        "max_vwap_extension": Decimal("2.25"),
         "max_session_extension": Decimal("10.0"),
-        "max_session_pullback": Decimal("2.5"),
-        "max_recent_pullback": Decimal("1.25"),
+        "max_session_pullback": Decimal("0.9"),
+        "max_recent_pullback": Decimal("0.55"),
         "late_momentum_floor": Decimal("0.50"),
     },
 }
@@ -224,25 +233,33 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "short_period": 9,
         "long_period": 21,
         "rsi_period": 14,
-        "buy_rsi_min": "40",
-        "buy_rsi_max": "70",
+        "buy_rsi_min": "42",
+        "buy_rsi_max": "68",
         "sell_rsi": "70",
-        "min_entry_score": "38",
+        "min_entry_score": "44",
         "momentum_period": 6,
-        "min_momentum_percent": "0.05",
+        "min_momentum_percent": "0.08",
+        "min_recent_momentum_percent": "0.05",
+        "min_long_momentum_percent": "0.05",
+        "min_session_change_percent": "1.35",
+        "min_vwap_distance_percent": "0.05",
+        "max_vwap_distance_percent": "2.25",
+        "max_session_pullback_percent": "0.9",
+        "max_recent_pullback_percent": "0.55",
+        "late_momentum_floor_percent": "0.50",
         "smi_period": 10,
-        "min_smi": "5",
+        "min_smi": "40",
         "atr_period": 14,
         "min_buy_volume_ratio": "0.50",
         "reentry_score_boost": "12",
-        "inverse_etf_mode": "exclude",
+        "inverse_etf_mode": "allow",
         "volume_period": 20,
-        "volume_multiplier": "1.0",
+        "volume_multiplier": "1.5",
         "min_avg_volume": "0",
-        "take_profit_percent": "3.0",
+        "take_profit_percent": "2.5",
         "profit_trail_start_percent": "0",
         "profit_trail_drop_percent": "0",
-        "stop_loss_percent": "2.0",
+        "stop_loss_percent": "1.25",
         "stop_loss_grace_minutes": 0,
         "exit_time_in_force": "day",
         "cooldown_minutes": 0,
@@ -274,26 +291,34 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "buy_rsi_min": "40",
         "buy_rsi_max": "68",
         "sell_rsi": "72",
-        "min_entry_score": "38",
+        "min_entry_score": "44",
         "momentum_period": 6,
-        "min_momentum_percent": "0.05",
+        "min_momentum_percent": "0.08",
+        "min_recent_momentum_percent": "0.05",
+        "min_long_momentum_percent": "0.05",
+        "min_session_change_percent": "1.35",
+        "min_vwap_distance_percent": "0.05",
+        "max_vwap_distance_percent": "2.25",
+        "max_session_pullback_percent": "0.9",
+        "max_recent_pullback_percent": "0.55",
+        "late_momentum_floor_percent": "0.50",
         "smi_period": 10,
-        "min_smi": "5",
+        "min_smi": "40",
         "atr_period": 14,
         "min_buy_volume_ratio": "0.50",
-        "reentry_score_boost": "10",
-        "inverse_etf_mode": "exclude",
+        "reentry_score_boost": "12",
+        "inverse_etf_mode": "allow",
         "volume_period": 20,
-        "volume_multiplier": "1.0",
+        "volume_multiplier": "1.5",
         "min_avg_volume": "0",
-        "take_profit_percent": "4.5",
+        "take_profit_percent": "2.5",
         "profit_trail_start_percent": "0",
         "profit_trail_drop_percent": "0",
-        "stop_loss_percent": "3.0",
+        "stop_loss_percent": "1.25",
         "stop_loss_grace_minutes": 0,
         "exit_time_in_force": "day",
         "cooldown_minutes": 0,
-        "entry_open_guard_minutes": 10,
+        "entry_open_guard_minutes": 15,
         "entry_close_guard_minutes": 15,
     },
     "aggressive": {
@@ -315,33 +340,41 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "risk_per_trade_percent": "0",
         "max_total_exposure_percent": "50",
         "max_open_positions": 5,
-        "short_period": 5,
-        "long_period": 13,
-        "rsi_period": 10,
-        "buy_rsi_min": "35",
-        "buy_rsi_max": "85",
-        "sell_rsi": "80",
-        "min_entry_score": "35",
+        "short_period": 9,
+        "long_period": 21,
+        "rsi_period": 14,
+        "buy_rsi_min": "42",
+        "buy_rsi_max": "68",
+        "sell_rsi": "72",
+        "min_entry_score": "44",
         "momentum_period": 6,
-        "min_momentum_percent": "0.05",
+        "min_momentum_percent": "0.08",
+        "min_recent_momentum_percent": "0.05",
+        "min_long_momentum_percent": "0.05",
+        "min_session_change_percent": "1.35",
+        "min_vwap_distance_percent": "0.05",
+        "max_vwap_distance_percent": "2.25",
+        "max_session_pullback_percent": "0.9",
+        "max_recent_pullback_percent": "0.55",
+        "late_momentum_floor_percent": "0.50",
         "smi_period": 10,
-        "min_smi": "5",
+        "min_smi": "40",
         "atr_period": 14,
         "min_buy_volume_ratio": "0.50",
-        "reentry_score_boost": "8",
-        "inverse_etf_mode": "exclude",
-        "volume_period": 10,
-        "volume_multiplier": "0.75",
+        "reentry_score_boost": "12",
+        "inverse_etf_mode": "allow",
+        "volume_period": 20,
+        "volume_multiplier": "1.5",
         "min_avg_volume": "0",
-        "take_profit_percent": "6.0",
+        "take_profit_percent": "2.5",
         "profit_trail_start_percent": "0",
         "profit_trail_drop_percent": "0",
-        "stop_loss_percent": "4.0",
+        "stop_loss_percent": "1.25",
         "stop_loss_grace_minutes": 0,
         "exit_time_in_force": "day",
         "cooldown_minutes": 0,
-        "entry_open_guard_minutes": 10,
-        "entry_close_guard_minutes": 5,
+        "entry_open_guard_minutes": 15,
+        "entry_close_guard_minutes": 15,
     },
 }
 
@@ -356,6 +389,14 @@ PROFILE_STRATEGY_KEYS = {
     "min_entry_score",
     "momentum_period",
     "min_momentum_percent",
+    "min_recent_momentum_percent",
+    "min_long_momentum_percent",
+    "min_session_change_percent",
+    "min_vwap_distance_percent",
+    "max_vwap_distance_percent",
+    "max_session_pullback_percent",
+    "max_recent_pullback_percent",
+    "late_momentum_floor_percent",
     "smi_period",
     "min_smi",
     "atr_period",
@@ -398,29 +439,37 @@ class AppConfig(BaseModel):
     short_period: int = 9
     long_period: int = 21
     rsi_period: int = 14
-    buy_rsi_min: Decimal = Decimal("40")
+    buy_rsi_min: Decimal = Decimal("42")
     buy_rsi_max: Decimal = Decimal("68")
     sell_rsi: Decimal = Decimal("72")
-    min_entry_score: Decimal = Decimal("38")
+    min_entry_score: Decimal = Decimal("44")
     momentum_period: int = 6
-    min_momentum_percent: Decimal = Decimal("0.05")
+    min_momentum_percent: Decimal = Decimal("0.08")
+    min_recent_momentum_percent: Decimal = Decimal("0.05")
+    min_long_momentum_percent: Decimal = Decimal("0.05")
+    min_session_change_percent: Decimal = Decimal("1.35")
+    min_vwap_distance_percent: Decimal = Decimal("0.05")
+    max_vwap_distance_percent: Decimal = Decimal("2.25")
+    max_session_pullback_percent: Decimal = Decimal("0.9")
+    max_recent_pullback_percent: Decimal = Decimal("0.55")
+    late_momentum_floor_percent: Decimal = Decimal("0.50")
     smi_period: int = 10
-    min_smi: Decimal = Decimal("5")
+    min_smi: Decimal = Decimal("40")
     atr_period: int = 14
     min_buy_volume_ratio: Decimal = Decimal("0.50")
-    reentry_score_boost: Decimal = Decimal("10")
-    inverse_etf_mode: str = "exclude"
+    reentry_score_boost: Decimal = Decimal("12")
+    inverse_etf_mode: str = "allow"
     volume_period: int = 20
-    volume_multiplier: Decimal = Decimal("1.0")
+    volume_multiplier: Decimal = Decimal("1.5")
     min_avg_volume: Decimal = Decimal("0")
-    take_profit_percent: Decimal = Decimal("4.5")
+    take_profit_percent: Decimal = Decimal("2.5")
     profit_trail_start_percent: Decimal = Decimal("0")
     profit_trail_drop_percent: Decimal = Decimal("0")
-    stop_loss_percent: Decimal = Decimal("3.0")
+    stop_loss_percent: Decimal = Decimal("1.25")
     stop_loss_grace_minutes: int = 0
     exit_time_in_force: str = "day"
     cooldown_minutes: int = 0
-    entry_open_guard_minutes: int = 10
+    entry_open_guard_minutes: int = 15
     entry_close_guard_minutes: int = 15
 
     @field_validator("profile")
@@ -476,6 +525,14 @@ class AppConfig(BaseModel):
         "max_total_exposure_percent",
         "min_entry_score",
         "min_momentum_percent",
+        "min_recent_momentum_percent",
+        "min_long_momentum_percent",
+        "min_session_change_percent",
+        "min_vwap_distance_percent",
+        "max_vwap_distance_percent",
+        "max_session_pullback_percent",
+        "max_recent_pullback_percent",
+        "late_momentum_floor_percent",
         "min_buy_volume_ratio",
         "reentry_score_boost",
         "take_profit_percent",
@@ -492,13 +549,13 @@ class AppConfig(BaseModel):
     def validate_smi(cls, value: Decimal) -> Decimal:
         return max(Decimal("-100"), min(Decimal("100"), decimal_value(value)))
 
-    @field_validator("inverse_etf_mode")
+    @field_validator("inverse_etf_mode", mode="before")
     @classmethod
     def validate_inverse_etf_mode(cls, value: str) -> str:
-        mode = str(value or "exclude").strip().lower()
+        mode = str(value or "allow").strip().lower()
         if mode not in {"exclude", "allow", "inverse_only"}:
             raise ValueError("Inverse ETF mode must be exclude, allow, or inverse_only.")
-        return mode
+        return "allow" if mode == "exclude" else mode
 
     @field_validator("exit_time_in_force")
     @classmethod
@@ -509,6 +566,24 @@ class AppConfig(BaseModel):
         return tif
 
     def model_post_init(self, __context: Any) -> None:
+        fields_set = set(getattr(self, "model_fields_set", set()))
+        profile_limits = ENTRY_PROFILE_LIMITS.get(self.profile, ENTRY_PROFILE_LIMITS["neutral"])
+        if "min_recent_momentum_percent" not in fields_set:
+            self.min_recent_momentum_percent = profile_limits["min_recent_momentum"]
+        if "min_long_momentum_percent" not in fields_set:
+            self.min_long_momentum_percent = profile_limits["min_long_momentum"]
+        if "min_session_change_percent" not in fields_set:
+            self.min_session_change_percent = profile_limits["min_session_change"]
+        if "min_vwap_distance_percent" not in fields_set:
+            self.min_vwap_distance_percent = profile_limits["min_vwap_distance"]
+        if "max_vwap_distance_percent" not in fields_set:
+            self.max_vwap_distance_percent = profile_limits["max_vwap_extension"]
+        if "max_session_pullback_percent" not in fields_set:
+            self.max_session_pullback_percent = profile_limits["max_session_pullback"]
+        if "max_recent_pullback_percent" not in fields_set:
+            self.max_recent_pullback_percent = profile_limits["max_recent_pullback"]
+        if "late_momentum_floor_percent" not in fields_set:
+            self.late_momentum_floor_percent = profile_limits["late_momentum_floor"]
         if self.long_period <= self.short_period:
             raise ValueError("Long SMA must be greater than short SMA.")
         rsi_values = (self.buy_rsi_min, self.buy_rsi_max, self.sell_rsi)
@@ -573,14 +648,27 @@ LEGACY_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
 RETUNED_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
     "short_period": 9,
     "long_period": 21,
-    "buy_rsi_min": Decimal("40"),
-    "buy_rsi_max": Decimal("70"),
-    "min_entry_score": Decimal("38"),
+    "buy_rsi_min": Decimal("42"),
+    "buy_rsi_max": Decimal("68"),
+    "min_entry_score": Decimal("44"),
     "momentum_period": 6,
-    "min_momentum_percent": Decimal("0.05"),
-    "min_smi": Decimal("5"),
+    "min_momentum_percent": Decimal("0.08"),
+    "min_recent_momentum_percent": Decimal("0.05"),
+    "min_long_momentum_percent": Decimal("0.05"),
+    "min_session_change_percent": Decimal("1.35"),
+    "min_vwap_distance_percent": Decimal("0.05"),
+    "max_vwap_distance_percent": Decimal("2.25"),
+    "max_session_pullback_percent": Decimal("0.9"),
+    "max_recent_pullback_percent": Decimal("0.55"),
+    "late_momentum_floor_percent": Decimal("0.50"),
+    "min_smi": Decimal("40"),
     "min_buy_volume_ratio": Decimal("0.50"),
-    "volume_multiplier": Decimal("1.0"),
+    "reentry_score_boost": Decimal("12"),
+    "inverse_etf_mode": "allow",
+    "volume_multiplier": Decimal("1.5"),
+    "take_profit_percent": Decimal("2.5"),
+    "stop_loss_percent": Decimal("1.25"),
+    "entry_open_guard_minutes": 15,
     "entry_close_guard_minutes": 15,
 }
 
@@ -944,7 +1032,27 @@ def percent_change(value: Decimal, basis: Decimal) -> Decimal:
 
 
 def entry_profile_limits(config: AppConfig) -> dict[str, Decimal]:
-    return ENTRY_PROFILE_LIMITS.get(config.profile, ENTRY_PROFILE_LIMITS["neutral"])
+    limits = dict(ENTRY_PROFILE_LIMITS.get(config.profile, ENTRY_PROFILE_LIMITS["neutral"]))
+    limits["min_recent_momentum"] = config.min_recent_momentum_percent
+    limits["min_long_momentum"] = config.min_long_momentum_percent
+    limits["min_session_change"] = config.min_session_change_percent
+    limits["min_vwap_distance"] = config.min_vwap_distance_percent
+    if config.max_vwap_distance_percent > 0:
+        limits["max_vwap_extension"] = max(config.max_vwap_distance_percent, limits["min_vwap_distance"])
+    if config.max_session_pullback_percent > 0:
+        limits["max_session_pullback"] = config.max_session_pullback_percent
+    if config.max_recent_pullback_percent > 0:
+        limits["max_recent_pullback"] = config.max_recent_pullback_percent
+    limits["late_momentum_floor"] = config.late_momentum_floor_percent
+    return limits
+
+
+def below_entry_floor(value: Decimal | None, floor: Decimal) -> bool:
+    if value is None:
+        return True
+    if floor <= 0:
+        return value <= 0
+    return value < floor
 
 
 class TraderEngine:
@@ -1061,7 +1169,7 @@ class TraderEngine:
             mode = config.inverse_etf_mode
         if mode == "inverse_only":
             return list(DOWNTURN_INVERSE_ETF_SYMBOLS)
-        if use_top_volume and self.market_downturn_active():
+        if use_top_volume:
             return list(DOWNTURN_INVERSE_ETF_SYMBOLS)
         return []
 
@@ -2161,8 +2269,6 @@ class TraderEngine:
         halt_reason = self.halt_hold_reason(symbol)
         if halt_reason:
             return halt_reason
-        if snapshot.price is not None and snapshot.price < limits["min_price"]:
-            return f"Hold (price {money(snapshot.price)} < {money(limits['min_price'])})"
         if snapshot.rsi is None:
             return "Hold (RSI warming)"
         if not (config.buy_rsi_min <= snapshot.rsi <= config.buy_rsi_max):
@@ -2180,23 +2286,24 @@ class TraderEngine:
             return "Hold (recent momentum warming)"
         if recent_momentum < limits["min_recent_momentum"]:
             return f"Hold (recent momentum {recent_momentum:+.2f}%)"
-        if snapshot.rsi >= config.buy_rsi_max - Decimal("3") and snapshot.momentum_percent < limits["late_momentum_floor"]:
+        late_floor = limits["late_momentum_floor"]
+        if late_floor > 0 and snapshot.rsi >= config.buy_rsi_max - Decimal("3") and snapshot.momentum_percent < late_floor:
             return f"Hold (late RSI {snapshot.rsi:.1f}, momentum {snapshot.momentum_percent:+.2f}%)"
-        if snapshot.smi is not None and snapshot.smi >= Decimal("90") and snapshot.momentum_percent < limits["late_momentum_floor"]:
+        if late_floor > 0 and snapshot.smi is not None and snapshot.smi >= Decimal("90") and snapshot.momentum_percent < late_floor:
             return f"Hold (late SMI {snapshot.smi:.1f}, momentum {snapshot.momentum_percent:+.2f}%)"
         if getattr(snapshot, "long_momentum_percent", None) is None:
             return "Hold (long momentum warming)"
-        if snapshot.long_momentum_percent <= 0:
+        if below_entry_floor(snapshot.long_momentum_percent, limits["min_long_momentum"]):
             return f"Hold (long momentum {snapshot.long_momentum_percent:+.2f}%)"
         if getattr(snapshot, "session_change_percent", None) is None:
             return "Hold (session trend warming)"
-        if snapshot.session_change_percent <= 0:
+        if below_entry_floor(snapshot.session_change_percent, limits["min_session_change"]):
             return f"Hold (session trend {snapshot.session_change_percent:+.2f}%)"
         if snapshot.session_change_percent > limits["max_session_extension"]:
             return f"Hold (session extended {snapshot.session_change_percent:+.2f}%)"
         if getattr(snapshot, "vwap_distance_percent", None) is None:
             return "Hold (VWAP warming)"
-        if snapshot.vwap_distance_percent <= 0:
+        if below_entry_floor(snapshot.vwap_distance_percent, limits["min_vwap_distance"]):
             return f"Hold (below VWAP {snapshot.vwap_distance_percent:+.2f}%)"
         if snapshot.vwap_distance_percent > limits["max_vwap_extension"]:
             return f"Hold (extended above VWAP {snapshot.vwap_distance_percent:+.2f}%)"
@@ -2225,13 +2332,6 @@ class TraderEngine:
     def inverse_etf_hold_reason(self, symbol: str, config: AppConfig) -> str:
         clean_symbol = symbol.strip().upper()
         is_inverse = clean_symbol in INVERSE_ETF_SYMBOLS
-        is_leveraged_or_volatility = clean_symbol in LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS
-        if self.downturn_inverse_allowed(clean_symbol, config):
-            return ""
-        if config.inverse_etf_mode == "exclude" and is_inverse:
-            return "Hold (inverse ETF excluded)"
-        if config.inverse_etf_mode == "exclude" and is_leveraged_or_volatility:
-            return "Hold (leveraged/volatility ETP excluded)"
         if config.inverse_etf_mode == "inverse_only" and not is_inverse:
             return "Hold (inverse-only profile)"
         return ""

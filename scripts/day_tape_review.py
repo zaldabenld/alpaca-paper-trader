@@ -80,13 +80,20 @@ def normalize_hold(action: Any) -> str:
 def scan_bucket(payload: dict[str, Any]) -> str:
     config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
     profile = str(config.get("profile") or "unknown")
-    max_trade = str(config.get("max_trade_notional") or "?")
-    max_positions = str(config.get("max_open_positions") or "?")
     top_volume = str(config.get("use_top_volume_symbols"))
     dry_run = str(config.get("dry_run"))
+    return f"profile={profile}, top_volume={top_volume}, dry_run={dry_run}"
+
+
+def scan_source_sizing(payload: dict[str, Any]) -> str:
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    max_trade = str(config.get("max_trade_notional") or "?")
+    max_trade_percent = str(config.get("max_trade_percent") or "?")
+    max_positions = str(config.get("max_open_positions") or "?")
+    exposure = str(config.get("max_total_exposure_percent") or "?")
     return (
-        f"profile={profile}, max_trade={max_trade}, max_positions={max_positions}, "
-        f"top_volume={top_volume}, dry_run={dry_run}"
+        f"max_trade={max_trade}, max_trade_percent={max_trade_percent}, "
+        f"max_positions={max_positions}, exposure={exposure}"
     )
 
 
@@ -158,6 +165,7 @@ def review(files: list[Path]) -> int:
             "holds": Counter(),
             "symbols": Counter(),
             "candidate_rows": 0,
+            "source_sizing": Counter(),
             "latest": {},
             "latest_holds": Counter(),
         }
@@ -193,6 +201,7 @@ def review(files: list[Path]) -> int:
             key = scan_bucket(payload)
             bucket = buckets[key]
             bucket["scans"] += 1
+            bucket["source_sizing"][scan_source_sizing(payload)] += 1
             market_open = is_market_open(payload)
             trading_enabled = bool(payload.get("trading_enabled"))
             entries_allowed = bool(payload.get("entries_allowed"))
@@ -297,7 +306,8 @@ def review(files: list[Path]) -> int:
         print("  none")
     print()
 
-    print("Strategy Buckets")
+    print("Strategy Source Buckets")
+    print("  sizing/capacity is shown as source metadata, not strategy identity")
     for key, bucket in sorted(buckets.items()):
         latest = bucket["latest"]
         print(f"  {key}")
@@ -318,6 +328,7 @@ def review(files: list[Path]) -> int:
         print(f"    latest_holds: {top_items(bucket['latest_holds'])}")
         print(f"    all_day_holds: {top_items(bucket['holds'])}")
         print(f"    active_symbols: {top_items(bucket['symbols'], 10)}")
+        print(f"    source_sizing: {top_items(bucket['source_sizing'], 5)}")
     print()
 
     print("Findings")

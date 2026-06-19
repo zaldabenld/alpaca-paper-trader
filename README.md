@@ -141,7 +141,7 @@ To review strategy behavior and tape quality for the latest day:
 .\.venv\Scripts\python.exe scripts\day_tape_review.py --days 1
 ```
 
-The reviewer calls out strategy buckets that stayed flat all day, dominant hold reasons,
+The reviewer groups scans by source profile/top-volume/dry-run labels and keeps sizing/capacity as source metadata, not strategy identity. It calls out source buckets that stayed flat all day, dominant hold reasons,
 top-volume universe issues such as too many sub-$5 symbols, stream/top-volume errors,
 parse errors, order-intent counts, and concrete follow-ups for the next tuning pass.
 
@@ -153,7 +153,7 @@ To fast-forward a week of tape without touching Alpaca:
 
 That fast-forward pass is the event-flow foundation. A fake broker/profit simulator can be layered on top of it once the tape has enough real market days.
 
-Expected storage depends on scan frequency, market activity, and how many symbols are streaming. The old replay logs are small, but a full day tape with trades and quotes can be much larger. Budget roughly 5-10 GB for two weeks at first; after one full market day, run the summary command above and use the real number.
+Expected storage depends on scan frequency, market activity, and how many symbols are streaming. The old replay logs are small, but a full day tape with trades and quotes can be much larger. Recent local tapes have been roughly 1.5-2.6 GB per full trading day, so the 14-day default can require roughly 25-40 GB. Run the summary command above after each new market day and lower `ALPACA_TRADER_DAY_TAPE_RETENTION_DAYS` if disk usage matters more than keeping a longer replay window.
 
 The volume fields are also the foundation for a later automatic symbol source that can replace the manual ticker list with the top daily volume names.
 

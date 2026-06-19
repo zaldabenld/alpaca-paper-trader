@@ -198,7 +198,7 @@
                 </label>
                 <label>
                   Buy RSI Min
-                  <input id="buyRsiMin" type="number" min="0" max="100" step="0.5" value="40" />
+                  <input id="buyRsiMin" type="number" min="0" max="100" step="0.5" value="42" />
                 </label>
                 <label>
                   Buy RSI Max
@@ -206,7 +206,7 @@
                 </label>
                 <label>
                   Min Score
-                  <input id="minEntryScore" type="number" min="0" max="100" step="0.5" value="38" />
+                  <input id="minEntryScore" type="number" min="0" max="100" step="0.5" value="44" />
                 </label>
                 <label>
                   Momentum Bars
@@ -214,7 +214,39 @@
                 </label>
                 <label>
                   Min Momentum %
-                  <input id="minMomentumPercent" type="number" step="0.01" value="0.05" />
+                  <input id="minMomentumPercent" type="number" step="0.01" value="0.08" />
+                </label>
+                <label>
+                  Min Recent Momentum %
+                  <input id="minRecentMomentumPercent" type="number" step="0.01" value="0.05" />
+                </label>
+                <label>
+                  Min Long Momentum %
+                  <input id="minLongMomentumPercent" type="number" step="0.01" value="0.05" />
+                </label>
+                <label>
+                  Min Session Change %
+                  <input id="minSessionChangePercent" type="number" step="0.01" value="1.35" />
+                </label>
+                <label>
+                  Min VWAP Distance %
+                  <input id="minVwapDistancePercent" type="number" step="0.01" value="0.05" />
+                </label>
+                <label>
+                  Max VWAP Distance %
+                  <input id="maxVwapDistancePercent" type="number" min="0" step="0.05" value="2.25" />
+                </label>
+                <label>
+                  Max Session Pullback %
+                  <input id="maxSessionPullbackPercent" type="number" min="0" step="0.05" value="0.9" />
+                </label>
+                <label>
+                  Max Recent Pullback %
+                  <input id="maxRecentPullbackPercent" type="number" min="0" step="0.05" value="0.55" />
+                </label>
+                <label>
+                  Late Momentum Floor %
+                  <input id="lateMomentumFloorPercent" type="number" min="0" step="0.05" value="0.5" />
                 </label>
                 <label>
                   SMI Bars
@@ -222,7 +254,7 @@
                 </label>
                 <label>
                   Min SMI
-                  <input id="minSmi" type="number" min="-100" max="100" step="0.5" value="5" />
+                  <input id="minSmi" type="number" min="-100" max="100" step="0.5" value="40" />
                 </label>
                 <label>
                   ATR Bars
@@ -234,12 +266,11 @@
                 </label>
                 <label>
                   Re-entry Boost
-                  <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="10" />
+                  <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="12" />
                 </label>
                 <label>
                   Inverse ETFs
                   <select id="inverseEtfMode">
-                    <option value="exclude">Exclude</option>
                     <option value="allow">Allow</option>
                     <option value="inverse_only">Inverse only</option>
                   </select>
@@ -250,7 +281,7 @@
                 </label>
                 <label>
                   Vol Mult
-                  <input id="volumeMultiplier" type="number" min="0" step="0.05" value="1" />
+                  <input id="volumeMultiplier" type="number" min="0" step="0.05" value="1.5" />
                 </label>
                 <label>
                   Min Avg Vol
@@ -258,18 +289,18 @@
                 </label>
                 <label>
                   Profit %
-                  <input id="takeProfitPercent" type="number" min="0" step="0.05" value="4.5" />
+                  <input id="takeProfitPercent" type="number" min="0" step="0.05" value="2.5" />
                 </label>
                 <label>
                   Stop %
-                  <input id="stopLossPercent" type="number" min="0" step="0.05" value="3" />
+                  <input id="stopLossPercent" type="number" min="0" step="0.05" value="1.25" />
                 </label>
                 <input id="profitTrailStartPercent" type="hidden" value="0" />
                 <input id="profitTrailDropPercent" type="hidden" value="0" />
                 <input id="stopLossGraceMinutes" type="hidden" value="0" />
                 <label>
                   Open Guard
-                  <input id="entryOpenGuardMinutes" type="number" min="0" step="1" value="10" />
+                  <input id="entryOpenGuardMinutes" type="number" min="0" step="1" value="15" />
                 </label>
                 <label>
                   Close Guard

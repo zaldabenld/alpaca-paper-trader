@@ -34,4 +34,11 @@ This is a local Windows Alpaca paper-trading app. Treat it as a trading and cred
 - Preserve historical data during strategy resets unless the user explicitly asks to delete it.
 - Keep strategy execution serialized per account to avoid duplicate entries.
 - High trade volume must not override direction, session trend, or VWAP requirements.
+- Stock selection must be independent of share price, account size, buying power, max trade dollars, exposure, and max open positions. Those values may only control quantity, sizing, and capacity after the trade engine has ranked candidates.
+- Do not add or tune min/max share-price gates, max-entry-price filters, account-size filters, or max-position filters as strategy variables unless the user explicitly asks for a separate diagnostic.
+- Simulator strategy searches may only vary the stock-selection layer: movement, trend/session direction, VWAP/extension, pullback, volume/liquidity/flow, volatility/chop, SMI/RSI confirmation, inverse ETF regime behavior, and exits.
+- Do not add a separate inverse ETF downturn blocker. Inverse ETFs should be eligible when they pass the same stock-selection parameters as any other symbol; that eligibility is the downturn signal for this strategy.
+- Keep the simulator sizing/capacity layer as a base default for strategy comparisons. Default replay assumptions are one consolidated market-feed bucket, one standard replay account, `$1000` starting equity, `$1000` starting cash, 20 max positions, 20 sizing slots, 5% per slot, and 100% total exposure; account size, buying power, trade dollars, exposure, max positions, and share price are test-harness/sizing inputs, not knobs to optimize for what to buy.
+- Historical account/profile buckets are source data only. Do not report them as separate strategy simulations unless the user explicitly asks for a labeled diagnostic after trade-engine testing.
+- If a sizing, exposure, max-position, or share-price experiment is ever needed, run it as a clearly labeled separate diagnostic after the selected strategy is fixed.
 - Do not add PDT guards, day-entry locks, day-exit locks, daily-loss stops, or risk-per-trade sizing back into the entry path for this version.
