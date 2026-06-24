@@ -1075,3 +1075,71 @@ Fix evidence:
 - `record_background_error()` now records a `background_loop` runtime diagnostic if account-level error recording itself fails.
 - Added `test_background_error_recorder_failure_records_diagnostic` to `tests/test_backtester_boundary_diagnostics.py`.
 - Coordinator rerun passed: `scripts/run_regression_tests.py` 34 tests, Python compile, `node --check python_app\static\app.js`, `scripts/check_frontend_layout.py`, worktree-local `setup-worktree.ps1 -SmokeOnly`, and `git diff --check` with only LF-to-CRLF warnings.
+
+### 2026-06-24 - Step 7 full regression audit and live deployment plan
+Status: Complete; documentation-only update on `codex/alpaca-full-regression-deployment-plan`
+Scope guard:
+- Verified current worktree root before Step 7 edits: `C:\Users\solo leveling\.codex\worktrees\b399\alpaca trading app`.
+- Verified branch before Step 7 edits: `## codex/alpaca-full-regression-deployment-plan`.
+- Verified starting commit before Step 7 edits: `dffc0fa24a2c1b83f06b31ee41d7b275695e4dd5`.
+- The initial worktree materialized detached, but the coordinator attached it to `codex/alpaca-full-regression-deployment-plan` at `dffc0fa`; Step 7 self-check confirmed the branch was attached before any edits.
+- No behavior code was changed in Step 7.
+- Stable checkout, live backend, saved credentials, and real `%LOCALAPPDATA%\AlpacaPaperTrader` were not touched.
+
+Verification:
+- Initial `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` attempt did not execute because the worktree virtual environment was missing.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1` passed, created only worktree-local `.venv` and `.runtime\localappdata`, and the import smoke passed.
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 34 tests.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `.\.venv\Scripts\python.exe scripts\check_frontend_layout.py` passed; viewports 1024, 1100, and 1280 all had `whole_page_horizontal_overflow=false`.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
+- `git diff --check` passed after the Step 7 documentation edit; warning was only Git's LF-to-CRLF normalization notice for the audit log.
+
+Final AUDIT finding status:
+- AUDIT-001: Fixed for runtime currentness detection and launcher reuse safety; live replacement still requires an approved deployment/restart window.
+- AUDIT-002: Fixed; Daily P/L amount and percent are covered by regression tests.
+- AUDIT-003: Fixed; realized-today date/session behavior is explicit and covered.
+- AUDIT-004: Closed for deployment scope; backend/backtester boundary is in place, with remaining frontend monolith cleanup tracked as non-blocking future debt.
+- AUDIT-005: Fixed; the regression harness exists and covers the critical audited contracts.
+- AUDIT-006: Fixed for confirmed critical silent/default fallback paths; runtime diagnostics now surface recoverable failures.
+- AUDIT-007: Fixed; frontend polling/request coordination is covered.
+- AUDIT-008: Fixed; stale-runtime health/currentness behavior is covered.
+- AUDIT-009: Fixed; selected-account response sequencing is covered.
+- AUDIT-010: Fixed; explicit trade-size-mode behavior is covered.
+- AUDIT-011: Fixed; exposure-room downsizing behavior is covered.
+- AUDIT-012: Fixed; invalid saved-account shell/diagnostic behavior is covered.
+- AUDIT-013: Fixed; corrupt settings load, backup recovery, and atomic save behavior are covered.
+- AUDIT-014: Fixed; launcher currentness behavior is covered.
+- AUDIT-015: Fixed; narrow desktop layout contract is covered.
+- AUDIT-016: Fixed; Daily P/L raw/display/percent payload contract is covered.
+- AUDIT-017: Fixed; inverse ETF behavior no longer depends on a separate downturn gate and docs/UI match.
+- AUDIT-018: Fixed; shared market-stream bar subscriptions union connected eligible account symbols.
+- AUDIT-019: Fixed; held-position symbols are included in shared market-stream bar subscriptions.
+- AUDIT-020: Fixed; legacy PowerShell fallback is removed from the launch path.
+- AUDIT-021: Fixed; replay/backtester work now has live-engine boundary ports for account state, market data, order execution, replay, clock, and strategy evaluation.
+
+Final coordinator/non-AUDIT finding status:
+- STEP2-COORD-001: Closed; Step 7 verified the branch-attached worktree and did not edit the stable checkout.
+- STEP2-COORD-002: Closed; Step 7 did not move stable dirty state or touch the stable checkout.
+- STEP3-CHILD-001: Fixed; settings diagnostics still do not clear unresolved runtime-health errors without a successful runtime-health payload.
+- STEP5-COORD-001: Fixed; `inverse_etf_mode="exclude"` survives validation and suppresses the automatic inverse set.
+- STEP6-COORD-001: Closed; Step 6 completed through the clean replacement path, and Step 7 started from verified Step 6 commit `dffc0fa`.
+- STEP6-COORD-002: Fixed; background error recorder fallback now records a runtime diagnostic.
+
+Regression conclusion:
+- No new defects or regressions were discovered during Step 7 verification.
+- No code change is required from Step 7.
+
+Live deployment plan:
+- Status: Prepared only; not executed in Step 7.
+- Deployment should happen only after explicit user approval for a live app restart/replacement. Until then, leave the current live backend and data collection running.
+- Prefer a planned maintenance point, ideally outside active data-collection/trading hours. If deployment must happen while collection is active, first capture a timestamped pre-deploy snapshot of live `/api/health`, source stamp, PID, account count, and day-tape append state without exposing credentials or account identifiers.
+- Before touching the stable checkout, confirm its `git status --short --branch`, current commit, and live source stamp. Preserve any unrelated user changes; do not reset or overwrite the stable checkout.
+- Back up `%LOCALAPPDATA%\AlpacaPaperTrader\python-settings.json`, `instance.json`, and the day-tape directory to a timestamped local backup folder. Do not decrypt, print, copy into chat, or modify credential blobs.
+- Apply the verified code through Git in the stable checkout only after approval, using the audited Step 6/Step 7 branch lineage. Do not copy `.runtime`, `.venv`, worktree settings, or any worktree-local app data into the stable checkout.
+- Run pre-live checks from the stable checkout with an isolated `LOCALAPPDATA` override first: regression harness, Python compile, frontend syntax check, layout check, and smoke check. These checks must not connect to Alpaca or reuse real saved settings.
+- When approved to replace the running app, use the app's current launcher/runtime-currentness path and verify that `/api/health` reports the expected current source stamp, PID, and source path. Do not force-kill a protected PID while active collection is still required unless the user explicitly approves that interruption.
+- After launch, verify that saved accounts still load, settings diagnostics are clear or explicitly understood, runtime diagnostics have no new deployment errors, and day-tape recording resumes or remains correctly closed-market idle. Verify account count/names only locally and do not expose account identifiers.
+- Confirm that saved sizing/exposure/auto-connect/auto-start settings are unchanged from the pre-deploy snapshot unless the user explicitly approved a settings change.
+- Rollback plan: if health/currentness, settings load, credential access, or day-tape continuity fails, stop and preserve logs. Revert code to the previous stable commit only with user approval, and restore settings/day-tape backups only if the file state was changed or corrupted.
