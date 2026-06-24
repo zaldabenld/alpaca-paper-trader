@@ -29,7 +29,7 @@ Run the isolated regression harness from a repo worktree:
 .\.venv\Scripts\python.exe scripts\run_regression_tests.py
 ```
 
-The runner forces `LOCALAPPDATA` to `.runtime\localappdata`, disables auto-connect/auto-start, and does not require real Alpaca credentials. It includes runtime-currentness tests plus baseline tests for account metrics, sizing/config behavior, settings load/save behavior, and shared market-stream symbol selection. Desired future contracts that are known to fail in the current code are marked as expected failures with audit IDs.
+The runner forces `LOCALAPPDATA` to `.runtime\localappdata`, disables auto-connect/auto-start, and does not require real Alpaca credentials. It includes runtime-currentness tests plus baseline tests for account metrics, sizing/config behavior, settings load/save behavior, and shared market-stream symbol selection. If a future audit adds a desired contract before the implementation is ready, the harness can mark it as an expected failure with the audit ID.
 
 ## Launch
 
@@ -63,9 +63,9 @@ Use **Connect this account on launch** to control auto-connect per saved account
 
 The **Dashboard** is the landing page. Once any account is connected, it shows Alpaca market status, the cached top-25 S&P 500 stocks by daily volume, a ticker lookup panel, and a trade-halt monitor for the subscribed dashboard symbols. The top-volume table can be sorted by clicking its column headers.
 
-The top-volume list is ranked from S&P 500 stock snapshots and cached for 10 minutes to avoid unnecessary REST calls. After the list is seeded, the app subscribes to those 25 symbols over websocket for bars, quotes, trades, and trading-status updates. If SPY/QQQ show a broad intraday downturn, a small inverse ETF overlay can be added to the scan and stream universe. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
+The top-volume list is ranked from S&P 500 stock snapshots and cached for 10 minutes to avoid unnecessary REST calls. After the list is seeded, the app subscribes to the source dashboard symbols for trades and to a capped union of every connected market-stream account's scan and held-position symbols for bars and trading statuses. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
 
-By default, each account trades the dashboard top-25 S&P 500 volume symbols. During a broad SPY/QQQ selloff, the app can also scan a bounded inverse ETF watchlist (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`) so the strategy has bearish-market candidates without replacing the S&P stock universe. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade S&P 500 top 25** is unchecked.
+By default, each account trades the dashboard top-25 S&P 500 volume symbols. In **Allow top-volume set** mode, the app also scans a bounded inverse ETF watchlist (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`) as normal candidates; those symbols must pass the same direction, VWAP, volume, score, and tradeability checks as any other symbol. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade S&P 500 top 25** is unchecked.
 
 ## Operating Rules
 
@@ -98,7 +98,7 @@ To test strategies concurrently:
 
 Each account runs as a separate trading engine with its own Alpaca REST trading client. Stock market-data is shared through one app-level websocket and broadcast to each account strategy.
 
-The shared market-data websocket is intentionally app-level: one stream subscribes to the dashboard/top-volume symbols and each connected account consumes the same bar/quote/trade/status updates independently. The Dashboard shows stream status, symbol counts, last message age, reconnect count, and the latest stream/backfill error if one happens.
+The shared market-data websocket is intentionally app-level: one source account owns the websocket, dashboard symbols drive trade-volume updates, and bar/status subscriptions are the capped union of every connected account's active scan symbols plus open-position symbols. Each connected account consumes those updates independently. The Dashboard shows stream status, symbol counts, last message age, reconnect count, and the latest stream/backfill error if one happens.
 
 ## Strategy
 
@@ -115,7 +115,7 @@ The included strategy is intentionally conservative and transparent:
 - It sorts the eligible pool by score and buys the best candidates until max slots or block budget are full.
 - It skips symbols already owned or already pending entry.
 - It blocks same-symbol churn by requiring a higher score after an exit before that symbol can be re-entered.
-- It has an inverse ETF mode so inverse funds can be excluded from the normal bullish profile, allowed manually, used by an inverse-only profile, or temporarily scanned during a broad SPY/QQQ downturn.
+- It has an inverse ETF mode so the bounded inverse set can be excluded from automatic top-volume scanning, allowed as normal top-volume candidates, or used by an inverse-only profile. There is no separate SPY/QQQ downturn gate; inverse ETFs pass or fail through the normal entry-quality checks.
 - It uses market orders against the Alpaca paper endpoint.
 - It keeps entries fractional and manages exits with fractional DAY stop/limit orders using the configured take-profit and stop-loss percentages.
 - It classifies open orders as pending entries, strategy exits, protective exits, or manual/unknown orders so protective stop/limit orders do not count as new entries.

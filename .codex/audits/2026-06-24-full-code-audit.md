@@ -886,3 +886,83 @@ Conclusion:
 - No previous finding regressed in Step 4.
 - No new defects were discovered during Step 4 verification.
 - Step 5 market-stream union/held-symbol behavior was not started.
+
+## Step 5 Implementation Notes
+
+### 2026-06-24 - Step 5 status update: AUDIT-017
+Status: Fixed in `codex/alpaca-market-data-strategy-drift`
+Evidence:
+- Removed the unused `market_downturn_active()` and `downturn_inverse_allowed()` helpers and the stale downturn threshold constants.
+- Renamed the active inverse-universe helpers away from downturn terminology. Top-volume allow mode now adds the bounded inverse ETF set directly, inverse-only mode uses that same set, and exclude mode suppresses the automatic inverse set.
+- SPY/QQQ remain market-proxy analysis symbols only; they do not gate inverse ETF eligibility.
+- The entry path still evaluates inverse ETFs through `inverse_etf_hold_reason()` and the same normal entry-quality checks as other candidates. No separate downturn blocker was added.
+- The Accounts UI now labels the inverse choices as `Exclude auto set`, `Allow top-volume set`, and `Inverse set only`.
+- `README.md`, `readme.md`, and `OPERATING.md` now describe the current no-downturn-gate inverse ETF contract.
+- Regression coverage now asserts that `SQQQ` is eligible in allow mode without an inverse-specific hold reason, the old downturn gate helpers are absent, and exclude mode suppresses the automatic inverse set.
+
+### 2026-06-24 - Step 5 status update: AUDIT-018, AUDIT-019
+Status: Fixed in `codex/alpaca-market-data-strategy-drift`
+Evidence:
+- `TraderManager.market_data_symbols()` now keeps dashboard symbols tied to the selected shared stream source while building bar subscriptions as a deterministic capped union of every connected account with `use_market_stream` enabled.
+- The bar subscription union starts with dashboard symbols, then adds each eligible account's `scan_symbols()` in source-first order, preserving coverage for account-specific candidates.
+- Held positions are included because `scan_symbols()` already merges `position_symbols_for_market_data()`.
+- Regression coverage converted the previous AUDIT-018 and AUDIT-019 expected-failing future contracts into normal passing tests.
+
+### 2026-06-24 - Step 5 focused regression audit
+Status: Complete
+Checks:
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 27 tests, no expected failures.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
+- `.\.venv\Scripts\python.exe scripts\check_frontend_layout.py` passed with the Step 4 viewport evidence still showing no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices.
+Regression review:
+- AUDIT-001: No regression observed; runtime currentness/backend restart behavior was not changed.
+- AUDIT-002: No regression observed; Step 3 Daily P/L amount/percent display remains covered and unchanged.
+- AUDIT-003: No regression observed; realized-today session date behavior remains covered and unchanged.
+- AUDIT-004: No regression observed; no broad monolith split or architecture refactor was attempted.
+- AUDIT-005: No regression observed; regression harness remains in place and now covers Step 5 market-stream and inverse ETF contracts.
+- AUDIT-006: No regression observed; broad exception handling outside previously fixed settings paths was not changed.
+- AUDIT-007: No regression observed; frontend polling coordination tests still pass.
+- AUDIT-008: No regression observed; stale-runtime health/recovery behavior was preserved.
+- AUDIT-009: No regression observed; selected-account response sequencing tests still pass.
+- AUDIT-010: No regression observed; explicit trade-size-mode behavior remains covered and unchanged.
+- AUDIT-011: No regression observed; exposure-room downsizing behavior remains covered and unchanged.
+- AUDIT-012: No regression observed; invalid saved-account shell/diagnostic behavior remains covered and unchanged.
+- AUDIT-013: No regression observed; corrupt settings load and atomic save behavior remain covered and unchanged.
+- AUDIT-014: No regression observed; launcher currentness behavior was not changed.
+- AUDIT-015: No regression observed; layout contract check still passes at the Step 4 viewports.
+- AUDIT-016: No regression observed; standardized Daily P/L raw/display/percent contract remains covered and unchanged.
+- AUDIT-017: Fixed; inverse ETF code, docs, and UI now match the no-downturn-gate strategy contract.
+- AUDIT-018: Fixed; shared market-stream bar subscriptions now union connected eligible account scan symbols.
+- AUDIT-019: Fixed; held-position symbols are included in shared market-stream bar subscriptions.
+- AUDIT-020: No regression observed; launcher fallback/currentness behavior was not changed.
+- AUDIT-021: No regression observed; day-tape/replay behavior was not changed.
+- STEP3-CHILD-001: No regression observed; settings diagnostics still do not clear an unresolved runtime-health error without a successful runtime-health payload.
+Conclusion:
+- No previous finding regressed in Step 5.
+- No new defects were discovered during Step 5 verification.
+- Step 6 monolith/backtester work was not started.
+
+### 2026-06-24 - Step 5 coordinator-found finding: STEP5-COORD-001 exclude inverse mode validator remaps to allow
+Status: Fixed in `codex/alpaca-market-data-strategy-drift`
+Evidence:
+- Coordinator review after the Step 5 child finished found `AppConfig.validate_inverse_etf_mode()` still returns `allow` when the incoming mode is `exclude`.
+- The Step 5 UI, docs, and tests now define `exclude` as suppressing the automatic bounded inverse ETF set, but normal validated payloads would silently become `allow`.
+- The added regression test used `model_copy(update={"inverse_etf_mode": "exclude"})`, which bypasses normal validation and therefore did not catch the persisted/config-load path.
+Impact:
+- A user selecting `Exclude auto set` could still get automatic inverse ETF candidates after validation, contradicting the Step 5 contract.
+Required fix:
+- Preserve `exclude` through `AppConfig` validation and add a regression test that constructs or validates an `AppConfig` with `inverse_etf_mode="exclude"` through the normal validation path.
+- Rerun the full Step 5 verification set and update this finding before Step 5 is committed.
+Fix evidence:
+- `AppConfig.validate_inverse_etf_mode()` now returns the validated mode unchanged, so `exclude` survives normal Pydantic construction and saved/config payload validation.
+- `MarketStreamBaselineTests.test_inverse_etf_eligibility_has_no_downturn_gate` now constructs `AppConfig(symbols=["MSFT"], use_top_volume_symbols=True, inverse_etf_mode="exclude")` through the normal validation path, asserts the mode remains `exclude`, and proves `SQQQ` is not in `trading_symbols()`.
+Verification:
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 27 tests.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
+- `.\.venv\Scripts\python.exe scripts\check_frontend_layout.py` passed.
+- `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices.

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from .helpers import configure_test_environment, expected_failure
+from .helpers import configure_test_environment
 
 
 configure_test_environment()
@@ -290,7 +290,7 @@ class SettingsBaselineTests(unittest.TestCase):
 
 
 class MarketStreamBaselineTests(unittest.TestCase):
-    def test_market_stream_symbols_currently_use_first_eligible_account_only(self) -> None:
+    def test_market_stream_bar_symbols_union_connected_eligible_accounts(self) -> None:
         manager = fresh_manager()
         first = manager.create_account(
             "First",
@@ -307,11 +307,9 @@ class MarketStreamBaselineTests(unittest.TestCase):
         dashboard_symbols, bar_symbols = manager.market_data_symbols()
 
         self.assertEqual(dashboard_symbols, ["SPY"])
-        self.assertEqual(bar_symbols, ["SPY"])
-        self.assertNotIn("QQQ", bar_symbols)
+        self.assertEqual(bar_symbols, ["SPY", "QQQ"])
 
-    @expected_failure("AUDIT-018: market stream bar symbols should union connected eligible account symbols")
-    def test_desired_market_stream_symbols_union_connected_accounts(self) -> None:
+    def test_market_stream_bar_symbols_follow_source_then_other_accounts(self) -> None:
         manager = fresh_manager()
         first = manager.create_account(
             "First",
@@ -327,10 +325,9 @@ class MarketStreamBaselineTests(unittest.TestCase):
 
         _dashboard_symbols, bar_symbols = manager.market_data_symbols()
 
-        self.assertIn("SPY", bar_symbols)
-        self.assertIn("QQQ", bar_symbols)
+        self.assertEqual(bar_symbols, ["SPY", "QQQ"])
 
-    def test_held_positions_are_in_scan_symbols_but_not_current_stream_bars(self) -> None:
+    def test_held_position_symbols_are_in_shared_market_stream_bars(self) -> None:
         manager = fresh_manager()
         engine = manager.create_account(
             "Held",
@@ -342,24 +339,23 @@ class MarketStreamBaselineTests(unittest.TestCase):
 
         self.assertIn("AAPL", engine.scan_symbols())
         _dashboard_symbols, bar_symbols = manager.market_data_symbols()
-        self.assertEqual(bar_symbols, ["SPY"])
-        self.assertNotIn("AAPL", bar_symbols)
+        self.assertEqual(bar_symbols, ["SPY", "AAPL"])
 
-    @expected_failure("AUDIT-019: held-position symbols should be included in shared market stream bars")
-    def test_desired_market_stream_bars_include_held_position_symbols(self) -> None:
-        manager = fresh_manager()
-        engine = manager.create_account(
-            "Held",
-            AppConfig(symbols=["SPY"], use_top_volume_symbols=False, use_market_stream=True),
-        )
-        engine.connected = True
-        engine.positions = [{"symbol": "AAPL", "qty_raw": "0.25"}]
-        manager.selected_account_id = engine.account_id
+    def test_inverse_etf_eligibility_has_no_downturn_gate(self) -> None:
+        engine = TraderEngine("acct", "Inverse")
+        config = AppConfig(symbols=["MSFT"], use_top_volume_symbols=True, inverse_etf_mode="allow")
+        engine.config = config
+        engine.top_volume_symbols = ["MSFT", "NVDA"]
 
-        _dashboard_symbols, bar_symbols = manager.market_data_symbols()
+        self.assertIn("SQQQ", engine.trading_symbols())
+        self.assertEqual(engine.inverse_etf_hold_reason("SQQQ", config), "")
+        self.assertFalse(hasattr(engine, "market_downturn_active"))
+        self.assertFalse(hasattr(engine, "downturn_inverse_allowed"))
 
-        self.assertIn("SPY", bar_symbols)
-        self.assertIn("AAPL", bar_symbols)
+        exclude_config = AppConfig(symbols=["MSFT"], use_top_volume_symbols=True, inverse_etf_mode="exclude")
+        self.assertEqual(exclude_config.inverse_etf_mode, "exclude")
+        engine.config = exclude_config
+        self.assertNotIn("SQQQ", engine.trading_symbols())
 
 
 if __name__ == "__main__":

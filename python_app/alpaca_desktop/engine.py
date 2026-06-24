@@ -133,11 +133,8 @@ INVERSE_ETF_SYMBOLS = {
     "SARK",
 }
 
-DOWNTURN_PROXY_SYMBOLS = ("SPY", "QQQ")
-DOWNTURN_INVERSE_ETF_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")
-DOWNTURN_SESSION_DROP_PERCENT = Decimal("-0.75")
-DOWNTURN_BROAD_DROP_PERCENT = Decimal("-0.35")
-DOWNTURN_MOMENTUM_DROP_PERCENT = Decimal("-0.10")
+MARKET_PROXY_SYMBOLS = ("SPY", "QQQ")
+TOP_VOLUME_INVERSE_ETF_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")
 
 LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
     "BOIL",
@@ -561,7 +558,7 @@ class AppConfig(BaseModel):
         mode = str(value or "allow").strip().lower()
         if mode not in {"exclude", "allow", "inverse_only"}:
             raise ValueError("Inverse ETF mode must be exclude, allow, or inverse_only.")
-        return "allow" if mode == "exclude" else mode
+        return mode
 
     @field_validator("trade_size_mode", mode="before")
     @classmethod
@@ -1264,55 +1261,26 @@ class TraderEngine:
                 base_symbols = list(self.top_volume_symbols[:DASHBOARD_TOP_LIMIT])
             else:
                 base_symbols = list(self.config.symbols)
-        return merged_symbols(base_symbols, self.active_downturn_inverse_symbols())
+        return merged_symbols(base_symbols, self.active_inverse_symbols())
 
-    def active_downturn_inverse_symbols(self) -> list[str]:
+    def active_inverse_symbols(self) -> list[str]:
         with self.lock:
             config = self.config
             use_top_volume = config.use_top_volume_symbols
             mode = config.inverse_etf_mode
         if mode == "inverse_only":
-            return list(DOWNTURN_INVERSE_ETF_SYMBOLS)
-        if use_top_volume:
-            return list(DOWNTURN_INVERSE_ETF_SYMBOLS)
+            return list(TOP_VOLUME_INVERSE_ETF_SYMBOLS)
+        if use_top_volume and mode == "allow":
+            return list(TOP_VOLUME_INVERSE_ETF_SYMBOLS)
         return []
 
-    def downturn_analysis_symbols(self) -> list[str]:
+    def market_proxy_analysis_symbols(self) -> list[str]:
         with self.lock:
             use_top_volume = self.config.use_top_volume_symbols
             mode = self.config.inverse_etf_mode
         if not use_top_volume and mode != "inverse_only":
             return []
-        return list(DOWNTURN_PROXY_SYMBOLS) + list(DOWNTURN_INVERSE_ETF_SYMBOLS)
-
-    def market_downturn_active(self) -> bool:
-        decisive_proxy_count = 0
-        broad_weak_proxy_count = 0
-        for symbol in DOWNTURN_PROXY_SYMBOLS:
-            snapshot = self.snapshot(symbol)
-            session_change = getattr(snapshot, "session_change_percent", None)
-            vwap_distance = getattr(snapshot, "vwap_distance_percent", None)
-            if session_change is None or vwap_distance is None:
-                continue
-            below_vwap = vwap_distance < 0
-            if session_change <= DOWNTURN_BROAD_DROP_PERCENT and below_vwap:
-                broad_weak_proxy_count += 1
-            momentum = getattr(snapshot, "momentum_percent", None)
-            long_momentum = getattr(snapshot, "long_momentum_percent", None)
-            momentum_down = momentum is not None and momentum <= DOWNTURN_MOMENTUM_DROP_PERCENT
-            long_down = long_momentum is not None and long_momentum < 0
-            bias_down = snapshot.bias == "Bearish"
-            if session_change <= DOWNTURN_SESSION_DROP_PERCENT and below_vwap and (momentum_down or long_down or bias_down):
-                decisive_proxy_count += 1
-        return decisive_proxy_count >= 1 or broad_weak_proxy_count >= 2
-
-    def downturn_inverse_allowed(self, symbol: str, config: AppConfig) -> bool:
-        clean_symbol = symbol.strip().upper()
-        if clean_symbol not in DOWNTURN_INVERSE_ETF_SYMBOLS:
-            return False
-        if config.inverse_etf_mode == "inverse_only":
-            return True
-        return config.use_top_volume_symbols and self.market_downturn_active()
+        return list(MARKET_PROXY_SYMBOLS)
 
     def position_symbols_for_market_data(self) -> list[str]:
         with self.lock:
@@ -1326,7 +1294,7 @@ class TraderEngine:
         return merged_symbols(
             self.trading_symbols(),
             position_symbols or self.position_symbols_for_market_data(),
-            self.downturn_analysis_symbols(),
+            self.market_proxy_analysis_symbols(),
         )
 
     def clear_entry_score(self, symbol: str) -> None:
@@ -1743,9 +1711,7 @@ class TraderEngine:
             for symbol in symbols:
                 if should_trade and symbol not in position_symbols and symbol not in entry_symbols:
                     self.clear_entry_score(symbol)
-                    if symbol in DOWNTURN_INVERSE_ETF_SYMBOLS:
-                        self.strategy_state.last_action[symbol] = "Hold (inverse overlay inactive)"
-                    elif symbol in DOWNTURN_PROXY_SYMBOLS and self.config.use_top_volume_symbols:
+                    if symbol in MARKET_PROXY_SYMBOLS and self.config.use_top_volume_symbols:
                         self.strategy_state.last_action[symbol] = "Hold (market proxy only)"
                 rows.append(self.snapshot(symbol).as_dict())
 
@@ -4736,18 +4702,30 @@ class TraderManager:
         engines = [engine for engine in self.connected_engines() if engine.config.use_market_stream]
         source = self.shared_market_source()
         ordered_engines = ([source] if source in engines else []) + [engine for engine in engines if engine is not source]
-        for engine in ordered_engines:
-            symbols = engine.trading_symbols()
-            dashboard_symbols = []
-            for symbol in symbols:
+        dashboard_symbols: list[str] = []
+        if source in engines:
+            for symbol in source.trading_symbols():
                 clean = str(symbol or "").strip().upper()
                 if clean and clean not in dashboard_symbols:
                     dashboard_symbols.append(clean)
                 if len(dashboard_symbols) >= MARKET_STREAM_SYMBOL_LIMIT:
                     break
-            if dashboard_symbols:
-                return dashboard_symbols, list(dashboard_symbols)
-        return [], []
+
+        bar_symbols: list[str] = []
+
+        def append_bar_symbol(symbol: Any) -> None:
+            clean = str(symbol or "").strip().upper()
+            if clean and clean not in bar_symbols and len(bar_symbols) < MARKET_STREAM_SYMBOL_LIMIT:
+                bar_symbols.append(clean)
+
+        for symbol in dashboard_symbols:
+            append_bar_symbol(symbol)
+        for engine in ordered_engines:
+            for symbol in engine.scan_symbols():
+                append_bar_symbol(symbol)
+            if len(bar_symbols) >= MARKET_STREAM_SYMBOL_LIMIT:
+                break
+        return dashboard_symbols, bar_symbols
 
     def ensure_market_data_stream(self, force: bool = False) -> None:
         with self.market_stream_control_lock:
