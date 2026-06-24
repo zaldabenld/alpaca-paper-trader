@@ -21,6 +21,16 @@ To reinstall dependencies:
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+## Tests
+
+Run the isolated regression harness from a repo worktree:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_regression_tests.py
+```
+
+The runner forces `LOCALAPPDATA` to `.runtime\localappdata`, disables auto-connect/auto-start, and does not require real Alpaca credentials. It includes runtime-currentness tests plus baseline tests for account metrics, sizing/config behavior, settings load/save behavior, and shared market-stream symbol selection. Desired future contracts that are known to fail in the current code are marked as expected failures with audit IDs.
+
 ## Launch
 
 Run:

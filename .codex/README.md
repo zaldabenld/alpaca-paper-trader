@@ -15,3 +15,11 @@ powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly
 ```
 
 The setup script points `LOCALAPPDATA` at `.runtime\localappdata` for checks so Codex worktrees do not read or write the stable app's saved Alpaca settings.
+
+Run the repo-local regression harness with:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_regression_tests.py
+```
+
+The regression runner also points `LOCALAPPDATA` at `.runtime\localappdata`, disables auto-connect/auto-start, and needs no real Alpaca credentials.

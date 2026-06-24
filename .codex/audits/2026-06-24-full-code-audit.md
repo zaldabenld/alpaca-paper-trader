@@ -644,3 +644,70 @@ Evidence:
 - `python_app/alpaca_desktop/engine.py::TraderManager.market_data_symbols()` calls `engine.trading_symbols()` instead of `engine.scan_symbols()`, so held positions can be omitted from shared bar subscriptions.
 Step 2 harness note:
 - Baseline tests will prove held symbols are present in `scan_symbols()` but absent from current market-stream bar symbols, with the desired inclusion marked expected-failing.
+
+## Step 2 Implementation Notes
+
+### 2026-06-24 - Step 2 status update: AUDIT-005
+Status: Fixed in `codex/alpaca-regression-harness-v2`
+Evidence:
+- Added repo-local regression runner `scripts/run_regression_tests.py`.
+- Added baseline unittest coverage in `tests/test_regression_baselines.py` and shared test helper `tests/helpers.py`.
+- The runner forces `LOCALAPPDATA` to `.runtime\localappdata`, disables auto-connect/auto-start, and requires no real Alpaca credentials.
+- The runner includes the existing Step 1 runtime-currentness tests from `scripts/test_runtime_currentness.py`.
+- Documented the command in `README.md` and `.codex/README.md`: `.\.venv\Scripts\python.exe scripts\run_regression_tests.py`.
+
+### 2026-06-24 - Step 2 baseline coverage update: AUDIT-002, AUDIT-003, AUDIT-010, AUDIT-011, AUDIT-012, AUDIT-013, AUDIT-016, AUDIT-018, AUDIT-019
+Status: Baseline covered; business behavior intentionally left open for later steps
+Evidence:
+- AUDIT-002/AUDIT-016: `ProfitLossContractBaselineTests` pins the current selected-account and account-summary Daily P/L payload shapes, and marks the standardized raw/display/percent contract expected-failing.
+- AUDIT-003: `ProfitLossContractBaselineTests` pins current-date realized-sell inclusion and prior-date exclusion, and marks explicit session/date exposure expected-failing.
+- AUDIT-010: `ConfigAndSizingBaselineTests` pins the current implicit sizing-field conflict behavior and marks explicit `trade_size_mode` conflict rejection expected-failing.
+- AUDIT-011: `ConfigAndSizingBaselineTests` pins current exposure-room blocking and marks downsizing to remaining exposure room expected-failing.
+- AUDIT-012: `SettingsBaselineTests` pins current invalid saved-account drop behavior and marks visible invalid-account shell preservation expected-failing.
+- AUDIT-013: `SettingsBaselineTests` pins corrupt settings loading as `{}` and save write-error propagation, and marks visible corrupt-settings load error surfacing expected-failing.
+- AUDIT-018: `MarketStreamBaselineTests` pins current first-eligible-account stream symbol selection and marks unioned connected-account bar symbols expected-failing.
+- AUDIT-019: `MarketStreamBaselineTests` proves held symbols are included in `scan_symbols()` but omitted from current shared stream bar symbols, and marks held-symbol bar inclusion expected-failing.
+Expected-failing future contracts:
+- `test_desired_daily_pl_contract_has_standard_raw_display_and_percent_fields` - AUDIT-002/AUDIT-016
+- `test_desired_daily_realized_summary_exposes_session_date` - AUDIT-003
+- `test_desired_trade_size_mode_rejects_conflicting_caps` - AUDIT-010
+- `test_desired_trade_notional_downsizes_to_remaining_exposure_room` - AUDIT-011
+- `test_desired_saved_account_parse_failure_preserves_visible_shell` - AUDIT-012
+- `test_desired_corrupt_settings_load_surfaces_error` - AUDIT-013
+- `test_desired_market_stream_symbols_union_connected_accounts` - AUDIT-018
+- `test_desired_market_stream_bars_include_held_position_symbols` - AUDIT-019
+Harness-discovered changes from baseline:
+- None. Current behavior matched the Step 2 baseline confirmations.
+
+### 2026-06-24 - Step 2 focused regression audit
+Status: Complete
+Checks:
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 22 tests, with 8 expected failures for documented future contracts.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
+- `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices for edited text files.
+Regression review:
+- AUDIT-001: No regression observed; runtime currentness code was not changed.
+- AUDIT-002: No regression observed; baseline contract coverage added, behavior intentionally unchanged.
+- AUDIT-003: No regression observed; baseline date-boundary coverage added, behavior intentionally unchanged.
+- AUDIT-004: No regression observed; no monolith split or production refactor was attempted.
+- AUDIT-005: Fixed for Step 2; repo-local regression harness now exists and is documented.
+- AUDIT-006: No regression observed; broad exception handling was not changed.
+- AUDIT-007: No regression observed; frontend polling behavior was not changed.
+- AUDIT-008: No regression observed; Step 1 currentness behavior was not changed.
+- AUDIT-009: No regression observed; selected-account response sequencing was not changed.
+- AUDIT-010: No regression observed; baseline sizing-conflict coverage added, behavior intentionally unchanged.
+- AUDIT-011: No regression observed; baseline exposure-room coverage added, behavior intentionally unchanged.
+- AUDIT-012: No regression observed; baseline saved-account-load failure coverage added, behavior intentionally unchanged.
+- AUDIT-013: No regression observed; baseline settings load/save error coverage added, behavior intentionally unchanged.
+- AUDIT-014: No regression observed; VBS launcher currentness behavior was not changed.
+- AUDIT-015: No regression observed; layout/CSS was not changed.
+- AUDIT-016: No regression observed; baseline P/L field-overload coverage added, behavior intentionally unchanged.
+- AUDIT-017: No regression observed; inverse ETF code/docs were not changed.
+- AUDIT-018: No regression observed; baseline first-account stream selection coverage added, behavior intentionally unchanged.
+- AUDIT-019: No regression observed; baseline held-position stream omission coverage added, behavior intentionally unchanged.
+- AUDIT-020: No regression observed; Step 1 launcher fallback behavior was not changed.
+- AUDIT-021: No regression observed; day-tape/replay behavior was not changed.
+Conclusion:
+- No previous finding regressed in Step 2.
