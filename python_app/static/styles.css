@@ -96,6 +96,28 @@ select {
   white-space: nowrap;
 }
 
+.runtime-warning {
+  background: #fff1f1;
+  border-bottom: 1px solid #e6a7a7;
+  color: #742323;
+  display: grid;
+  gap: 4px;
+  padding: 12px 24px;
+}
+
+.runtime-warning[hidden] {
+  display: none;
+}
+
+.runtime-warning strong {
+  font-size: 14px;
+}
+
+.runtime-warning span {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .layout {
   display: grid;
   gap: 18px;

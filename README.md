@@ -1,6 +1,6 @@
 # Alpaca Paper Trader
 
-A local Windows desktop app for Alpaca paper trading. The primary app is now a Python/FastAPI desktop-launched web UI using Alpaca's official SDK. The original PowerShell/WPF app remains available as a fallback.
+A local Windows desktop app for Alpaca paper trading. The supported app is a Python/FastAPI desktop-launched web UI using Alpaca's official SDK. The original PowerShell/WPF app is legacy reference material and is not launched as a fallback.
 
 - `alpaca-py` for paper Trading API account, orders, positions, clock, and stock bars
 - `alpaca.data.live.StockDataStream` for one app-level market-data websocket
@@ -31,11 +31,11 @@ Run:
 
 Then open **Alpaca Paper Trader** from your desktop.
 
-You can also run `Launch Alpaca Paper Trader.cmd` directly from this folder.
+You can also run `Launch Alpaca Paper Trader.cmd` directly from this folder. If the Python virtualenv is missing or dependencies fail to import, this launcher stops with an explicit error instead of opening the legacy PowerShell trader.
 
 The desktop shortcut uses a no-window launcher and opens the already-running app if one exists, which helps avoid accidental duplicate websocket sessions.
 
-The legacy no-dependency app can be opened with `Launch Legacy PowerShell Trader.cmd`.
+`Launch Legacy PowerShell Trader.cmd` is retained only as an unsupported legacy reference launcher.
 
 ## First Use
 

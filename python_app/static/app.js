@@ -65,6 +65,8 @@ const fields = {
 
 const els = {
   statusText: document.querySelector("#statusText"),
+  runtimeHealthBanner: document.querySelector("#runtimeHealthBanner"),
+  runtimeHealthText: document.querySelector("#runtimeHealthText"),
   dashboardView: document.querySelector("#dashboardView"),
   accountsView: document.querySelector("#accountsView"),
   navButtons: document.querySelectorAll(".nav-button"),
@@ -124,6 +126,8 @@ const els = {
 };
 
 const preferredAppPort = "8765";
+let runtimeHealth = null;
+let runtimeStale = false;
 
 const configKeys = [
   "profile",
@@ -951,6 +955,58 @@ async function postJson(url, body) {
   return response.json();
 }
 
+async function fetchRuntimeHealth(baseUrl = "") {
+  const response = await fetch(`${baseUrl}/api/health`, {
+    cache: "no-store",
+    mode: baseUrl ? "cors" : "same-origin",
+  });
+  if (!response.ok) throw new Error(`Runtime health check failed: ${response.statusText}`);
+  return response.json();
+}
+
+function healthSummary(health = {}) {
+  const pid = health.pid || "unknown";
+  const sourceStamp = health.source_stamp || "unknown";
+  const expectedStamp = health.expected_source_stamp || "unknown";
+  const sourcePath = health.source_path || "unknown source path";
+  const reason = health.stale_reason || "Runtime health did not match the current app source.";
+  return `${reason} PID ${pid}. Source ${sourcePath}. Running stamp ${sourceStamp}; expected ${expectedStamp}. Close the stale backend process or relaunch from the current folder.`;
+}
+
+function renderRuntimeHealth(health) {
+  runtimeHealth = health || null;
+  runtimeStale = Boolean(health && health.current === false);
+  if (!els.runtimeHealthBanner || !els.runtimeHealthText) return;
+  if (!health || health.current === true) {
+    els.runtimeHealthBanner.hidden = true;
+    els.runtimeHealthText.textContent = "";
+    return;
+  }
+  els.runtimeHealthText.textContent = healthSummary(health);
+  els.runtimeHealthBanner.hidden = false;
+  els.statusText.textContent = "Stale runtime warning";
+}
+
+function renderRuntimeHealthError(message) {
+  runtimeStale = true;
+  if (els.runtimeHealthBanner && els.runtimeHealthText) {
+    els.runtimeHealthText.textContent = message;
+    els.runtimeHealthBanner.hidden = false;
+  }
+  els.statusText.textContent = "Runtime health unavailable";
+}
+
+async function checkRuntimeHealth() {
+  try {
+    const health = await fetchRuntimeHealth();
+    renderRuntimeHealth(health);
+    return health;
+  } catch (error) {
+    renderRuntimeHealthError(error.message || "Runtime health check failed.");
+    return null;
+  }
+}
+
 async function fetchWithRecovery(url, options) {
   try {
     return await fetch(url, options);
@@ -963,23 +1019,32 @@ async function fetchWithRecovery(url, options) {
 async function recoverStaleInstance(error) {
   if (
     staleInstanceRedirecting ||
-    !["127.0.0.1", "localhost"].includes(window.location.hostname) ||
-    window.location.port === preferredAppPort
+    !["127.0.0.1", "localhost"].includes(window.location.hostname)
   ) {
     return false;
   }
 
   const target = `http://127.0.0.1:${preferredAppPort}`;
   try {
-    const response = await fetch(`${target}/api/state`, { cache: "no-store", mode: "cors" });
-    if (!response.ok) return false;
+    const health = await fetchRuntimeHealth(target);
+    if (health.current !== true) {
+      renderRuntimeHealth(health);
+      els.topVolumeUpdated.textContent = "A stale backend is responding on the preferred app port.";
+      return false;
+    }
+    if (window.location.port === preferredAppPort) {
+      renderRuntimeHealth(health);
+      return false;
+    }
     staleInstanceRedirecting = true;
     els.statusText.textContent = "Opening active app instance...";
     els.topVolumeUpdated.textContent = `Opening ${target}...`;
     window.location.assign(`${target}/?v=stable-port`);
     return true;
   } catch {
-    els.topVolumeUpdated.textContent = error?.message || "This app instance is not responding.";
+    const message = error?.message || "This app instance is not responding.";
+    renderRuntimeHealthError(message);
+    els.topVolumeUpdated.textContent = message;
     return false;
   }
 }
@@ -1019,6 +1084,7 @@ function findSavedAccount(accountId) {
 
 async function loadState() {
   try {
+    await checkRuntimeHealth();
     const suffix = selectedAccountId ? `?account_id=${encodeURIComponent(selectedAccountId)}` : "";
     const response = await fetchWithRecovery(`/api/state${suffix}`);
     if (!response.ok) throw new Error(response.statusText);
@@ -1032,6 +1098,7 @@ async function loadState() {
 
 async function loadDashboard() {
   try {
+    await checkRuntimeHealth();
     const suffix = selectedAccountId ? `?account_id=${encodeURIComponent(selectedAccountId)}` : "";
     const response = await fetchWithRecovery(`/api/dashboard${suffix}`);
     if (!response.ok) throw new Error(response.statusText);
@@ -1764,7 +1831,7 @@ window.addEventListener("unhandledrejection", (event) => {
   els.statusText.textContent = event.reason?.message || String(event.reason);
 });
 
-loadSettings().then(async () => {
+checkRuntimeHealth().then(() => loadSettings()).then(async () => {
   updateAllTableSortButtons();
   await loadState();
   await loadDashboard();

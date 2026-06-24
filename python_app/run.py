@@ -8,6 +8,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
@@ -21,13 +22,17 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from alpaca_desktop.currentness import (  # noqa: E402
+    ROOT as SOURCE_ROOT,
+    same_source_path,
+    source_stamp,
+)
 from alpaca_desktop.server import app  # noqa: E402
 
 
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "AlpacaPaperTrader"
 INSTANCE_PATH = APP_DATA_DIR / "instance.json"
 DEFAULT_PORT = 8765
-SOURCE_SUFFIXES = {".py", ".html", ".js", ".css", ".webmanifest"}
 
 
 def find_port(host: str) -> int:
@@ -56,23 +61,6 @@ def preferred_port(host: str) -> int:
     return find_port(host)
 
 
-def source_stamp() -> str:
-    latest = 0
-    total_size = 0
-    file_count = 0
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in SOURCE_SUFFIXES:
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        latest = max(latest, stat.st_mtime_ns)
-        total_size += stat.st_size
-        file_count += 1
-    return f"{latest}:{file_count}:{total_size}"
-
-
 def load_instance() -> dict[str, Any]:
     try:
         raw = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
@@ -92,14 +80,51 @@ def instance_pid(raw: dict[str, Any]) -> int:
         return 0
 
 
+def fetch_health(url: str, timeout: float = 1.0) -> dict[str, Any]:
+    if not url:
+        return {}
+    try:
+        with urllib.request.urlopen(f"{url}/api/health", timeout=timeout) as response:
+            if response.status >= 400:
+                return {}
+            raw = json.loads(response.read().decode("utf-8"))
+            return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
 def url_is_alive(url: str, timeout: float = 1.0) -> bool:
     if not url:
         return False
-    try:
-        with urllib.request.urlopen(f"{url}/api/state", timeout=timeout) as response:
-            return response.status < 400
-    except Exception:
+    for endpoint in ("/api/health", "/api/state"):
+        try:
+            with urllib.request.urlopen(f"{url}{endpoint}", timeout=timeout) as response:
+                return response.status < 500
+        except urllib.error.HTTPError as exc:
+            return exc.code < 500
+        except Exception:
+            continue
+    return False
+
+
+def health_matches_current_source(health: dict[str, Any]) -> bool:
+    if health.get("current") is not True:
         return False
+    if str(health.get("source_stamp") or "") != source_stamp():
+        return False
+    return same_source_path(str(health.get("source_path") or ""), SOURCE_ROOT)
+
+
+def describe_health(health: dict[str, Any], raw: dict[str, Any]) -> str:
+    pid = health.get("pid") or raw.get("pid") or "unknown"
+    status = health.get("status") or "missing health"
+    running_stamp = health.get("source_stamp") or raw.get("source_stamp") or "unknown"
+    expected_stamp = source_stamp()
+    source_path = health.get("source_path") or "unknown source path"
+    return (
+        f"status={status}; pid={pid}; source_stamp={running_stamp}; "
+        f"expected_source_stamp={expected_stamp}; source_path={source_path}"
+    )
 
 
 def stop_instance(raw: dict[str, Any], url: str) -> bool:
@@ -128,18 +153,21 @@ def active_instance_url(restart_stale: bool = True) -> str:
             return ""
         if not url_is_alive(url):
             return ""
-        running_stamp = str(raw.get("source_stamp") or "")
-        current_stamp = source_stamp()
-        if running_stamp != current_stamp:
-            safe_print("Existing Alpaca Paper Trader backend is stale; restarting it.")
-            if restart_stale and stop_instance(raw, url):
+        health = fetch_health(url)
+        if health_matches_current_source(health):
+            return url
+
+        stale_detail = describe_health(health, raw)
+        safe_print(f"Existing Alpaca Paper Trader backend is stale or from a different source; {stale_detail}.")
+        if restart_stale:
+            if stop_instance(raw, url):
                 return ""
-            if restart_stale:
-                safe_print("Stale backend did not stop cleanly; reusing existing instance.")
-        return url
+            safe_print(
+                "Stale backend did not stop cleanly. Starting a separate current instance instead of reusing it."
+            )
+        return ""
     except Exception:
         return ""
-    return ""
 
 
 def save_instance_url(url: str) -> None:
@@ -152,6 +180,7 @@ def save_instance_url(url: str) -> None:
                     "pid": os.getpid(),
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "source_stamp": source_stamp(),
+                    "source_path": str(SOURCE_ROOT),
                 }
             ),
             encoding="utf-8",
@@ -204,6 +233,7 @@ def main() -> None:
         port = args.port
     url = f"http://{args.host}:{port}"
     save_instance_url(url)
+    app.state.runtime_url = url
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 

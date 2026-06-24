@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .currentness import currentness_payload
 from .engine import (
     TOP_VOLUME_CACHE_SECONDS,
     AccountPayload,
@@ -215,6 +216,14 @@ async def index() -> FileResponse:
 @app.get("/favicon.ico")
 async def favicon() -> FileResponse:
     return FileResponse(STATIC_DIR / "alpaca-paper-trader.ico")
+
+
+@app.get("/api/health")
+async def get_health(request: Request) -> dict[str, Any]:
+    runtime_url = str(getattr(app.state, "runtime_url", "") or "").rstrip("/")
+    if not runtime_url:
+        runtime_url = str(request.base_url).rstrip("/")
+    return currentness_payload(url=runtime_url)
 
 
 @app.get("/api/settings")
