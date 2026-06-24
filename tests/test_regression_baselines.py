@@ -51,11 +51,17 @@ def fresh_manager() -> TraderManager:
 
 
 class ConfigAndSizingBaselineTests(unittest.TestCase):
-    def test_config_preserves_current_implicit_trade_cap_conflict(self) -> None:
+    def test_config_uses_explicit_trade_size_mode_and_migrates_legacy_single_cap(self) -> None:
+        default_percent = AppConfig(profile="neutral", symbols=["SPY"])
+        self.assertEqual(default_percent.trade_size_mode, "percent")
+        self.assertEqual(default_percent.max_trade_notional, Decimal("0"))
+        self.assertEqual(default_percent.max_trade_percent, Decimal("7.0"))
+
         default_percent = AppConfig(profile="neutral", symbols=["SPY"], max_trade_notional="20")
         self.assertEqual(default_percent.max_trade_notional, Decimal("20"))
-        self.assertEqual(default_percent.max_trade_percent, Decimal("7.0"))
-        self.assertFalse(hasattr(default_percent, "trade_size_mode"))
+        self.assertEqual(default_percent.max_trade_percent, Decimal("0"))
+        self.assertEqual(default_percent.trade_size_mode, "notional")
+        self.assertEqual(default_percent.trade_size_migration, "inferred_notional_from_legacy_dollar_cap")
 
         dollar_only_by_caller_convention = AppConfig(
             profile="neutral",
@@ -65,9 +71,26 @@ class ConfigAndSizingBaselineTests(unittest.TestCase):
         )
         self.assertEqual(dollar_only_by_caller_convention.max_trade_notional, Decimal("20"))
         self.assertEqual(dollar_only_by_caller_convention.max_trade_percent, Decimal("0"))
+        self.assertEqual(dollar_only_by_caller_convention.trade_size_mode, "notional")
 
-    @expected_failure("AUDIT-010: explicit trade_size_mode should reject conflicting percent and notional caps")
-    def test_desired_trade_size_mode_rejects_conflicting_caps(self) -> None:
+    def test_trade_size_mode_rejects_conflicting_caps(self) -> None:
+        explicit_notional = AppConfig(
+            profile="neutral",
+            symbols=["SPY"],
+            trade_size_mode="notional",
+            max_trade_notional="20",
+        )
+        self.assertEqual(explicit_notional.max_trade_notional, Decimal("20"))
+        self.assertEqual(explicit_notional.max_trade_percent, Decimal("0"))
+
+        with self.assertRaises(ValueError):
+            AppConfig(
+                profile="neutral",
+                symbols=["SPY"],
+                trade_size_mode="percent",
+                max_trade_notional="20",
+                max_trade_percent="7.0",
+            )
         with self.assertRaises(ValueError):
             AppConfig(
                 profile="neutral",
@@ -76,11 +99,12 @@ class ConfigAndSizingBaselineTests(unittest.TestCase):
                 max_trade_percent="7.0",
             )
 
-    def test_trade_notional_currently_blocks_when_exposure_room_is_below_planned_slot(self) -> None:
+    def test_trade_notional_downsizes_to_remaining_exposure_room(self) -> None:
         engine = TraderEngine("sizing-baseline")
         config = AppConfig(
             symbols=["SPY"],
             use_top_volume_symbols=False,
+            trade_size_mode="notional",
             max_trade_notional="100",
             max_trade_percent="0",
             max_total_exposure_percent="50",
@@ -96,15 +120,15 @@ class ConfigAndSizingBaselineTests(unittest.TestCase):
                 total_exposure=Decimal("425"),
                 price=Decimal("10"),
             ),
-            Decimal("0"),
+            Decimal("75"),
         )
 
-    @expected_failure("AUDIT-011: remaining exposure room above the minimum should downsize the entry")
-    def test_desired_trade_notional_downsizes_to_remaining_exposure_room(self) -> None:
+    def test_trade_notional_blocks_when_remaining_exposure_room_is_not_tradeable(self) -> None:
         engine = TraderEngine("sizing-desired")
         config = AppConfig(
             symbols=["SPY"],
             use_top_volume_symbols=False,
+            trade_size_mode="notional",
             max_trade_notional="100",
             max_trade_percent="0",
             max_total_exposure_percent="50",
@@ -115,18 +139,19 @@ class ConfigAndSizingBaselineTests(unittest.TestCase):
                 config=config,
                 equity=Decimal("1000"),
                 buying_power=Decimal("1000"),
-                total_exposure=Decimal("425"),
+                total_exposure=Decimal("499.50"),
                 price=Decimal("10"),
             ),
-            Decimal("75"),
+            Decimal("0"),
         )
 
 
 class ProfitLossContractBaselineTests(unittest.TestCase):
-    def test_daily_pl_payload_currently_uses_different_selected_and_summary_shapes(self) -> None:
+    def test_daily_pl_payload_uses_standard_raw_display_and_percent_fields(self) -> None:
         engine = TraderEngine("pl-baseline")
         engine.account = {
             "equity_display": "$101.23",
+            "last_equity": "100",
             "daily_pl": "1.230000",
             "daily_pl_display": "$1.23",
             "realized_pl": "0.450000",
@@ -138,25 +163,21 @@ class ProfitLossContractBaselineTests(unittest.TestCase):
         selected_account = engine.state()["account"]
         summary = engine.summary()
 
-        self.assertEqual(selected_account["daily_pl"], "1.230000")
+        self.assertEqual(selected_account["daily_pl"], "$1.23")
+        self.assertEqual(selected_account["daily_pl_raw"], "1.230000")
         self.assertEqual(selected_account["daily_pl_display"], "$1.23")
-        self.assertNotIn("daily_pl_pct", selected_account)
-        self.assertNotIn("daily_pl_pct_display", selected_account)
+        self.assertEqual(selected_account["daily_pl_pct_raw"], "1.230000")
+        self.assertEqual(selected_account["daily_pl_pct_display"], "+1.23%")
+        self.assertIn("daily_pl_session_date", selected_account)
 
         self.assertEqual(summary["daily_pl"], "$1.23")
         self.assertEqual(summary["daily_pl_raw"], "1.230000")
-        self.assertNotIn("daily_pl_display", summary)
-        self.assertNotIn("daily_pl_pct_raw", summary)
+        self.assertEqual(summary["daily_pl_display"], "$1.23")
+        self.assertEqual(summary["daily_pl_pct_raw"], "1.230000")
+        self.assertEqual(summary["daily_pl_pct_display"], "+1.23%")
 
-    @expected_failure("AUDIT-002/AUDIT-016: daily P/L raw, display, and percent keys should be standardized")
-    def test_desired_daily_pl_contract_has_standard_raw_display_and_percent_fields(self) -> None:
+    def test_daily_pl_contract_handles_empty_account_state(self) -> None:
         engine = TraderEngine("pl-desired")
-        engine.account = {
-            "equity_display": "$101.23",
-            "daily_pl": "1.230000",
-            "daily_pl_display": "$1.23",
-        }
-
         selected_account = engine.state()["account"]
         summary = engine.summary()
 
@@ -195,31 +216,42 @@ class ProfitLossContractBaselineTests(unittest.TestCase):
         self.assertEqual(summary["trade_cost_basis"], Decimal("100.000000"))
         self.assertEqual(summary["account_basis"], Decimal("1000.000000"))
         self.assertEqual(summary["percent"], Decimal("0.500000"))
-        self.assertNotIn("session_date", summary)
-
-    @expected_failure("AUDIT-003: realized P/L summary should expose the session/date boundary it used")
-    def test_desired_daily_realized_summary_exposes_session_date(self) -> None:
-        engine = TraderEngine("realized-desired")
-        summary = engine.daily_realized_pl_summary([], Decimal("1000"))
         self.assertIn("session_date", summary)
 
 
 class SettingsBaselineTests(unittest.TestCase):
-    def test_corrupt_settings_file_currently_loads_as_empty_settings(self) -> None:
-        with patched_storage_paths() as (_app_dir, settings_path):
-            settings_path.parent.mkdir(parents=True, exist_ok=True)
-            settings_path.write_text("{not-json", encoding="utf-8")
-
-            self.assertEqual(storage.load_settings(), {})
-
-    @expected_failure("AUDIT-013: corrupt settings should surface a typed or visible load error")
-    def test_desired_corrupt_settings_load_surfaces_error(self) -> None:
+    def test_corrupt_settings_file_surfaces_load_error(self) -> None:
         with patched_storage_paths() as (_app_dir, settings_path):
             settings_path.parent.mkdir(parents=True, exist_ok=True)
             settings_path.write_text("{not-json", encoding="utf-8")
 
             loaded = storage.load_settings()
             self.assertIn("settings_load_error", loaded)
+            self.assertEqual(loaded["settings_load_error_path"], str(settings_path))
+
+    def test_corrupt_settings_file_recovers_from_latest_backup(self) -> None:
+        with patched_storage_paths() as (_app_dir, settings_path):
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            backup = settings_path.with_name(f"{settings_path.name}.20260624T000000Z.test.bak")
+            backup.write_text('{"selected_account_id":"backup","accounts":[]}', encoding="utf-8")
+            settings_path.write_text("{not-json", encoding="utf-8")
+
+            loaded = storage.load_settings()
+            self.assertIn("settings_load_error", loaded)
+            self.assertEqual(loaded["selected_account_id"], "backup")
+            self.assertEqual(loaded["settings_recovered_from_backup"], str(backup))
+
+    def test_save_settings_writes_backup_before_atomic_replace(self) -> None:
+        with patched_storage_paths() as (_app_dir, settings_path):
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text('{"selected_account_id":"old","accounts":[]}', encoding="utf-8")
+
+            storage.save_settings({"selected_account_id": "new", "accounts": []})
+
+            self.assertEqual(storage.load_settings()["selected_account_id"], "new")
+            backups = list(settings_path.parent.glob(f"{settings_path.name}.*.bak"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn('"old"', backups[0].read_text(encoding="utf-8"))
 
     def test_save_settings_write_error_still_propagates(self) -> None:
         with patched_storage_paths() as (app_dir, settings_path):
@@ -229,9 +261,9 @@ class SettingsBaselineTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 storage.save_settings({"accounts": []})
 
-    def test_saved_account_parse_failure_currently_drops_invalid_account(self) -> None:
+    def test_saved_account_parse_failure_preserves_visible_shell(self) -> None:
         raw_settings = {
-            "selected_account_id": "valid",
+            "selected_account_id": "broken",
             "accounts": [
                 {
                     "account_id": "valid",
@@ -251,26 +283,10 @@ class SettingsBaselineTests(unittest.TestCase):
         with patched_server_manager(raw_settings) as manager:
             server.load_saved_settings_to_manager()
             self.assertIn("valid", manager.accounts)
-            self.assertNotIn("broken", manager.accounts)
-
-    @expected_failure("AUDIT-012: invalid saved accounts should remain visible with a settings-load error")
-    def test_desired_saved_account_parse_failure_preserves_visible_shell(self) -> None:
-        raw_settings = {
-            "selected_account_id": "broken",
-            "accounts": [
-                {
-                    "account_id": "broken",
-                    "name": "Broken",
-                    "remember": False,
-                    "config": {"symbols": []},
-                },
-            ],
-        }
-
-        with patched_server_manager(raw_settings) as manager:
-            server.load_saved_settings_to_manager()
             self.assertIn("broken", manager.accounts)
             self.assertIn("settings_load_error", manager.accounts["broken"].state())
+            self.assertEqual(manager.selected_account_id, "broken")
+            self.assertEqual(manager.settings_diagnostics()["error_count"], 1)
 
 
 class MarketStreamBaselineTests(unittest.TestCase):

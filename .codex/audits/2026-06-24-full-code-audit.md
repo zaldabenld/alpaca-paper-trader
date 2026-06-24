@@ -711,3 +711,107 @@ Regression review:
 - AUDIT-021: No regression observed; day-tape/replay behavior was not changed.
 Conclusion:
 - No previous finding regressed in Step 2.
+
+## Step 3 Implementation Notes
+
+### 2026-06-24 - Step 3 status update: AUDIT-002, AUDIT-016
+Status: Fixed in `codex/alpaca-account-metrics-settings`
+Evidence:
+- Selected-account state and account-card summaries now expose standardized Daily P/L fields: `daily_pl_raw`, `daily_pl_display`, `daily_pl_pct_raw`, `daily_pl_pct_display`, `daily_pl_account_basis_raw`, `daily_pl_account_basis_display`, and `daily_pl_session_date`.
+- The legacy `daily_pl` alias is now a display string consistently across selected-account and summary payloads, while frontend rendering consumes the explicit raw/display/percent keys.
+- The UI now labels the card `Daily P/L (equity)` and renders amount plus percent for the selected account and account cards.
+- Regression coverage converted the AUDIT-002/AUDIT-016 expected-failing contract into passing tests.
+
+### 2026-06-24 - Step 3 status update: AUDIT-003
+Status: Fixed in `codex/alpaca-account-metrics-settings`
+Evidence:
+- `daily_realized_pl_summary()` now returns `session_date` for the local date boundary used to include/exclude sell rows.
+- The UI label now says `Realized Today`, with the session date rendered under the metric.
+- Regression coverage now asserts that the realized-today summary exposes the session/date boundary.
+
+### 2026-06-24 - Step 3 status update: AUDIT-010
+Status: Fixed in `codex/alpaca-account-metrics-settings`
+Evidence:
+- `AppConfig` now has explicit `trade_size_mode` values: `percent`, `notional`, and `exposure_slot`.
+- Explicit conflicting percent/dollar payloads are rejected. Legacy one-cap payloads are normalized to an explicit mode, and saved-settings legacy conflicts can migrate through the labeled `trade_size_migration` field.
+- Built-in profiles and the frontend default config now use percent mode with `max_trade_notional=0`.
+- The account form now sends exactly one active trade cap according to the selected trade-size mode.
+
+### 2026-06-24 - Step 3 status update: AUDIT-011
+Status: Fixed in `codex/alpaca-account-metrics-settings`
+Evidence:
+- `trade_notional()` now computes final notional as the planned cap downsized by buying power and remaining exposure room.
+- The entry is blocked only when the final notional is below `MIN_ENTRY_NOTIONAL`.
+- Regression coverage now proves a `$75` remaining exposure room can produce a `$75` entry instead of blocking, while sub-minimum room still blocks.
+
+### 2026-06-24 - Step 3 status update: AUDIT-012
+Status: Fixed in `codex/alpaca-account-metrics-settings`
+Evidence:
+- Saved-account parse failures now preserve an account shell with the raw account id/name, default safe config, no credentials, no auto-connect, and a visible `settings_load_error`.
+- `TraderManager` now records `settings_diagnostics` and exposes them in settings, state, dashboard state, and health payloads.
+- The frontend uses the existing top warning banner to surface settings diagnostics.
+
+### 2026-06-24 - Step 3 status update: AUDIT-013
+Status: Fixed in `codex/alpaca-account-metrics-settings`
+Evidence:
+- `load_settings()` now returns visible `settings_load_error` diagnostics instead of silently returning `{}` on corrupt or unreadable settings files.
+- If a timestamped backup can be parsed, settings load recovers from that backup and includes `settings_recovered_from_backup`.
+- `save_settings()` now writes through a temp file with flush/fsync and `os.replace`, and backs up the previous settings file before replacement.
+- Regression coverage now tests corrupt-load surfacing, backup recovery, atomic replacement, backup creation, and write-error propagation.
+
+### 2026-06-24 - Step 3 focused regression audit
+Status: Complete
+Checks:
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 21 tests, with 2 expected failures remaining only for out-of-scope AUDIT-018 and AUDIT-019.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
+- `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices.
+Regression review:
+- AUDIT-001: No regression observed; runtime currentness behavior was not changed beyond adding settings diagnostics to `/api/health`.
+- AUDIT-002: Fixed; Daily P/L payloads and UI now expose raw/display/percent/date fields clearly.
+- AUDIT-003: Fixed; realized-today summary now exposes the session date boundary used for filtering.
+- AUDIT-004: No regression observed; no monolith split or broad refactor was attempted.
+- AUDIT-005: No regression observed; Step 2 harness remains in place and Step 3 contracts now pass.
+- AUDIT-006: Improved narrowly for settings load/save visibility; broad exception handling outside Step 3 scope remains open.
+- AUDIT-007: No regression observed; frontend polling coordination was not changed.
+- AUDIT-008: No regression observed; stale-runtime recovery behavior was not changed.
+- AUDIT-009: No regression observed; selected-account response sequencing was not changed.
+- AUDIT-010: Fixed; trade sizing now uses explicit mode with conflict rejection or labeled saved-settings migration.
+- AUDIT-011: Fixed; exposure-room sizing downsizes to remaining tradeable room.
+- AUDIT-012: Fixed; invalid saved accounts are preserved visibly instead of silently dropped.
+- AUDIT-013: Fixed; corrupt settings loads surface diagnostics and saves are backup-backed atomic replacements.
+- AUDIT-014: No regression observed; launcher currentness behavior was not changed.
+- AUDIT-015: No regression observed; layout breakpoints and table scrolling were not changed.
+- AUDIT-016: Fixed; selected-account and account-card Daily P/L contracts now use consistent raw/display/percent keys.
+- AUDIT-017: No regression observed; inverse ETF code/docs were not changed.
+- AUDIT-018: No regression observed; market-stream union behavior remains intentionally unchanged for Step 5 and still has an expected-failing future contract.
+- AUDIT-019: No regression observed; held-symbol stream behavior remains intentionally unchanged for Step 5 and still has an expected-failing future contract.
+- AUDIT-020: No regression observed; launcher fallback behavior was not changed.
+- AUDIT-021: No regression observed; day-tape/replay behavior was not changed.
+Conclusion:
+- No previous finding regressed in Step 3.
+
+### 2026-06-24 - Step 3 child-found finding: STEP3-CHILD-001 settings diagnostics could hide runtime-health warning
+Status: Fixed in `codex/alpaca-account-metrics-settings`
+Evidence:
+- After the Step 3 focused regression audit entry was written, final diff review found a frontend warning-banner edge case in `python_app/static/app.js`.
+- `renderSettingsDiagnostics()` reused the runtime-health banner to surface settings-load diagnostics. A successful state/settings poll with no settings warnings could call `renderRuntimeHealth({current: true, settings_diagnostics: {}})` and hide an existing runtime-health error banner created by `renderRuntimeHealthError()`.
+Impact:
+- A later successful settings-diagnostics refresh could visually clear a still-unresolved runtime-health warning.
+Fix:
+- Added a guard so an empty settings-diagnostics update does not hide an existing runtime-health error when no successful runtime-health payload has replaced it.
+Scope:
+- This is a Step 3 UI warning-surface fix only. It does not change Step 4 polling coordination, Step 5 market-stream behavior, the stable checkout, or the live backend.
+
+
+### 2026-06-24 - Step 3 correction verification: STEP3-CHILD-001
+Status: Complete
+Checks:
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 21 tests, with 2 expected failures remaining only for out-of-scope AUDIT-018 and AUDIT-019.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
+- `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices.
+Conclusion:
+- STEP3-CHILD-001 is logged and fixed. No Step 4 or Step 5 work was started.

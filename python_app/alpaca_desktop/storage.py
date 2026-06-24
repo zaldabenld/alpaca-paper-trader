@@ -4,7 +4,10 @@ import base64
 import ctypes
 import json
 import os
+import shutil
+import uuid
 from ctypes import wintypes
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -87,15 +90,69 @@ def unprotect_text(value: str) -> str:
     return _unprotect_bytes(raw).decode("utf-8")
 
 
+def _settings_error_payload(error: Exception, path: Path) -> dict[str, Any]:
+    return {
+        "settings_load_error": f"Could not load settings from {path}: {error}",
+        "settings_load_error_path": str(path),
+    }
+
+
+def _load_json_file(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("Settings file must contain a JSON object.")
+    return value
+
+
+def _settings_backups() -> list[Path]:
+    if not APP_DIR.exists():
+        return []
+    return sorted(
+        APP_DIR.glob(f"{SETTINGS_PATH.name}.*.bak"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _backup_path() -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return SETTINGS_PATH.with_name(f"{SETTINGS_PATH.name}.{stamp}.{uuid.uuid4().hex[:8]}.bak")
+
+
 def load_settings() -> dict[str, Any]:
     if not SETTINGS_PATH.exists():
         return {}
     try:
-        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        return _load_json_file(SETTINGS_PATH)
+    except Exception as exc:
+        error_payload = _settings_error_payload(exc, SETTINGS_PATH)
+        for backup in _settings_backups():
+            try:
+                recovered = _load_json_file(backup)
+                recovered["settings_load_error"] = error_payload["settings_load_error"]
+                recovered["settings_load_error_path"] = error_payload["settings_load_error_path"]
+                recovered["settings_recovered_from_backup"] = str(backup)
+                return recovered
+            except Exception:
+                continue
+        return error_payload
 
 
 def save_settings(settings: dict[str, Any]) -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    if SETTINGS_PATH.exists() and SETTINGS_PATH.is_file():
+        shutil.copy2(SETTINGS_PATH, _backup_path())
+    temp_path = SETTINGS_PATH.with_name(f"{SETTINGS_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(settings, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, SETTINGS_PATH)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass

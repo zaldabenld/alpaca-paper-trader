@@ -715,6 +715,15 @@ button.mini-button {
   overflow-wrap: anywhere;
 }
 
+.metric-detail {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  line-height: 1.25;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
 .metric-heading + strong {
   margin-top: 9px;
 }

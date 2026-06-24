@@ -67,6 +67,7 @@ MIN_EXIT_PRICE_OFFSET = Decimal("0.01")
 PRICE_INCREMENT = Decimal("0.01")
 SUB_DOLLAR_PRICE_INCREMENT = Decimal("0.0001")
 MIN_ENTRY_NOTIONAL = Decimal("1.00")
+TRADE_SIZE_MODES = {"percent", "notional", "exposure_slot"}
 MAX_ENTRY_REFERENCE_PREMIUM_PERCENT = Decimal("2.0")
 ASSET_CHECK_CACHE_SECONDS = 6 * 60 * 60
 ORDER_FLOW_MIN_CLASSIFIED_VOLUME = Decimal("1000")
@@ -221,7 +222,8 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "market_hours_only": True,
         "use_market_stream": True,
         "use_bracket_orders": True,
-        "max_trade_notional": "20",
+        "trade_size_mode": "percent",
+        "max_trade_notional": "0",
         "max_trade_percent": "4.0",
         "max_position_notional": "20",
         "max_position_percent": "4.0",
@@ -276,7 +278,8 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "market_hours_only": True,
         "use_market_stream": True,
         "use_bracket_orders": True,
-        "max_trade_notional": "35",
+        "trade_size_mode": "percent",
+        "max_trade_notional": "0",
         "max_trade_percent": "7.0",
         "max_position_notional": "35",
         "max_position_percent": "7.0",
@@ -331,7 +334,8 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "market_hours_only": True,
         "use_market_stream": True,
         "use_bracket_orders": True,
-        "max_trade_notional": "50",
+        "trade_size_mode": "percent",
+        "max_trade_notional": "0",
         "max_trade_percent": "10.0",
         "max_position_notional": "50",
         "max_position_percent": "10.0",
@@ -427,7 +431,9 @@ class AppConfig(BaseModel):
     market_hours_only: bool = True
     use_market_stream: bool = True
     use_bracket_orders: bool = True
-    max_trade_notional: Decimal = Decimal("35")
+    trade_size_mode: str = "percent"
+    trade_size_migration: str = ""
+    max_trade_notional: Decimal = Decimal("0")
     max_trade_percent: Decimal = Decimal("7.0")
     max_position_notional: Decimal = Decimal("35")
     max_position_percent: Decimal = Decimal("7.0")
@@ -557,6 +563,23 @@ class AppConfig(BaseModel):
             raise ValueError("Inverse ETF mode must be exclude, allow, or inverse_only.")
         return "allow" if mode == "exclude" else mode
 
+    @field_validator("trade_size_mode", mode="before")
+    @classmethod
+    def validate_trade_size_mode(cls, value: str) -> str:
+        mode = str(value or "percent").strip().lower()
+        aliases = {
+            "dollar": "notional",
+            "dollars": "notional",
+            "fixed": "notional",
+            "amount": "notional",
+            "exposure": "exposure_slot",
+            "slot": "exposure_slot",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in TRADE_SIZE_MODES:
+            raise ValueError("Trade size mode must be percent, notional, or exposure_slot.")
+        return mode
+
     @field_validator("exit_time_in_force")
     @classmethod
     def validate_exit_time_in_force(cls, value: str) -> str:
@@ -567,6 +590,7 @@ class AppConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         fields_set = set(getattr(self, "model_fields_set", set()))
+        allow_legacy_trade_size_migration = bool((__context or {}).get("allow_legacy_trade_size_migration"))
         profile_limits = ENTRY_PROFILE_LIMITS.get(self.profile, ENTRY_PROFILE_LIMITS["neutral"])
         if "min_recent_momentum_percent" not in fields_set:
             self.min_recent_momentum_percent = profile_limits["min_recent_momentum"]
@@ -607,6 +631,71 @@ class AppConfig(BaseModel):
         self.stop_loss_grace_minutes = 0
         self.cooldown_minutes = 0
         self.exit_time_in_force = "day"
+        self.normalize_trade_size(fields_set, allow_legacy_trade_size_migration)
+
+    def normalize_trade_size(self, fields_set: set[str], allow_legacy_migration: bool) -> None:
+        mode_explicit = "trade_size_mode" in fields_set
+        notional_explicit = "max_trade_notional" in fields_set
+        percent_explicit = "max_trade_percent" in fields_set
+        notional_positive = self.max_trade_notional > 0
+        percent_positive = self.max_trade_percent > 0
+        self.trade_size_migration = ""
+
+        if mode_explicit:
+            if self.trade_size_mode == "percent":
+                if self.max_trade_notional > 0 and notional_explicit:
+                    raise ValueError("Percent trade sizing cannot include max_trade_notional.")
+                if self.max_trade_percent <= 0:
+                    raise ValueError("Percent trade sizing requires max_trade_percent above zero.")
+                self.max_trade_notional = Decimal("0")
+            elif self.trade_size_mode == "notional":
+                if self.max_trade_percent > 0 and percent_explicit:
+                    raise ValueError("Dollar trade sizing cannot include max_trade_percent.")
+                if self.max_trade_notional <= 0:
+                    raise ValueError("Dollar trade sizing requires max_trade_notional above zero.")
+                self.max_trade_percent = Decimal("0")
+            else:
+                if (
+                    (self.max_trade_notional > 0 and notional_explicit)
+                    or (self.max_trade_percent > 0 and percent_explicit)
+                ):
+                    raise ValueError("Exposure-slot trade sizing cannot include percent or dollar trade caps.")
+                self.max_trade_notional = Decimal("0")
+                self.max_trade_percent = Decimal("0")
+            return
+
+        if notional_positive and percent_positive and notional_explicit and not percent_explicit:
+            self.trade_size_mode = "notional"
+            self.max_trade_percent = Decimal("0")
+            self.trade_size_migration = "inferred_notional_from_legacy_dollar_cap"
+        elif notional_positive and percent_positive and percent_explicit and not notional_explicit:
+            self.trade_size_mode = "percent"
+            self.max_trade_notional = Decimal("0")
+            self.trade_size_migration = "inferred_percent_from_legacy_percent_cap"
+        elif notional_positive and percent_positive:
+            if not allow_legacy_migration:
+                raise ValueError(
+                    "Specify trade_size_mode and only one active trade cap; "
+                    "max_trade_notional and max_trade_percent cannot both be above zero."
+                )
+            self.trade_size_mode = "percent"
+            self.max_trade_notional = Decimal("0")
+            self.trade_size_migration = "migrated_legacy_conflicting_caps_to_percent"
+        elif notional_positive:
+            self.trade_size_mode = "notional"
+            self.max_trade_percent = Decimal("0")
+            if notional_explicit:
+                self.trade_size_migration = "inferred_notional_from_legacy_dollar_cap"
+        elif percent_positive:
+            self.trade_size_mode = "percent"
+            self.max_trade_notional = Decimal("0")
+            if percent_explicit and not mode_explicit:
+                self.trade_size_migration = "inferred_percent_from_legacy_percent_cap"
+        else:
+            self.trade_size_mode = "exposure_slot"
+            self.max_trade_notional = Decimal("0")
+            self.max_trade_percent = Decimal("0")
+            self.trade_size_migration = "inferred_exposure_slot_from_empty_trade_caps"
 
 
 class AccountPayload(BaseModel):
@@ -629,6 +718,7 @@ class AccountSettings(BaseModel):
     auto_connect: bool = True
     auto_start_trading: bool = False
     config: AppConfig
+    settings_load_error: str = ""
 
 
 LEGACY_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
@@ -769,6 +859,13 @@ def signed_percent_value(value: Decimal | None) -> str:
     if value is None:
         return "-"
     return f"{value:+.2f}%" if value != 0 else "0.00%"
+
+
+def metric_decimal(value: Any) -> Decimal:
+    if isinstance(value, str):
+        cleaned = value.replace("$", "").replace(",", "").replace("%", "").strip()
+        return decimal_value(cleaned)
+    return decimal_value(value)
 
 
 def stream_data_feed(feed: str) -> DataFeed:
@@ -1109,6 +1206,7 @@ class TraderEngine:
         self.dashboard_cache_last_save = 0.0
         self.last_refresh = ""
         self.last_error = ""
+        self.settings_load_error = ""
         self.restore_trade_guards_from_replay()
 
     def configure_saved(self, settings: AccountSettings) -> None:
@@ -1118,11 +1216,16 @@ class TraderEngine:
         with self.lock:
             self.name = settings.name.strip() or "Paper Account"
             self.config = retune_legacy_conservative_config(settings.config)
+            self.settings_load_error = settings.settings_load_error
             self.api_key = api_key if not validation_error else ""
             self.secret_key = secret_key if looks_like_secret_key(secret_key) else ""
             self.remember = settings.remember
             self.auto_connect = settings.auto_connect
             self.auto_start_trading = settings.auto_start_trading
+            if self.settings_load_error:
+                self.last_error = self.settings_load_error
+                self.status = "Settings load error"
+                self.log("error", self.settings_load_error)
             if validation_error:
                 self.last_error = f"Saved credentials invalid: {validation_error}"
                 self.status = "Saved credentials invalid"
@@ -1137,6 +1240,7 @@ class TraderEngine:
         with self.lock:
             self.name = payload.name.strip() or "Paper Account"
             self.config = retune_legacy_conservative_config(payload.config)
+            self.settings_load_error = ""
             if api_key:
                 self.api_key = api_key
             if secret_key:
@@ -1659,20 +1763,34 @@ class TraderEngine:
             equity = decimal_value(account_dict.get("equity"))
             last_equity = decimal_value(account_dict.get("last_equity"))
             daily_pl = equity - last_equity
+            daily_pl_basis = last_equity if last_equity > 0 else equity
+            daily_pl_pct = (daily_pl / daily_pl_basis * Decimal("100")) if daily_pl_basis > 0 else Decimal("0")
+            session_date = datetime.now().astimezone().date().isoformat()
             trade_history_rows = self.trade_history_rows(closed_order_dicts)
             realized_account_basis = last_equity if last_equity > 0 else equity
             realized_pl = self.daily_realized_pl_summary(trade_history_rows, realized_account_basis)
 
             with self.lock:
                 self.account = account_dict | {
-                    "daily_pl": str(daily_pl),
+                    "daily_pl": money(daily_pl),
+                    "daily_pl_raw": str(daily_pl.quantize(Decimal("0.000001"))),
                     "daily_pl_display": money(daily_pl),
+                    "daily_pl_pct_raw": str(daily_pl_pct.quantize(Decimal("0.000001"))),
+                    "daily_pl_pct_display": signed_percent_value(daily_pl_pct),
+                    "daily_pl_account_basis_raw": str(daily_pl_basis.quantize(Decimal("0.000001"))),
+                    "daily_pl_account_basis_display": money(daily_pl_basis),
+                    "daily_pl_session_date": session_date,
                     "realized_pl": str(realized_pl["value"]),
+                    "realized_pl_raw": str(realized_pl["value"]),
                     "realized_pl_display": money(realized_pl["value"]),
                     "realized_pl_pct": str(realized_pl["percent"]),
+                    "realized_pl_pct_raw": str(realized_pl["percent"]),
                     "realized_pl_pct_display": signed_percent_value(realized_pl["percent"]),
                     "realized_pl_account_basis": str(realized_pl["account_basis"]),
+                    "realized_pl_account_basis_display": money(realized_pl["account_basis"]),
                     "realized_pl_trade_cost_basis": str(realized_pl["trade_cost_basis"]),
+                    "realized_pl_trade_cost_basis_display": money(realized_pl["trade_cost_basis"]),
+                    "realized_pl_session_date": str(realized_pl["session_date"]),
                     "equity_display": money(equity),
                     "buying_power_display": money(account_dict.get("buying_power")),
                     "cash_display": money(account_dict.get("cash")),
@@ -2757,9 +2875,9 @@ class TraderEngine:
 
     def planned_entry_notional_cap(self, config: AppConfig, equity: Decimal, price: Decimal | None = None) -> Decimal:
         candidates: list[Decimal] = []
-        if config.max_trade_notional > 0:
+        if config.trade_size_mode == "notional" and config.max_trade_notional > 0:
             candidates.append(config.max_trade_notional)
-        if config.max_trade_percent > 0 and equity > 0:
+        elif config.trade_size_mode == "percent" and config.max_trade_percent > 0 and equity > 0:
             candidates.append(equity * config.max_trade_percent / Decimal("100"))
         if config.max_total_exposure_percent > 0 and config.max_open_positions > 0 and equity > 0:
             exposure_budget = equity * config.max_total_exposure_percent / Decimal("100")
@@ -2779,12 +2897,13 @@ class TraderEngine:
         if planned_cap < MIN_ENTRY_NOTIONAL:
             return Decimal("0")
         if buying_power < planned_cap:
-            return Decimal("0")
+            planned_cap = buying_power
         if config.max_total_exposure_percent > 0 and equity > 0:
             exposure_budget = equity * config.max_total_exposure_percent / Decimal("100")
             exposure_room = exposure_budget - total_exposure
-            if exposure_room < planned_cap:
-                return Decimal("0")
+            planned_cap = min(planned_cap, exposure_room)
+        if planned_cap < MIN_ENTRY_NOTIONAL:
+            return Decimal("0")
         return planned_cap
 
     def exit_prices(self, entry_price: Decimal, config: AppConfig) -> tuple[Decimal, Decimal]:
@@ -3709,7 +3828,7 @@ class TraderEngine:
         rows.sort(key=lambda row: row.get("sort_time", ""), reverse=True)
         return rows[:100]
 
-    def daily_realized_pl_summary(self, rows: list[dict[str, Any]], account_basis: Decimal) -> dict[str, Decimal]:
+    def daily_realized_pl_summary(self, rows: list[dict[str, Any]], account_basis: Decimal) -> dict[str, Any]:
         today = datetime.now().astimezone().date()
         realized_pl = Decimal("0")
         trade_cost_basis = Decimal("0")
@@ -3735,6 +3854,7 @@ class TraderEngine:
             "account_basis": account_basis.quantize(Decimal("0.000001")),
             "trade_cost_basis": trade_cost_basis.quantize(Decimal("0.000001")),
             "percent": percent.quantize(Decimal("0.000001")),
+            "session_date": today.isoformat(),
         }
 
     def sync_loss_reentry_floors_from_closed_orders(self, orders: list[dict[str, Any]]) -> None:
@@ -4085,6 +4205,39 @@ class TraderEngine:
             )
         return rows
 
+    def standardized_account_metrics(self) -> dict[str, Any]:
+        account = dict(self.account)
+        daily_raw = metric_decimal(account.get("daily_pl_raw", account.get("daily_pl", "0")))
+        daily_basis = metric_decimal(
+            account.get(
+                "daily_pl_account_basis_raw",
+                account.get("last_equity") or account.get("equity") or "0",
+            )
+        )
+        daily_pct = metric_decimal(account.get("daily_pl_pct_raw", account.get("daily_pl_pct", "0")))
+        if daily_pct == 0 and daily_raw != 0 and daily_basis > 0:
+            daily_pct = daily_raw / daily_basis * Decimal("100")
+        session_date = str(account.get("daily_pl_session_date") or datetime.now().astimezone().date().isoformat())
+        account.update(
+            {
+                "daily_pl": account.get("daily_pl_display") or money(daily_raw),
+                "daily_pl_raw": str(daily_raw.quantize(Decimal("0.000001"))),
+                "daily_pl_display": account.get("daily_pl_display") or money(daily_raw),
+                "daily_pl_pct_raw": str(daily_pct.quantize(Decimal("0.000001"))),
+                "daily_pl_pct_display": account.get("daily_pl_pct_display") or signed_percent_value(daily_pct),
+                "daily_pl_account_basis_raw": str(daily_basis.quantize(Decimal("0.000001"))),
+                "daily_pl_account_basis_display": account.get("daily_pl_account_basis_display") or money(daily_basis),
+                "daily_pl_session_date": session_date,
+            }
+        )
+        if "realized_pl_raw" not in account:
+            account["realized_pl_raw"] = str(metric_decimal(account.get("realized_pl", "0")).quantize(Decimal("0.000001")))
+        if "realized_pl_pct_raw" not in account:
+            account["realized_pl_pct_raw"] = str(metric_decimal(account.get("realized_pl_pct", "0")).quantize(Decimal("0.000001")))
+        if "realized_pl_session_date" not in account:
+            account["realized_pl_session_date"] = session_date
+        return account
+
     def settings(self, include_keys: bool = False) -> dict[str, Any]:
         with self.lock:
             has_api_key = bool(self.api_key)
@@ -4102,6 +4255,7 @@ class TraderEngine:
                 "has_secret_key": has_secret_key,
                 "credentials_loaded": credentials_valid,
                 "credentials_saved": self.remember and credentials_valid,
+                "settings_load_error": self.settings_load_error,
                 "config": self.config.model_dump(mode="json"),
             }
 
@@ -4109,6 +4263,7 @@ class TraderEngine:
         with self.lock:
             trading_symbols = self.trading_symbols()
             symbol_source = "top_volume" if self.config.use_top_volume_symbols and self.top_volume_symbols else "manual"
+            account = self.standardized_account_metrics()
             return {
                 "account_id": self.account_id,
                 "name": self.name,
@@ -4120,14 +4275,24 @@ class TraderEngine:
                 "credentials_saved": self.remember and not credential_validation_error(self.api_key, self.secret_key),
                 "auto_connect": self.auto_connect,
                 "auto_start_trading": self.auto_start_trading,
+                "settings_load_error": self.settings_load_error,
                 "market_clock": self.market_clock,
-                "equity": self.account.get("equity_display", "$0.00"),
-                "daily_pl": self.account.get("daily_pl_display", "$0.00"),
-                "daily_pl_raw": self.account.get("daily_pl", "0"),
-                "realized_pl": self.account.get("realized_pl_display", "$0.00"),
-                "realized_pl_raw": self.account.get("realized_pl", "0"),
-                "realized_pl_pct": self.account.get("realized_pl_pct_display", "0.00%"),
-                "realized_pl_pct_raw": self.account.get("realized_pl_pct", "0"),
+                "equity": account.get("equity_display", "$0.00"),
+                "daily_pl": account.get("daily_pl_display", "$0.00"),
+                "daily_pl_raw": account.get("daily_pl_raw", "0"),
+                "daily_pl_display": account.get("daily_pl_display", "$0.00"),
+                "daily_pl_pct_raw": account.get("daily_pl_pct_raw", "0"),
+                "daily_pl_pct_display": account.get("daily_pl_pct_display", "0.00%"),
+                "daily_pl_account_basis_raw": account.get("daily_pl_account_basis_raw", "0"),
+                "daily_pl_account_basis_display": account.get("daily_pl_account_basis_display", "$0.00"),
+                "daily_pl_session_date": account.get("daily_pl_session_date", ""),
+                "realized_pl": account.get("realized_pl_display", "$0.00"),
+                "realized_pl_raw": account.get("realized_pl_raw", "0"),
+                "realized_pl_display": account.get("realized_pl_display", "$0.00"),
+                "realized_pl_pct": account.get("realized_pl_pct_display", "0.00%"),
+                "realized_pl_pct_raw": account.get("realized_pl_pct_raw", "0"),
+                "realized_pl_pct_display": account.get("realized_pl_pct_display", "0.00%"),
+                "realized_pl_session_date": account.get("realized_pl_session_date", ""),
                 "last_refresh": self.last_refresh,
                 "trading_symbol_count": len(trading_symbols),
                 "symbol_source": symbol_source,
@@ -4145,11 +4310,12 @@ class TraderEngine:
                 "status": self.status,
                 "last_error": self.last_error,
                 "last_refresh": self.last_refresh,
+                "settings_load_error": self.settings_load_error,
                 "credentials_loaded": not credential_validation_error(self.api_key, self.secret_key),
                 "credentials_saved": self.remember and not credential_validation_error(self.api_key, self.secret_key),
                 "auto_connect": self.auto_connect,
                 "auto_start_trading": self.auto_start_trading,
-                "account": self.account,
+                "account": self.standardized_account_metrics(),
                 "positions": self.positions,
                 "orders": self.orders,
                 "protection": self.protection_rows,
@@ -4176,7 +4342,35 @@ class TraderManager:
         self.historical_bars_cache: dict[str, tuple[float, int, set[str], dict[str, list[Any]]]] = {}
         self.custom_profiles: dict[str, dict[str, Any]] = {}
         self.dashboard_trade_backfill_cursor: datetime | None = None
+        self.settings_load_errors: list[dict[str, str]] = []
         self.create_account("Account 1", AppConfig())
+
+    def reset_settings_load_errors(self) -> None:
+        with self.lock:
+            self.settings_load_errors = []
+
+    def record_settings_load_error(
+        self,
+        message: str,
+        account_id: str = "",
+        account_name: str = "",
+        source: str = "settings",
+    ) -> None:
+        entry = {
+            "source": source,
+            "account_id": account_id,
+            "account_name": account_name,
+            "message": message,
+        }
+        with self.lock:
+            self.settings_load_errors.append(entry)
+
+    def settings_diagnostics(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "errors": [dict(item) for item in self.settings_load_errors],
+                "error_count": len(self.settings_load_errors),
+            }
 
     def create_account(self, name: str | None = None, config: AppConfig | None = None) -> TraderEngine:
         account_id = uuid.uuid4().hex
@@ -4486,6 +4680,7 @@ class TraderManager:
                 "accounts": accounts,
                 "profiles": self.profile_presets(),
                 "custom_profiles": {key: dict(value) for key, value in self.custom_profiles.items()},
+                "settings_diagnostics": self.settings_diagnostics(),
             }
 
     def state(self, account_id: str | None = None) -> dict[str, Any]:
@@ -4499,12 +4694,14 @@ class TraderManager:
                 "profiles": self.profile_presets(),
                 "market_stream": self.market_stream_state(),
                 "replay": self.replay_state(),
+                "settings_diagnostics": self.settings_diagnostics(),
             }
 
     def dashboard_state(self, account_id: str | None = None) -> dict[str, Any]:
         state = self.dashboard_engine(account_id).dashboard_state()
         state["market_stream"] = self.market_stream_state()
         state["replay"] = self.replay_state()
+        state["settings_diagnostics"] = self.settings_diagnostics()
         return state
 
     def sync_top_volume_from(self, source: TraderEngine) -> None:

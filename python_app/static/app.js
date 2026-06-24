@@ -16,6 +16,7 @@ const fields = {
   dryRun: document.querySelector("#dryRun"),
   marketHoursOnly: document.querySelector("#marketHoursOnly"),
   useBracketOrders: document.querySelector("#useBracketOrders"),
+  tradeSizeMode: document.querySelector("#tradeSizeMode"),
   maxTradeNotional: document.querySelector("#maxTradeNotional"),
   maxTradePercent: document.querySelector("#maxTradePercent"),
   maxPositionNotional: document.querySelector("#maxPositionNotional"),
@@ -95,7 +96,9 @@ const els = {
   accountCards: document.querySelector("#accountCards"),
   equity: document.querySelector("#equity"),
   dailyPl: document.querySelector("#dailyPl"),
+  dailyPlDetail: document.querySelector("#dailyPlDetail"),
   realizedPl: document.querySelector("#realizedPl"),
+  realizedPlDetail: document.querySelector("#realizedPlDetail"),
   realizedPercentToggle: document.querySelector("#realizedPercentToggle"),
   buyingPower: document.querySelector("#buyingPower"),
   cash: document.querySelector("#cash"),
@@ -123,6 +126,7 @@ const els = {
   cancelOrdersButton: document.querySelector("#cancelOrdersButton"),
   purgeAccountButton: document.querySelector("#purgeAccountButton"),
   refreshAllButton: document.querySelector("#refreshAllButton"),
+  tradeSizingStatus: document.querySelector("#tradeSizingStatus"),
 };
 
 const preferredAppPort = "8765";
@@ -138,6 +142,7 @@ const configKeys = [
   "dry_run",
   "market_hours_only",
   "use_bracket_orders",
+  "trade_size_mode",
   "max_trade_notional",
   "max_trade_percent",
   "max_position_notional",
@@ -606,6 +611,9 @@ async function saveCurrentAccountDraft(applySavedAccount = true) {
 }
 
 function readConfig() {
+  const tradeSizeMode = fields.tradeSizeMode.value || "percent";
+  const tradeNotional = tradeSizeMode === "notional" ? readNumber("maxTradeNotional", 35) : 0;
+  const tradePercent = tradeSizeMode === "percent" ? readNumber("maxTradePercent", 7) : 0;
   return {
     profile: fields.profile.value,
     use_top_volume_symbols: fields.useTopVolumeSymbols.checked,
@@ -619,8 +627,9 @@ function readConfig() {
     market_hours_only: fields.marketHoursOnly.checked,
     use_market_stream: fields.useMarketStream.checked,
     use_bracket_orders: fields.useBracketOrders.checked,
-    max_trade_notional: readNumber("maxTradeNotional", 35),
-    max_trade_percent: readNumber("maxTradePercent", 7),
+    trade_size_mode: tradeSizeMode,
+    max_trade_notional: tradeNotional,
+    max_trade_percent: tradePercent,
     max_position_notional: readNumber("maxPositionNotional", 35),
     max_position_percent: readNumber("maxPositionPercent", 7),
     daily_loss_limit: readNumber("dailyLossLimit", 0),
@@ -681,6 +690,36 @@ function applyAccount(account) {
   applyConfig(account.config || presetConfig("neutral"));
 }
 
+function inferTradeSizeMode(config = {}) {
+  if (config.trade_size_mode) return config.trade_size_mode;
+  const notional = Number(config.max_trade_notional || 0);
+  const percent = Number(config.max_trade_percent || 0);
+  if (Number.isFinite(notional) && notional > 0 && (!Number.isFinite(percent) || percent <= 0)) return "notional";
+  if (Number.isFinite(percent) && percent > 0) return "percent";
+  return "exposure_slot";
+}
+
+function tradeSizeLabel(config = {}) {
+  const mode = config.trade_size_mode || inferTradeSizeMode(config);
+  if (mode === "notional") return `$${Number(config.max_trade_notional || 0).toLocaleString()} per entry`;
+  if (mode === "exposure_slot") return "exposure slot";
+  return `${config.max_trade_percent || 0}% equity`;
+}
+
+function syncTradeSizeModeControl(config = readConfig()) {
+  const mode = fields.tradeSizeMode.value || config.trade_size_mode || "percent";
+  fields.maxTradeNotional.disabled = mode !== "notional";
+  fields.maxTradePercent.disabled = mode !== "percent";
+  if (els.tradeSizingStatus) {
+    els.tradeSizingStatus.textContent =
+      mode === "notional"
+        ? "Dollar amount is active; percent sizing is disabled."
+        : mode === "exposure_slot"
+          ? "Exposure slot is active; dollar and percent caps are disabled."
+          : "Percent of equity is active; dollar sizing is disabled.";
+  }
+}
+
 function syncAutoConnectControl() {
   fields.autoConnect.disabled = !fields.remember.checked;
   fields.autoStartTrading.disabled = !fields.remember.checked || !fields.autoConnect.checked;
@@ -712,18 +751,23 @@ function renderCredentialStatus(account = {}) {
 function applyConfig(config) {
   if (!config) return;
   suppressProfileDirty = true;
+  const normalizedConfig = {
+    ...config,
+    trade_size_mode: config.trade_size_mode || inferTradeSizeMode(config),
+  };
   ensureProfileOption(config.profile || "custom", profileLabel(config.profile || "custom", config));
-  fields.symbols.value = (config.symbols || ["SPY", "QQQ"]).join(",");
+  fields.symbols.value = (normalizedConfig.symbols || ["SPY", "QQQ"]).join(",");
   configKeys.forEach((key) => {
     const camel = toCamel(key);
     const field = fields[camel];
-    if (!field || config[key] === undefined || config[key] === null) return;
+    if (!field || normalizedConfig[key] === undefined || normalizedConfig[key] === null) return;
     if (field.type === "checkbox") {
-      field.checked = Boolean(config[key]);
+      field.checked = Boolean(normalizedConfig[key]);
     } else {
-      field.value = config[key];
+      field.value = normalizedConfig[key];
     }
   });
+  syncTradeSizeModeControl(normalizedConfig);
   suppressProfileDirty = false;
   renderProfileStatus();
 }
@@ -774,6 +818,7 @@ async function saveCustomProfile() {
 
 function handleConfigFieldChange(key) {
   if (suppressProfileDirty) return;
+  if (key === "trade_size_mode") syncTradeSizeModeControl();
   parameterDirty = true;
   renderParameterStatus(null);
   if (strategyProfileKeys.has(key)) renderProfileStatus();
@@ -814,9 +859,9 @@ function renderParameterStatus(selected = null) {
   const liveMinScore = liveConfig?.min_entry_score ?? uiConfig.min_entry_score ?? 38;
   if (parameterDirty) {
     const livePart = liveConfig
-      ? ` Live block still uses ${liveConfig.max_trade_percent}% equity, ${liveConfig.max_total_exposure_percent}% exposure, ${liveConfig.max_open_positions} max pos, min score ${liveMinScore}.`
+      ? ` Live block still uses ${tradeSizeLabel(liveConfig)}, ${liveConfig.max_total_exposure_percent}% exposure, ${liveConfig.max_open_positions} max pos, min score ${liveMinScore}.`
       : "";
-    els.parameterStatus.textContent = `Pending changes: strategy ${profileLabel(uiConfig.profile, profiles[uiConfig.profile] || {})}, trade ${uiConfig.max_trade_percent}% equity, exposure ${uiConfig.max_total_exposure_percent}%, max pos ${uiConfig.max_open_positions}, min score ${uiConfig.min_entry_score}.${livePart} Click Apply Changes to make it live.`;
+    els.parameterStatus.textContent = `Pending changes: strategy ${profileLabel(uiConfig.profile, profiles[uiConfig.profile] || {})}, trade ${tradeSizeLabel(uiConfig)}, exposure ${uiConfig.max_total_exposure_percent}%, max pos ${uiConfig.max_open_positions}, min score ${uiConfig.min_entry_score}.${livePart} Click Apply Changes to make it live.`;
     return;
   }
   if (!liveConfig) {
@@ -824,7 +869,7 @@ function renderParameterStatus(selected = null) {
     return;
   }
   const profile = profileLabel(liveConfig.profile || "custom", liveConfig);
-  els.parameterStatus.textContent = `Live: strategy ${profile}, trade ${liveConfig.max_trade_percent}% equity, exposure ${liveConfig.max_total_exposure_percent}%, max pos ${liveConfig.max_open_positions}, min score ${liveMinScore}.`;
+  els.parameterStatus.textContent = `Live: strategy ${profile}, trade ${tradeSizeLabel(liveConfig)}, exposure ${liveConfig.max_total_exposure_percent}%, max pos ${liveConfig.max_open_positions}, min score ${liveMinScore}.`;
 }
 
 function renderProfileSelect(selected = fields.profile.value || "neutral") {
@@ -880,7 +925,8 @@ function presetConfig(profile) {
     market_hours_only: true,
     use_market_stream: true,
     use_bracket_orders: true,
-    max_trade_notional: 35,
+    trade_size_mode: "percent",
+    max_trade_notional: 0,
     max_trade_percent: 7,
     max_position_notional: 35,
     max_position_percent: 7,
@@ -973,18 +1019,30 @@ function healthSummary(health = {}) {
   return `${reason} PID ${pid}. Source ${sourcePath}. Running stamp ${sourceStamp}; expected ${expectedStamp}. Close the stale backend process or relaunch from the current folder.`;
 }
 
+function settingsDiagnosticsSummary(diagnostics = {}) {
+  const errors = diagnostics.errors || [];
+  if (!errors.length) return "";
+  return errors
+    .map((item) => {
+      const account = item.account_name || item.account_id || item.source || "settings";
+      return `${account}: ${item.message || "settings load error"}`;
+    })
+    .join(" ");
+}
+
 function renderRuntimeHealth(health) {
   runtimeHealth = health || null;
   runtimeStale = Boolean(health && health.current === false);
   if (!els.runtimeHealthBanner || !els.runtimeHealthText) return;
-  if (!health || health.current === true) {
+  const settingsWarning = settingsDiagnosticsSummary(health?.settings_diagnostics || {});
+  if (!health || (health.current === true && !settingsWarning)) {
     els.runtimeHealthBanner.hidden = true;
     els.runtimeHealthText.textContent = "";
     return;
   }
-  els.runtimeHealthText.textContent = healthSummary(health);
+  els.runtimeHealthText.textContent = health.current === false ? healthSummary(health) : settingsWarning;
   els.runtimeHealthBanner.hidden = false;
-  els.statusText.textContent = "Stale runtime warning";
+  els.statusText.textContent = health.current === false ? "Stale runtime warning" : "Settings warning";
 }
 
 function renderRuntimeHealthError(message) {
@@ -994,6 +1052,16 @@ function renderRuntimeHealthError(message) {
     els.runtimeHealthBanner.hidden = false;
   }
   els.statusText.textContent = "Runtime health unavailable";
+}
+
+function renderSettingsDiagnostics(diagnostics = {}) {
+  const hasSettingsWarning = Boolean((diagnostics.errors || []).length);
+  if (!hasSettingsWarning && runtimeStale && !runtimeHealth) return;
+  const health = {
+    ...(runtimeHealth || { current: true }),
+    settings_diagnostics: diagnostics,
+  };
+  renderRuntimeHealth(health);
 }
 
 async function checkRuntimeHealth() {
@@ -1056,6 +1124,7 @@ async function loadSettings(options = {}) {
   const payload = await response.json();
   profiles = payload.profiles || {};
   savedAccounts = payload.accounts || [];
+  renderSettingsDiagnostics(payload.settings_diagnostics || {});
   selectedAccountId = payload.selected_account_id || savedAccounts[0]?.account_id || "";
   const account = findSavedAccount(selectedAccountId) || savedAccounts[0];
   renderProfileSelect(account?.config?.profile || fields.profile.value || "neutral");
@@ -1590,6 +1659,7 @@ function renderLookup(payload) {
 }
 
 function renderState(state) {
+  renderSettingsDiagnostics(state.settings_diagnostics || {});
   if (isDraftAccount) {
     selectedConnected = false;
     selectedTradingEnabled = false;
@@ -1638,8 +1708,9 @@ function renderState(state) {
   const account = selected.account || {};
   currentSelectedAccount = account;
   els.equity.textContent = account.equity_display || "$0.00";
-  els.dailyPl.textContent = account.daily_pl_display || "$0.00";
-  els.dailyPl.className = Number(account.daily_pl || 0) >= 0 ? "positive" : "negative";
+  els.dailyPl.textContent = dailyPlDisplay(account);
+  els.dailyPl.className = Number(account.daily_pl_raw || 0) >= 0 ? "positive" : "negative";
+  if (els.dailyPlDetail) els.dailyPlDetail.textContent = metricSessionDetail(account.daily_pl_session_date);
   renderRealizedPlMetric(account);
   els.buyingPower.textContent = account.buying_power_display || "$0.00";
   els.cash.textContent = account.cash_display || "$0.00";
@@ -1725,12 +1796,23 @@ function renderTradingToggle() {
 }
 
 function renderRealizedPlMetric(account = currentSelectedAccount) {
-  const rawValue = Number(account.realized_pl || 0);
+  const rawValue = Number(account.realized_pl_raw ?? account.realized_pl ?? 0);
   const display = showRealizedPlPercent
     ? account.realized_pl_pct_display || "0.00%"
     : account.realized_pl_display || "$0.00";
   els.realizedPl.textContent = display;
   els.realizedPl.className = rawValue >= 0 ? "positive" : "negative";
+  if (els.realizedPlDetail) els.realizedPlDetail.textContent = metricSessionDetail(account.realized_pl_session_date);
+}
+
+function dailyPlDisplay(account = {}) {
+  const amount = account.daily_pl_display || account.daily_pl || "$0.00";
+  const pct = account.daily_pl_pct_display || "0.00%";
+  return `${amount} (${pct})`;
+}
+
+function metricSessionDetail(sessionDate) {
+  return sessionDate ? `Session ${sessionDate}` : "";
 }
 
 function renderReplay(replay) {
@@ -1775,7 +1857,7 @@ function renderAccountCards(accounts) {
       <span>${escapeHtml(account.name || "Paper Account")}</span>
       <strong>${escapeHtml(strategyLabel)}</strong>
       <small>${escapeHtml(account.status || "Not connected")}</small>
-      <em class="${Number(account.daily_pl_raw || 0) >= 0 ? "positive" : "negative"}">${escapeHtml(account.daily_pl || "$0.00")}</em>
+      <em class="${Number(account.daily_pl_raw || 0) >= 0 ? "positive" : "negative"}">${escapeHtml(dailyPlDisplay(account))}</em>
     `;
     card.addEventListener("click", async () => {
       if (selectedAccountId || isDraftAccount) {

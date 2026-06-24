@@ -369,6 +369,15 @@
                   <span>Manual exit orders</span>
                 </label>
               </div>
+              <label>
+                Trade size mode
+                <select id="tradeSizeMode">
+                  <option value="percent">Percent of equity</option>
+                  <option value="notional">Dollar amount</option>
+                  <option value="exposure_slot">Exposure slot</option>
+                </select>
+              </label>
+              <small id="tradeSizingStatus" class="helper-text">One trade sizing mode is active at a time.</small>
               <div class="two-col">
                 <label>
                   Trade $
@@ -411,18 +420,20 @@
               <strong id="equity">$0.00</strong>
             </article>
             <article>
-              <span>Daily P/L</span>
+              <span>Daily P/L (equity)</span>
               <strong id="dailyPl">$0.00</strong>
+              <small id="dailyPlDetail" class="metric-detail"></small>
             </article>
             <article class="realized-pl-card">
               <div class="metric-heading">
-                <span>Realized P/L</span>
+                <span>Realized Today</span>
                 <label class="check-row compact-toggle metric-toggle">
                   <input id="realizedPercentToggle" type="checkbox" />
                   <span>%</span>
                 </label>
               </div>
               <strong id="realizedPl">$0.00</strong>
+              <small id="realizedPlDetail" class="metric-detail"></small>
             </article>
             <article>
               <span>Buying Power</span>

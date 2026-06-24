@@ -223,7 +223,9 @@ async def get_health(request: Request) -> dict[str, Any]:
     runtime_url = str(getattr(app.state, "runtime_url", "") or "").rstrip("/")
     if not runtime_url:
         runtime_url = str(request.base_url).rstrip("/")
-    return currentness_payload(url=runtime_url)
+    payload = currentness_payload(url=runtime_url)
+    payload["settings_diagnostics"] = manager.settings_diagnostics()
+    return payload
 
 
 @app.get("/api/settings")
@@ -439,13 +441,36 @@ def load_saved_settings_to_manager() -> None:
         return
 
     raw = load_settings()
+    manager.reset_settings_load_errors()
+    if raw.get("settings_load_error"):
+        manager.record_settings_load_error(
+            str(raw.get("settings_load_error")),
+            source="settings_file",
+        )
     selected_account_id = str(raw.get("selected_account_id") or "")
     if isinstance(raw.get("custom_profiles"), dict):
         manager.set_custom_profiles(raw.get("custom_profiles") or {})
     account_settings: list[AccountSettings] = []
 
     if isinstance(raw.get("accounts"), list):
-        for item in raw["accounts"]:
+        for index, item in enumerate(raw["accounts"]):
+            if not isinstance(item, dict):
+                message = f"Saved account {index + 1} could not load: account entry is not an object."
+                account_settings.append(
+                    AccountSettings(
+                        account_id=f"invalid-account-{index + 1}",
+                        name=f"Invalid Account {index + 1}",
+                        remember=False,
+                        auto_connect=False,
+                        auto_start_trading=False,
+                        config=AppConfig(),
+                        settings_load_error=message,
+                    )
+                )
+                manager.record_settings_load_error(message, f"invalid-account-{index + 1}", f"Invalid Account {index + 1}")
+                continue
+            account_id = str(item.get("account_id") or f"account-{index + 1}")
+            account_name = str(item.get("name") or "Paper Account")
             try:
                 remember = bool(item.get("remember", False))
                 auto_connect = bool(item.get("auto_connect", remember))
@@ -457,18 +482,33 @@ def load_saved_settings_to_manager() -> None:
                     secret_key = unprotect_text(str(item.get("secret_key", "")))
                 account_settings.append(
                     AccountSettings(
-                        account_id=str(item.get("account_id") or ""),
-                        name=str(item.get("name") or "Paper Account"),
+                        account_id=account_id,
+                        name=account_name,
                         api_key=api_key,
                         secret_key=secret_key,
                         remember=remember,
                         auto_connect=auto_connect,
                         auto_start_trading=auto_start_trading,
-                        config=AppConfig(**(item.get("config") or {})),
+                        config=AppConfig.model_validate(
+                            item.get("config") or {},
+                            context={"allow_legacy_trade_size_migration": True},
+                        ),
                     )
                 )
-            except Exception:
-                continue
+            except Exception as exc:
+                message = f"Saved account {account_name} could not load: {exc}"
+                account_settings.append(
+                    AccountSettings(
+                        account_id=account_id,
+                        name=account_name,
+                        remember=False,
+                        auto_connect=False,
+                        auto_start_trading=False,
+                        config=AppConfig(),
+                        settings_load_error=message,
+                    )
+                )
+                manager.record_settings_load_error(message, account_id, account_name)
     elif raw:
         # Migration path from the original single-account settings format.
         remember = bool(raw.get("remember", False))
@@ -492,7 +532,10 @@ def load_saved_settings_to_manager() -> None:
                 remember=remember,
                 auto_connect=auto_connect,
                 auto_start_trading=auto_start_trading,
-                config=AppConfig(**(raw.get("config") or {})),
+                config=AppConfig.model_validate(
+                    raw.get("config") or {},
+                    context={"allow_legacy_trade_size_migration": True},
+                ),
             )
         )
 
