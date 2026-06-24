@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import os
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ from .engine import (
     config_from_profile,
     credential_validation_error,
 )
+from .runtime_diagnostics import runtime_diagnostics_snapshot
 from .storage import load_settings, protect_text, save_settings, unprotect_text
 
 
@@ -225,6 +227,7 @@ async def get_health(request: Request) -> dict[str, Any]:
         runtime_url = str(request.base_url).rstrip("/")
     payload = currentness_payload(url=runtime_url)
     payload["settings_diagnostics"] = manager.settings_diagnostics()
+    payload["runtime_diagnostics"] = runtime_diagnostics_snapshot()
     return payload
 
 
@@ -495,7 +498,7 @@ def load_saved_settings_to_manager() -> None:
                         ),
                     )
                 )
-            except Exception as exc:
+            except (OSError, ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
                 message = f"Saved account {account_name} could not load: {exc}"
                 account_settings.append(
                     AccountSettings(
@@ -520,7 +523,13 @@ def load_saved_settings_to_manager() -> None:
             try:
                 api_key = unprotect_text(str(raw.get("api_key", "")))
                 secret_key = unprotect_text(str(raw.get("secret_key", "")))
-            except Exception:
+            except (OSError, ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
+                manager.record_settings_load_error(
+                    f"Legacy saved credentials could not be decrypted: {exc}",
+                    str(raw.get("account_id") or "default"),
+                    str(raw.get("name") or "Account 1"),
+                    source="credential_decrypt",
+                )
                 api_key = ""
                 secret_key = ""
         account_settings.append(
@@ -565,21 +574,34 @@ def preserve_credentials(accounts: list[AccountSettings]) -> list[AccountSetting
             raise RuntimeError(provided_error)
         try:
             existing = manager.get(item.account_id)
+        except KeyError:
+            existing = None
+        if existing is not None:
             existing_settings = existing.settings(include_keys=True)
             api_key = api_key or str(existing_settings.get("api_key", ""))
             secret_key = secret_key or str(existing_settings.get("secret_key", ""))
-        except Exception:
-            pass
         encrypted = encrypted_by_id.get(item.account_id, {})
         if item.remember and not api_key and encrypted.get("api_key"):
             try:
                 api_key = unprotect_text(str(encrypted.get("api_key", "")))
-            except Exception:
+            except (OSError, ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
+                manager.record_settings_load_error(
+                    f"Saved API key could not be decrypted for {item.name}: {exc}",
+                    item.account_id,
+                    item.name,
+                    source="credential_preservation",
+                )
                 api_key = ""
         if item.remember and not secret_key and encrypted.get("secret_key"):
             try:
                 secret_key = unprotect_text(str(encrypted.get("secret_key", "")))
-            except Exception:
+            except (OSError, ValueError, TypeError, binascii.Error, UnicodeDecodeError) as exc:
+                manager.record_settings_load_error(
+                    f"Saved secret key could not be decrypted for {item.name}: {exc}",
+                    item.account_id,
+                    item.name,
+                    source="credential_preservation",
+                )
                 secret_key = ""
         preserved.append(item.model_copy(update={"api_key": api_key, "secret_key": secret_key}))
     return preserved

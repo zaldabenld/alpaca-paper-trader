@@ -1152,19 +1152,35 @@ function settingsDiagnosticsSummary(diagnostics = {}) {
     .join(" ");
 }
 
+function runtimeDiagnosticsSummary(diagnostics = {}) {
+  const entries = diagnostics.entries || [];
+  if (!entries.length) return "";
+  return entries
+    .slice(-3)
+    .map((item) => {
+      const area = item.area || item.source || "runtime";
+      const detail = item.detail ? `: ${item.detail}` : "";
+      return `${area}: ${item.message || "runtime warning"}${detail}`;
+    })
+    .join(" ");
+}
+
 function renderRuntimeHealth(health) {
   runtimeHealth = health || null;
   runtimeStale = Boolean(health && health.current === false);
   if (!els.runtimeHealthBanner || !els.runtimeHealthText) return;
   const settingsWarning = settingsDiagnosticsSummary(health?.settings_diagnostics || {});
-  if (!health || (health.current === true && !settingsWarning)) {
+  const runtimeWarning = runtimeDiagnosticsSummary(health?.runtime_diagnostics || {});
+  if (!health || (health.current === true && !settingsWarning && !runtimeWarning)) {
     els.runtimeHealthBanner.hidden = true;
     els.runtimeHealthText.textContent = "";
     return;
   }
-  els.runtimeHealthText.textContent = health.current === false ? healthSummary(health) : settingsWarning;
+  els.runtimeHealthText.textContent = health.current === false ? healthSummary(health) : (settingsWarning || runtimeWarning);
   els.runtimeHealthBanner.hidden = false;
-  els.statusText.textContent = health.current === false ? "Stale runtime warning" : "Settings warning";
+  els.statusText.textContent = health.current === false
+    ? "Stale runtime warning"
+    : (settingsWarning ? "Settings warning" : "Runtime warning");
 }
 
 function renderRuntimeHealthError(message) {

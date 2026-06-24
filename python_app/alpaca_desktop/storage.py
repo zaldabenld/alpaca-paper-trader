@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .runtime_diagnostics import SettingsPersistenceError, record_runtime_diagnostic
+
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AlpacaPaperTrader"
 SETTINGS_PATH = APP_DIR / "python-settings.json"
@@ -124,8 +126,14 @@ def load_settings() -> dict[str, Any]:
         return {}
     try:
         return _load_json_file(SETTINGS_PATH)
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
         error_payload = _settings_error_payload(exc, SETTINGS_PATH)
+        record_runtime_diagnostic(
+            "settings",
+            "Settings load failed",
+            SettingsPersistenceError(str(exc) or exc.__class__.__name__),
+            source="storage",
+        )
         for backup in _settings_backups():
             try:
                 recovered = _load_json_file(backup)
@@ -133,7 +141,13 @@ def load_settings() -> dict[str, Any]:
                 recovered["settings_load_error_path"] = error_payload["settings_load_error_path"]
                 recovered["settings_recovered_from_backup"] = str(backup)
                 return recovered
-            except Exception:
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as backup_exc:
+                record_runtime_diagnostic(
+                    "settings",
+                    "Settings backup recovery failed",
+                    SettingsPersistenceError(str(backup_exc) or backup_exc.__class__.__name__),
+                    source="storage",
+                )
                 continue
         return error_payload
 

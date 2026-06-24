@@ -983,3 +983,81 @@ Resolution evidence:
 - Replacement child `019efbcf-9b4f-75b2-a4a3-cb2114401413` materialized in `C:\Users\solo leveling\.codex\worktrees\411a\alpaca trading app`, also detached at `d130000`, and also reported `systemError` before any assistant response.
 - The repeated signature points to a Codex child-thread startup failure for this Step 6 launch pattern rather than a code or test failure inside the app.
 - Coordinator will try one reduced prompt/thread launch without the high-reasoning override; if that fails, continue with an isolated worker/subagent or coordinator-owned worktree so Step 6 does not halt.
+- Reduced-prompt child `019efbd0-b8cb-7413-ae35-f27d3e1c7c4e` is the active Step 6 child in `C:\Users\solo leveling\.codex\worktrees\7555\alpaca trading app`.
+- Coordinator verified this worktree initially materialized detached at `7b67059`, then attached it to branch `codex/alpaca-monolith-backtester-seam-v3` at the same commit before any child changes.
+- Child self-check before edits confirmed `## codex/alpaca-monolith-backtester-seam-v3` and root `C:/Users/solo leveling/.codex/worktrees/7555/alpaca trading app`, not the stable checkout.
+
+### 2026-06-24 - Step 6 pre-implementation scope: AUDIT-004, AUDIT-006, AUDIT-021
+Status: In progress in `codex/alpaca-monolith-backtester-seam-v3`
+Evidence:
+- `python_app/alpaca_desktop/engine.py::TraderEngine.refresh()` still combines account refresh, market-data fetch, strategy execution, order/protection handling, P/L payload assembly, and day-tape scan recording.
+- `python_app/alpaca_desktop/engine.py::apply_strategy()`, `submit_protective_exit_order()`, `submit_limit_exit_order()`, and `submit_exit_order()` submit live orders directly through `TradingClient`, so a future backtester has no concrete order-execution boundary to replace.
+- `python_app/alpaca_desktop/engine.py::append_replay_event()` and `python_app/alpaca_desktop/day_tape.py::append_day_tape_event()` attach `write_error` to returned events, but they do not emit a shared runtime diagnostic.
+- `python_app/alpaca_desktop/engine.py::load_dashboard_cache_rows()` returns `{}` on read/parse failure, and `save_dashboard_cache_rows()` uses `pass` on write failure.
+- `python_app/alpaca_desktop/engine.py::record_day_tape_bars()`, `record_day_tape_scan()`, `trade_intent_lookup()`, and `restore_trade_guards_from_replay()` can drop replay/day-tape failures with `pass` or `return`.
+- `python_app/alpaca_desktop/server.py::get_health()`, `TraderManager.state()`, and `TraderManager.dashboard_state()` expose settings and stream health but no shared runtime diagnostics for recoverable persistence/replay/cache failures.
+Planned fix:
+- Add a small backtester boundary module with typed ports for account state, market data, order execution, clock, replay, and strategy evaluation.
+- Add a `TraderEngine.backtester_boundary()` adapter that delegates to the existing live strategy methods instead of copying strategy rules.
+- Wrap live order submission through the boundary with a typed order-execution error while preserving existing order-rejection behavior.
+- Add a small runtime diagnostics ring and surface it through health/state/dashboard payloads.
+- Replace the confirmed silent persistence/replay/cache fallback paths with typed catches and diagnostic logging.
+Scope guard:
+- Do not rewrite the strategy scan, sizing, metrics, layout, market-stream, or refresh-loop contracts.
+- If a broader monolith split is needed beyond these ports and diagnostics, log it as out of scope and stop.
+
+### 2026-06-24 - Step 6 status update: AUDIT-004, AUDIT-006, AUDIT-021
+Status: Fixed in `codex/alpaca-monolith-backtester-seam-v3`
+Evidence:
+- Added `python_app/alpaca_desktop/backtester.py` with typed ports for account state, market data, order execution, replay, clock, and strategy evaluation.
+- Added `TraderEngine.backtester_boundary()` in `python_app/alpaca_desktop/engine.py`; the strategy port delegates to existing `entry_candidate()`, `apply_strategy()`, `snapshot()`, and `scan_symbols()` so future backtests reuse live strategy logic instead of copying rules.
+- Live order submission/cancellation paths now run through the order-execution boundary and wrap broker/client failures as `OrderExecutionError` while preserving existing order-intent, hold, and rejection handling.
+- Added `python_app/alpaca_desktop/runtime_diagnostics.py` as a shared ring for recoverable runtime diagnostics.
+- `/api/health`, manager `state()`, manager `dashboard_state()`, and the runtime-health banner now surface runtime diagnostics alongside existing settings diagnostics.
+- Replaced confirmed silent/default fallbacks in replay, day-tape, dashboard cache, settings load/recovery, launcher currentness helpers, custom-profile validation, API-client cleanup, and market-stream cleanup with typed catches and runtime diagnostics.
+- Kept strategy scoring, sizing, account metrics, layout rules, polling coordination, and market-stream subscription contracts unchanged.
+
+### 2026-06-24 - Step 6 regression coverage update
+Status: Covered
+Evidence:
+- Added `tests/test_backtester_boundary_diagnostics.py`.
+- Coverage proves the backtester strategy boundary delegates into `TraderEngine.apply_strategy()` with the same arguments instead of implementing parallel strategy logic.
+- Coverage proves account-state snapshots are copied, live order failures become `OrderExecutionError` plus runtime diagnostics, manager state/dashboard payloads include runtime diagnostics, dashboard-cache parse failures are diagnosed, and replay write failures still return `write_error` while recording diagnostics.
+
+### 2026-06-24 - Step 6 focused regression audit
+Status: Complete
+Checks:
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 33 tests.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local setup.
+- `.\.venv\Scripts\python.exe scripts\check_frontend_layout.py` passed with the Step 4 viewport evidence still showing no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices.
+Regression review:
+- AUDIT-001: No regression observed; runtime currentness/backend restart behavior was not changed.
+- AUDIT-002: No regression observed; Daily P/L amount/percent display tests still pass.
+- AUDIT-003: No regression observed; realized-today date/session behavior tests still pass.
+- AUDIT-004: Fixed narrowly for the backend/backtester boundary; frontend monolith splitting remains out of Step 6 scope.
+- AUDIT-005: No regression observed; regression harness now covers Step 6 boundary and diagnostics.
+- AUDIT-006: Fixed for the confirmed critical silent/default fallback paths; remaining broad API/background/stream handlers are logged, surfaced as health/state, or converted to HTTP errors.
+- AUDIT-007: No regression observed; frontend request coordination tests still pass.
+- AUDIT-008: No regression observed; stale-runtime health/recovery behavior was preserved.
+- AUDIT-009: No regression observed; selected-account response sequencing tests still pass.
+- AUDIT-010: No regression observed; explicit trade-size-mode behavior remains covered and unchanged.
+- AUDIT-011: No regression observed; exposure-room downsizing behavior remains covered and unchanged.
+- AUDIT-012: No regression observed; invalid saved-account shell/diagnostic behavior remains covered and unchanged.
+- AUDIT-013: No regression observed; corrupt settings load and atomic save behavior remain covered and unchanged, with runtime diagnostics added for load/recovery failures.
+- AUDIT-014: No regression observed; VBS launcher currentness behavior was not changed.
+- AUDIT-015: No regression observed; layout contract check still passes at the Step 4 viewports.
+- AUDIT-016: No regression observed; standardized Daily P/L raw/display/percent contract remains covered and unchanged.
+- AUDIT-017: No regression observed; inverse ETF code/docs/UI behavior was not changed.
+- AUDIT-018: No regression observed; shared market-stream union tests still pass.
+- AUDIT-019: No regression observed; held-symbol stream tests still pass.
+- AUDIT-020: No regression observed; launcher fallback/currentness behavior was preserved except for typed, non-silent launcher exception handling.
+- AUDIT-021: Fixed; the replay/backtester path now has a concrete live-engine boundary for account state, market data, order execution, replay, clock, and strategy evaluation.
+- STEP3-CHILD-001: No regression observed; settings diagnostics still do not clear unresolved runtime-health errors without a successful runtime-health payload.
+- STEP5-COORD-001: No regression observed; `inverse_etf_mode="exclude"` still survives validation and suppresses the automatic inverse set.
+Conclusion:
+- No previous finding regressed in Step 6.
+- No new defects were discovered during Step 6 verification.
+- Stable checkout, live backend, saved credentials, and real `%LOCALAPPDATA%\AlpacaPaperTrader` were not touched.

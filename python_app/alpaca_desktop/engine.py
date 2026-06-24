@@ -33,6 +33,15 @@ from alpaca.trading.requests import (
 )
 from pydantic import BaseModel, Field, field_validator
 
+from .backtester import (
+    EngineBacktesterBoundary,
+    LiveAccountStateBoundary,
+    LiveClockBoundary,
+    LiveMarketDataBoundary,
+    LiveOrderExecutionBoundary,
+    LiveReplayBoundary,
+    LiveStrategyBoundary,
+)
 from .day_tape import (
     append_day_tape_event,
     append_market_bar_once,
@@ -46,6 +55,16 @@ from .day_tape import (
     compact_positions,
     compact_top_volume_rows,
     day_tape_file_path,
+)
+from .runtime_diagnostics import (
+    AccountRefreshError,
+    CachePersistenceError,
+    MarketDataError,
+    OrderExecutionError,
+    ReplayPersistenceError,
+    StreamControlError,
+    record_runtime_diagnostic,
+    runtime_diagnostics_snapshot,
 )
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
 from .sp500 import SP500_SYMBOLS
@@ -783,7 +802,13 @@ def retune_legacy_conservative_config(config: AppConfig) -> AppConfig:
         return config
     try:
         return AppConfig(**(config.model_dump(mode="json") | updates))
-    except Exception:
+    except (TypeError, ValueError) as exc:
+        record_runtime_diagnostic(
+            "config",
+            "Conservative profile retune failed; keeping original config",
+            exc,
+            source="engine",
+        )
         return config
 
 
@@ -901,8 +926,14 @@ def append_replay_event(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             REPLAY_DIR.mkdir(parents=True, exist_ok=True)
             with replay_file_path().open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, default=replay_json_default, separators=(",", ":")) + "\n")
-    except Exception as exc:
+    except (OSError, TypeError, ValueError) as exc:
         event["write_error"] = str(exc)
+        record_runtime_diagnostic(
+            "replay",
+            "Replay event write failed",
+            ReplayPersistenceError(str(exc) or exc.__class__.__name__),
+            source="engine",
+        )
     return event
 
 
@@ -926,7 +957,13 @@ def load_dashboard_cache_rows() -> dict[str, dict[str, Any]]:
             for symbol, row in rows.items()
             if symbol and isinstance(row, dict)
         }
-    except Exception:
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        record_runtime_diagnostic(
+            "dashboard_cache",
+            "Dashboard cache load failed; using empty cache",
+            CachePersistenceError(str(exc) or exc.__class__.__name__),
+            source="engine",
+        )
         return {}
 
 
@@ -952,8 +989,13 @@ def save_dashboard_cache_rows(rows: list[dict[str, Any]]) -> None:
             temp_path = DASHBOARD_CACHE_PATH.with_suffix(".tmp")
             temp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
             temp_path.replace(DASHBOARD_CACHE_PATH)
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as exc:
+        record_runtime_diagnostic(
+            "dashboard_cache",
+            "Dashboard cache save failed",
+            CachePersistenceError(str(exc) or exc.__class__.__name__),
+            source="engine",
+        )
 
 
 def compact_bar_payload(bar: Any, daily: bool = False) -> dict[str, Any]:
@@ -1084,13 +1126,28 @@ def fetch_stock_snapshots_chunked(
             response = data_client.get_stock_snapshot(
                 StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed(feed))
             )
-        except Exception:
+        except Exception as exc:
+            record_runtime_diagnostic(
+                "market_data",
+                "Batch snapshot request failed; retrying individual symbols",
+                MarketDataError(str(exc) or exc.__class__.__name__),
+                source="engine",
+            )
+            symbol_failures = 0
             for symbol in batch:
                 try:
                     response = data_client.get_stock_snapshot(
                         StockSnapshotRequest(symbol_or_symbols=symbol, feed=DataFeed(feed))
                     )
-                except Exception:
+                except Exception as symbol_exc:
+                    if symbol_failures < 3:
+                        record_runtime_diagnostic(
+                            "market_data",
+                            f"Snapshot request failed for {symbol}",
+                            MarketDataError(str(symbol_exc) or symbol_exc.__class__.__name__),
+                            source="engine",
+                        )
+                    symbol_failures += 1
                     continue
                 if isinstance(response, dict):
                     snapshot = response.get(symbol)
@@ -1334,6 +1391,68 @@ class TraderEngine:
             )
             self.logs = self.logs[-400:]
 
+    def backtester_boundary(self) -> EngineBacktesterBoundary:
+        return EngineBacktesterBoundary(
+            account_state=LiveAccountStateBoundary(self),
+            market_data=LiveMarketDataBoundary(self, fetch_stock_bars_chunked),
+            orders=LiveOrderExecutionBoundary(self),
+            replay=LiveReplayBoundary(self, append_replay_event),
+            clock=LiveClockBoundary(),
+            strategy=LiveStrategyBoundary(self),
+        )
+
+    def record_runtime_exception(
+        self,
+        area: str,
+        message: str,
+        error: BaseException,
+        *,
+        severity: str = "warning",
+        log_level: str = "warn",
+        set_last_error: bool = False,
+    ) -> str:
+        diagnostic = record_runtime_diagnostic(
+            area,
+            message,
+            error,
+            severity=severity,
+            source="engine",
+        )
+        detail = str(diagnostic.get("detail") or "").strip()
+        text = f"{message}: {detail}" if detail else message
+        self.log(log_level, text)
+        if set_last_error:
+            with self.lock:
+                self.last_error = text
+                self.status = text
+        return text
+
+    def submit_order_request(self, order: Any) -> Any:
+        try:
+            return self.backtester_boundary().orders.submit_order(order)
+        except OrderExecutionError as exc:
+            record_runtime_diagnostic(
+                "order_execution",
+                "Live order submission failed",
+                exc,
+                severity="error",
+                source="engine",
+            )
+            raise
+
+    def cancel_order_request(self, order_id: str) -> None:
+        try:
+            self.backtester_boundary().orders.cancel_order_by_id(order_id)
+        except OrderExecutionError as exc:
+            record_runtime_diagnostic(
+                "order_execution",
+                "Live order cancellation failed",
+                exc,
+                severity="warning",
+                source="engine",
+            )
+            raise
+
     def connect(self, payload: AccountPayload) -> None:
         api_key, secret_key = self.payload_credentials(payload)
         with self.lock:
@@ -1388,8 +1507,13 @@ class TraderEngine:
             if session is not None:
                 try:
                     session.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    record_runtime_diagnostic(
+                        "api_client",
+                        "API client session close failed",
+                        StreamControlError(str(exc) or exc.__class__.__name__),
+                        source="engine",
+                    )
         self.trading_client = None
         self.data_client = None
         self.screener_client = None
@@ -1460,8 +1584,8 @@ class TraderEngine:
                 client_order_id=client_order_id,
             )
             try:
-                submitted_order = client.submit_order(order)
-            except Exception as exc:
+                submitted_order = self.submit_order_request(order)
+            except OrderExecutionError as exc:
                 errors += 1
                 self.record_order_intent(
                     symbol,
@@ -1789,10 +1913,14 @@ class TraderEngine:
                 strategy_rows=rows,
             )
         except Exception as exc:
-            with self.lock:
-                self.last_error = str(exc)
-                self.status = str(exc)
-            self.log("error", str(exc))
+            self.record_runtime_exception(
+                "account_refresh",
+                "Account refresh failed",
+                AccountRefreshError(str(exc) or exc.__class__.__name__),
+                severity="error",
+                log_level="error",
+                set_last_error=True,
+            )
         finally:
             self.refresh_lock.release()
 
@@ -1923,8 +2051,12 @@ class TraderEngine:
             for symbol_bars in bars_data.values():
                 for bar in symbol_bars:
                     append_market_bar_once(bar, feed=self.config.feed, source=source)
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError) as exc:
+            self.record_runtime_exception(
+                "day_tape",
+                "Historical bar day-tape write failed",
+                ReplayPersistenceError(str(exc) or exc.__class__.__name__),
+            )
 
     def record_day_tape_scan(
         self,
@@ -1957,8 +2089,12 @@ class TraderEngine:
                     "strategy": clean_day_tape_value(strategy_rows),
                 },
             )
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError) as exc:
+            self.record_runtime_exception(
+                "day_tape",
+                "Strategy scan day-tape write failed",
+                ReplayPersistenceError(str(exc) or exc.__class__.__name__),
+            )
 
     def apply_shared_top_volume(
         self,
@@ -2764,8 +2900,8 @@ class TraderEngine:
                 events.append(("info", f"Dry run: would buy {qty_to_buy} shares of {symbol}."))
             else:
                 try:
-                    submitted = self.require_trading_client().submit_order(order)
-                except Exception as exc:
+                    submitted = self.submit_order_request(order)
+                except OrderExecutionError as exc:
                     self.hold_rejected_order(
                         symbol,
                         OrderSide.BUY,
@@ -3060,8 +3196,8 @@ class TraderEngine:
             events.append(("info", f"Dry run: would place {kind.replace('_', ' ')} for {qty} {symbol} at {price}."))
             return True, events
         try:
-            submitted = self.require_trading_client().submit_order(order)
-        except Exception as exc:
+            submitted = self.submit_order_request(order)
+        except OrderExecutionError as exc:
             self.hold_rejected_protective_order(symbol, kind)
             self.record_order_intent(
                 symbol,
@@ -3168,8 +3304,8 @@ class TraderEngine:
             self.record_reentry_floor(symbol, snapshot, reason)
             return True, events
         try:
-            submitted = self.require_trading_client().submit_order(order)
-        except Exception as exc:
+            submitted = self.submit_order_request(order)
+        except OrderExecutionError as exc:
             message = str(exc)
             self.hold_rejected_order(symbol, OrderSide.SELL, ORDER_REJECT_HOLD_SECONDS)
             self.record_order_intent(
@@ -3228,8 +3364,8 @@ class TraderEngine:
             self.record_reentry_floor(symbol, snapshot, reason)
         else:
             try:
-                submitted = self.require_trading_client().submit_order(order)
-            except Exception as exc:
+                submitted = self.submit_order_request(order)
+            except OrderExecutionError as exc:
                 message = str(exc)
                 self.hold_rejected_order(symbol, OrderSide.SELL, ORDER_REJECT_HOLD_SECONDS)
                 self.record_order_intent(
@@ -3493,7 +3629,12 @@ class TraderEngine:
                     restored_exits[symbol] = current_day
                 if side == "buy" and status == "error" and is_non_fractionable_error(reason):
                     restored_holds[(symbol, "buy")] = non_fractionable_hold_until
-        except Exception:
+        except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
+            self.record_runtime_exception(
+                "replay",
+                "Trade guard replay restore failed",
+                ReplayPersistenceError(str(exc) or exc.__class__.__name__),
+            )
             return
         with self.lock:
             self.entry_lock_dates.update(restored_entries)
@@ -3699,7 +3840,12 @@ class TraderEngine:
                 open_orders = client.get_orders(
                     GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=50, nested=True, direction=Sort.DESC)
                 )
-            except Exception:
+            except Exception as exc:
+                self.record_runtime_exception(
+                    "order_execution",
+                    "Open-order status check failed",
+                    OrderExecutionError(str(exc) or exc.__class__.__name__),
+                )
                 return False
             flat_orders = self.flatten_orders([model_dict(item) for item in open_orders])
             still_held = [
@@ -3726,9 +3872,9 @@ class TraderEngine:
         if not order_id:
             return False
         try:
-            self.require_trading_client().cancel_order_by_id(order_id)
+            self.cancel_order_request(order_id)
             return True
-        except Exception as exc:
+        except OrderExecutionError as exc:
             self.log("warn", f"Could not cancel protective order {order_id}: {exc}")
             return False
 
@@ -3938,8 +4084,12 @@ class TraderEngine:
                         continue
                     if event.get("kind") == "order_intent" and isinstance(event.get("payload"), dict):
                         events.append(dict(event.get("payload") or {}))
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
+                self.record_runtime_exception(
+                    "replay",
+                    "Order-intent replay lookup failed",
+                    ReplayPersistenceError(str(exc) or exc.__class__.__name__),
+                )
 
         lookup: dict[str, dict[str, Any]] = {}
         for event in events:
@@ -4594,7 +4744,13 @@ class TraderManager:
             label = str(raw_config.get("profile_label") or raw_key).strip() or key
             try:
                 config = AppConfig(**(raw_config | {"profile": key})).model_dump(mode="json")
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                record_runtime_diagnostic(
+                    "config",
+                    f"Custom profile {key} could not be validated; skipping profile",
+                    exc,
+                    source="engine",
+                )
                 continue
             config["profile_label"] = label
             cleaned[key] = config
@@ -4647,6 +4803,7 @@ class TraderManager:
                 "profiles": self.profile_presets(),
                 "custom_profiles": {key: dict(value) for key, value in self.custom_profiles.items()},
                 "settings_diagnostics": self.settings_diagnostics(),
+                "runtime_diagnostics": runtime_diagnostics_snapshot(),
             }
 
     def state(self, account_id: str | None = None) -> dict[str, Any]:
@@ -4661,6 +4818,7 @@ class TraderManager:
                 "market_stream": self.market_stream_state(),
                 "replay": self.replay_state(),
                 "settings_diagnostics": self.settings_diagnostics(),
+                "runtime_diagnostics": runtime_diagnostics_snapshot(),
             }
 
     def dashboard_state(self, account_id: str | None = None) -> dict[str, Any]:
@@ -4668,6 +4826,7 @@ class TraderManager:
         state["market_stream"] = self.market_stream_state()
         state["replay"] = self.replay_state()
         state["settings_diagnostics"] = self.settings_diagnostics()
+        state["runtime_diagnostics"] = runtime_diagnostics_snapshot()
         return state
 
     def sync_top_volume_from(self, source: TraderEngine) -> None:
@@ -5201,8 +5360,13 @@ class SharedMarketStreamHandle:
                     self.stop_event.set()
                     try:
                         stream._should_run = False
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        record_runtime_diagnostic(
+                            "market_stream",
+                            "Market stream stop flag update failed",
+                            StreamControlError(str(exc) or exc.__class__.__name__),
+                            source="engine",
+                        )
                 self.manager.update_market_stream_health(
                     status="Connection limit" if connection_limited else "Connection error",
                     connected=False,
@@ -5396,8 +5560,13 @@ class SharedMarketStreamHandle:
                 if self.stream is not None:
                     try:
                         self.stream.stop()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        record_runtime_diagnostic(
+                            "market_stream",
+                            "Market stream stop failed during reconnect cleanup",
+                            StreamControlError(str(exc) or exc.__class__.__name__),
+                            source="engine",
+                        )
                     self.stream = None
 
             if self.stop_event.wait(reconnect_delay):
@@ -5409,5 +5578,10 @@ class SharedMarketStreamHandle:
         try:
             if self.stream is not None:
                 self.stream.stop()
-        except Exception:
-            pass
+        except Exception as exc:
+            record_runtime_diagnostic(
+                "market_stream",
+                "Market stream stop failed",
+                StreamControlError(str(exc) or exc.__class__.__name__),
+                source="engine",
+            )

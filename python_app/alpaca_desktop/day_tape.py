@@ -8,6 +8,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .runtime_diagnostics import ReplayPersistenceError, record_runtime_diagnostic
+
 
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "AlpacaPaperTrader"
 DAY_TAPE_DIR = APP_DATA_DIR / "day-tape"
@@ -197,8 +199,14 @@ def append_day_tape_event(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             prune_old_day_tapes_locked()
             with day_tape_file_path().open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, default=json_default, separators=(",", ":")) + "\n")
-    except Exception as exc:
+    except (OSError, TypeError, ValueError) as exc:
         event["write_error"] = str(exc)
+        record_runtime_diagnostic(
+            "day_tape",
+            "Day-tape event write failed",
+            ReplayPersistenceError(str(exc) or exc.__class__.__name__),
+            source="day_tape",
+        )
     return event
 
 

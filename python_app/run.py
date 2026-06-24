@@ -65,7 +65,7 @@ def load_instance() -> dict[str, Any]:
     try:
         raw = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
         return raw if isinstance(raw, dict) else {}
-    except Exception:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
         return {}
 
 
@@ -89,7 +89,7 @@ def fetch_health(url: str, timeout: float = 1.0) -> dict[str, Any]:
                 return {}
             raw = json.loads(response.read().decode("utf-8"))
             return raw if isinstance(raw, dict) else {}
-    except Exception:
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
         return {}
 
 
@@ -102,7 +102,7 @@ def url_is_alive(url: str, timeout: float = 1.0) -> bool:
                 return response.status < 500
         except urllib.error.HTTPError as exc:
             return exc.code < 500
-        except Exception:
+        except (OSError, urllib.error.URLError, TimeoutError):
             continue
     return False
 
@@ -133,7 +133,7 @@ def stop_instance(raw: dict[str, Any], url: str) -> bool:
         return False
     try:
         os.kill(pid, signal.SIGTERM)
-    except Exception as exc:
+    except OSError as exc:
         safe_print(f"Could not stop stale Alpaca Paper Trader backend pid {pid}: {exc}")
         return False
 
@@ -166,7 +166,7 @@ def active_instance_url(restart_stale: bool = True) -> str:
                 "Stale backend did not stop cleanly. Starting a separate current instance instead of reusing it."
             )
         return ""
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return ""
 
 
@@ -185,8 +185,8 @@ def save_instance_url(url: str) -> None:
             ),
             encoding="utf-8",
         )
-    except Exception:
-        pass
+    except OSError as exc:
+        safe_print(f"Could not save Alpaca Paper Trader instance file: {exc}")
 
 
 def clear_instance_url(url: str) -> None:
@@ -194,7 +194,7 @@ def clear_instance_url(url: str) -> None:
         raw = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
         if str(raw.get("url") or "") == url:
             INSTANCE_PATH.unlink(missing_ok=True)
-    except Exception:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
         pass
 
 
