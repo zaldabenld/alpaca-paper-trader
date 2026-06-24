@@ -232,6 +232,13 @@ let selectedAccountId = "";
 let isDraftAccount = false;
 let selectedTradingEnabled = false;
 let selectedConnected = false;
+let accountContextVersion = 0;
+let accountTransitionDepth = 0;
+const requestChannels = {
+  health: { sequence: 0, controller: null },
+  state: { sequence: 0, controller: null },
+  dashboard: { sequence: 0, controller: null },
+};
 const sortableTables = {
   topVolumeRows: {
     defaultKey: "rank_raw",
@@ -349,6 +356,98 @@ const sortableTables = {
     columns: ["time", "kind", "summary"],
   },
 };
+
+function selectedAccountKey(accountId = selectedAccountId) {
+  return accountId || "";
+}
+
+function beginRequest(channelName, options = {}) {
+  const channel = requestChannels[channelName];
+  if (!channel) throw new Error(`Unknown request channel ${channelName}`);
+  if (options.abortPrevious !== false && channel.controller) {
+    channel.controller.abort();
+  }
+  const controller = typeof AbortController === "undefined" ? null : new AbortController();
+  channel.controller = controller;
+  channel.sequence += 1;
+  return {
+    channel,
+    sequence: channel.sequence,
+    accountId: selectedAccountKey(options.accountId ?? selectedAccountId),
+    contextVersion: accountContextVersion,
+    allowSelectedAccountChange: Boolean(options.allowSelectedAccountChange),
+    requireResponseAccountMatch: options.requireResponseAccountMatch !== false,
+    signal: controller?.signal,
+    source: options.source || channelName,
+  };
+}
+
+function abortRequestChannel(channelName) {
+  const channel = requestChannels[channelName];
+  if (channel?.controller) {
+    channel.controller.abort();
+    channel.controller = null;
+  }
+}
+
+function invalidateAccountContext() {
+  accountContextVersion += 1;
+  abortRequestChannel("state");
+  abortRequestChannel("dashboard");
+  return accountContextVersion;
+}
+
+function isLatestRequest(request) {
+  return request?.channel?.sequence === request.sequence;
+}
+
+function isCurrentAccountContext(context) {
+  if (!context) return true;
+  if (context.contextVersion !== accountContextVersion) return false;
+  return context.allowSelectedAccountChange || context.accountId === selectedAccountKey();
+}
+
+function isCurrentAccountRequest(request) {
+  return isLatestRequest(request) && isCurrentAccountContext(request);
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function makeRenderContext(accountId = selectedAccountId, options = {}) {
+  return {
+    accountId: selectedAccountKey(accountId),
+    contextVersion: accountContextVersion,
+    allowSelectedAccountChange: Boolean(options.allowSelectedAccountChange),
+    requireResponseAccountMatch: options.requireResponseAccountMatch !== false,
+  };
+}
+
+function responseSelectedAccountId(state = {}) {
+  return selectedAccountKey(state.selected_account_id || state.selected?.account_id || "");
+}
+
+function stateMatchesRenderContext(state, context) {
+  if (!isCurrentAccountContext(context)) return false;
+  if (!context?.requireResponseAccountMatch) return true;
+  const responseAccountId = responseSelectedAccountId(state);
+  return !context.accountId || !responseAccountId || responseAccountId === context.accountId;
+}
+
+async function withAccountTransition(callback) {
+  const transitionVersion = invalidateAccountContext();
+  accountTransitionDepth += 1;
+  try {
+    return await callback(transitionVersion);
+  } finally {
+    accountTransitionDepth = Math.max(0, accountTransitionDepth - 1);
+  }
+}
+
+function isTransitionCurrent(transitionVersion) {
+  return transitionVersion === accountContextVersion;
+}
 const tableSorts = Object.fromEntries(
   Object.entries(sortableTables).map(([tableId, config]) => [
     tableId,
@@ -398,39 +497,7 @@ document.querySelectorAll(".tab").forEach((button) => {
 });
 
 fields.accountSelect.addEventListener("change", async () => {
-  const nextAccountId = fields.accountSelect.value;
-  const previousAccountId = selectedAccountId;
-  try {
-    if (previousAccountId || hasAccountFormData()) {
-      await saveCurrentAccountDraft(false);
-    }
-  } catch (error) {
-    fields.accountSelect.value = previousAccountId;
-    throw error;
-  }
-
-  selectedAccountId = nextAccountId;
-  fields.accountSelect.value = nextAccountId;
-  if (!nextAccountId) {
-    isDraftAccount = true;
-    applyAccount({
-      account_id: "",
-      name: `Account ${savedAccounts.length + 1}`,
-      api_key: "",
-      secret_key: "",
-      remember: true,
-      auto_connect: true,
-      auto_start_trading: false,
-      config: presetConfig("neutral"),
-    });
-    els.statusText.textContent = "New account draft";
-    return;
-  }
-  const account = findSavedAccount(nextAccountId);
-  if (account) applyAccount(account);
-  await postJson("/api/select-account", { account_id: nextAccountId });
-  await loadState();
-  await loadDashboard();
+  await switchToAccount(fields.accountSelect.value);
 });
 
 fields.profile.addEventListener("change", async () => {
@@ -452,65 +519,61 @@ configKeys
   });
 
 els.newAccountButton.addEventListener("click", async () => {
-  if (selectedAccountId || hasAccountFormData()) {
-    await saveCurrentAccountDraft(false);
-  }
-  selectedAccountId = "";
-  isDraftAccount = true;
-  applyAccount({
-    account_id: "",
-    name: `Account ${savedAccounts.length + 1}`,
-    api_key: "",
-    secret_key: "",
-    remember: true,
-    auto_connect: true,
-    auto_start_trading: false,
-    config: presetConfig("neutral"),
-  });
-  fields.accountSelect.value = "";
-  els.statusText.textContent = "New account draft";
+  await switchToAccount("");
 });
 
 els.saveAccountButton.addEventListener("click", async () => {
-  await saveCurrentAccountDraft(true);
+  const context = makeRenderContext(selectedAccountId, {
+    allowSelectedAccountChange: !selectedAccountId || isDraftAccount,
+  });
+  await saveCurrentAccountDraft(true, { guard: () => isCurrentAccountContext(context) });
   parameterDirty = false;
-  await loadSettings();
-  await loadState();
+  await loadSettings({ guard: () => isCurrentAccountContext(context) });
+  await loadState({ accountId: selectedAccountId, source: "save-account" });
 });
 
 els.removeAccountButton.addEventListener("click", async () => {
   if (!selectedAccountId) return;
+  const context = makeRenderContext(selectedAccountId, { allowSelectedAccountChange: true });
   const account = findSavedAccount(selectedAccountId);
   const name = account?.name || "this account";
   if (!window.confirm(`Remove ${name} from the app? Connected trading for it will stop.`)) return;
   await fetchWithRecovery(`/api/accounts/${encodeURIComponent(selectedAccountId)}`, { method: "DELETE" });
-  await loadSettings();
-  await loadState();
+  await loadSettings({ guard: () => isCurrentAccountContext(context) });
+  await loadState({ accountId: selectedAccountId, source: "remove-account" });
 });
 
 els.connectButton.addEventListener("click", async () => {
+  const context = makeRenderContext(selectedAccountId, {
+    allowSelectedAccountChange: !selectedAccountId || isDraftAccount,
+  });
   const state = await postJson("/api/connect", readAccountPayload());
   selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
-  await loadSettings();
-  renderState(state);
-  await loadDashboard();
+  await loadSettings({ guard: () => isCurrentAccountContext(context) });
+  if (renderState(state, context)) {
+    await loadDashboard({ accountId: selectedAccountId, source: "connect" });
+  }
 });
 
 els.refreshButton.addEventListener("click", async () => {
+  const context = makeRenderContext();
   await postJson("/api/accounts", readAccountPayload());
   parameterDirty = false;
   const state = await postJson("/api/refresh", { account_id: selectedAccountId || null });
-  await loadSettings();
-  renderState(state);
-  await loadDashboard();
+  await loadSettings({ guard: () => isCurrentAccountContext(context) });
+  if (renderState(state, context)) {
+    await loadDashboard({ accountId: selectedAccountId, source: "refresh" });
+  }
 });
 
 els.applyParametersButton.addEventListener("click", applyCurrentParameters);
 
 els.refreshAllButton.addEventListener("click", async () => {
+  const context = makeRenderContext();
   const state = await postJson("/api/refresh-all", {});
-  renderState(state);
-  await loadDashboard();
+  if (renderState(state, context)) {
+    await loadDashboard({ accountId: selectedAccountId, source: "refresh-all" });
+  }
 });
 
 els.tradingToggleButton.addEventListener("click", async () => {
@@ -519,6 +582,7 @@ els.tradingToggleButton.addEventListener("click", async () => {
   els.tradingToggleButton.disabled = true;
   els.tradingToggleButton.textContent = wasTrading ? "Stopping..." : "Starting...";
   try {
+    const context = makeRenderContext();
     let state;
     if (wasTrading) {
       state = await postJson("/api/stop", { account_id: selectedAccountId || null });
@@ -526,10 +590,11 @@ els.tradingToggleButton.addEventListener("click", async () => {
       await postJson("/api/accounts", readAccountPayload());
       parameterDirty = false;
       state = await postJson("/api/start", { account_id: selectedAccountId || null });
-      await loadSettings();
+      await loadSettings({ guard: () => isCurrentAccountContext(context) });
     }
-    renderState(state);
-    await loadDashboard();
+    if (renderState(state, context)) {
+      await loadDashboard({ accountId: selectedAccountId, source: "trading-toggle" });
+    }
   } catch (error) {
     els.parameterStatus.textContent = `${wasTrading ? "Stop" : "Start"} failed: ${error.message}`;
     els.tradingToggleButton.textContent = previousText;
@@ -539,8 +604,9 @@ els.tradingToggleButton.addEventListener("click", async () => {
 
 els.cancelOrdersButton.addEventListener("click", async () => {
   if (!window.confirm("Cancel all open paper orders for the selected account?")) return;
+  const context = makeRenderContext();
   const state = await postJson("/api/cancel-orders", { account_id: selectedAccountId || null });
-  renderState(state);
+  renderState(state, context);
 });
 
 els.purgeAccountButton.addEventListener("click", async () => {
@@ -550,14 +616,17 @@ els.purgeAccountButton.addEventListener("click", async () => {
     `Purge ${name}? This stops auto trading, cancels open orders, submits paper market sell orders for every current position, and resets strategy state. Trade history, ledger, replay, logs, and saved settings stay preserved.`
   );
   if (!confirmed) return;
+  const context = makeRenderContext();
   const state = await postJson("/api/purge-account", { account_id: selectedAccountId || null });
-  renderState(state);
-  await loadDashboard();
+  if (renderState(state, context)) {
+    await loadDashboard({ accountId: selectedAccountId, source: "purge-account" });
+  }
 });
 
 els.refreshTopVolumeButton.addEventListener("click", async () => {
-  const dashboard = await postJson("/api/dashboard/top-volume", { account_id: selectedAccountId || null });
-  renderDashboard(dashboard);
+  const context = makeRenderContext();
+  const dashboard = await postJson("/api/dashboard/top-volume", { account_id: context.accountId || null });
+  renderDashboard(dashboard, context);
 });
 
 els.reconnectStreamButton.addEventListener("click", reconnectDashboardStream);
@@ -601,12 +670,57 @@ function hasAccountFormData() {
   );
 }
 
-async function saveCurrentAccountDraft(applySavedAccount = true) {
+async function switchToAccount(nextAccountId) {
+  const previousAccountId = selectedAccountId;
+  await withAccountTransition(async (transitionVersion) => {
+    try {
+      if (previousAccountId || hasAccountFormData()) {
+        await saveCurrentAccountDraft(false, { guard: () => isTransitionCurrent(transitionVersion) });
+      }
+    } catch (error) {
+      if (isTransitionCurrent(transitionVersion)) {
+        fields.accountSelect.value = previousAccountId;
+      }
+      throw error;
+    }
+
+    if (!isTransitionCurrent(transitionVersion)) return;
+
+    selectedAccountId = nextAccountId || "";
+    fields.accountSelect.value = selectedAccountId;
+    if (!selectedAccountId) {
+      isDraftAccount = true;
+      applyAccount({
+        account_id: "",
+        name: `Account ${savedAccounts.length + 1}`,
+        api_key: "",
+        secret_key: "",
+        remember: true,
+        auto_connect: true,
+        auto_start_trading: false,
+        config: presetConfig("neutral"),
+      });
+      els.statusText.textContent = "New account draft";
+      return;
+    }
+
+    isDraftAccount = false;
+    const account = findSavedAccount(selectedAccountId);
+    if (account) applyAccount(account);
+    await postJson("/api/select-account", { account_id: selectedAccountId });
+    if (!isTransitionCurrent(transitionVersion)) return;
+    await loadState({ accountId: selectedAccountId, source: "account-switch" });
+    await loadDashboard({ accountId: selectedAccountId, source: "account-switch" });
+  });
+}
+
+async function saveCurrentAccountDraft(applySavedAccount = true, options = {}) {
   const state = await postJson("/api/accounts", readAccountPayload());
+  if (options.guard && !options.guard()) return state;
   selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
   isDraftAccount = false;
   parameterDirty = false;
-  await loadSettings({ applySelected: applySavedAccount });
+  await loadSettings({ applySelected: applySavedAccount, guard: options.guard });
   return state;
 }
 
@@ -773,10 +887,12 @@ function applyConfig(config) {
 }
 
 async function applyProfilePreset() {
+  const context = makeRenderContext();
   const config = await postJson("/api/profile", {
     profile: fields.profile.value,
     current: readConfig(),
   });
+  if (!isCurrentAccountContext(context)) return;
   applyConfig(config);
   parameterDirty = true;
   renderParameterStatus(null);
@@ -788,13 +904,17 @@ async function applyCurrentParameters() {
   els.applyParametersButton.textContent = "Applying...";
   els.parameterStatus.textContent = "Applying current setup to the selected account...";
   try {
+    const context = makeRenderContext(selectedAccountId, {
+      allowSelectedAccountChange: !selectedAccountId || isDraftAccount,
+    });
     const state = await postJson("/api/apply-parameters", readAccountPayload());
     selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
     isDraftAccount = false;
     parameterDirty = false;
-    await loadSettings({ applySelected: false });
-    renderState(state);
-    await loadDashboard();
+    await loadSettings({ applySelected: false, guard: () => isCurrentAccountContext(context) });
+    if (renderState(state, context)) {
+      await loadDashboard({ accountId: selectedAccountId, source: "apply-parameters" });
+    }
   } catch (error) {
     els.parameterStatus.textContent = `Apply failed: ${error.message}`;
   } finally {
@@ -804,16 +924,18 @@ async function applyCurrentParameters() {
 }
 
 async function saveCustomProfile() {
+  const context = makeRenderContext();
   const name = fields.customProfileName.value.trim() || "Custom Profile";
   const payload = await postJson("/api/custom-profile", {
     name,
     config: { ...readConfig(), profile: "custom" },
   });
+  if (!isCurrentAccountContext(context)) return;
   profiles = payload.profiles || profiles;
   renderProfileSelect(payload.profile);
   applyConfig(payload.config);
   els.profileStatus.textContent = `Saved ${profileLabel(payload.profile, payload.config)}.`;
-  await saveCurrentAccountDraft(false);
+  await saveCurrentAccountDraft(false, { guard: () => isCurrentAccountContext(context) });
 }
 
 function handleConfigFieldChange(key) {
@@ -1065,12 +1187,17 @@ function renderSettingsDiagnostics(diagnostics = {}) {
 }
 
 async function checkRuntimeHealth() {
+  const request = beginRequest("health", { abortPrevious: false });
   try {
     const health = await fetchRuntimeHealth();
-    renderRuntimeHealth(health);
+    if (isLatestRequest(request)) {
+      renderRuntimeHealth(health);
+    }
     return health;
   } catch (error) {
-    renderRuntimeHealthError(error.message || "Runtime health check failed.");
+    if (isLatestRequest(request)) {
+      renderRuntimeHealthError(error.message || "Runtime health check failed.");
+    }
     return null;
   }
 }
@@ -1079,6 +1206,7 @@ async function fetchWithRecovery(url, options) {
   try {
     return await fetch(url, options);
   } catch (error) {
+    if (isAbortError(error)) throw error;
     await recoverStaleInstance(error);
     throw error;
   }
@@ -1118,10 +1246,11 @@ async function recoverStaleInstance(error) {
 }
 
 async function loadSettings(options = {}) {
-  const { applySelected = true } = options;
+  const { applySelected = true, guard = null } = options;
   const response = await fetchWithRecovery("/api/settings");
   if (!response.ok) throw new Error(response.statusText);
   const payload = await response.json();
+  if (guard && !guard()) return null;
   profiles = payload.profiles || {};
   savedAccounts = payload.accounts || [];
   renderSettingsDiagnostics(payload.settings_diagnostics || {});
@@ -1151,36 +1280,62 @@ function findSavedAccount(accountId) {
   return savedAccounts.find((account) => account.account_id === accountId);
 }
 
-async function loadState() {
+async function loadState(options = {}) {
+  if (options.source === "poll" && accountTransitionDepth > 0) return false;
+  const request = beginRequest("state", {
+    accountId: options.accountId ?? selectedAccountId,
+    source: options.source || "state",
+  });
   try {
     await checkRuntimeHealth();
-    const suffix = selectedAccountId ? `?account_id=${encodeURIComponent(selectedAccountId)}` : "";
-    const response = await fetchWithRecovery(`/api/state${suffix}`);
+    if (!isCurrentAccountRequest(request)) return false;
+    const suffix = request.accountId ? `?account_id=${encodeURIComponent(request.accountId)}` : "";
+    const response = await fetchWithRecovery(`/api/state${suffix}`, {
+      cache: "no-store",
+      signal: request.signal,
+    });
     if (!response.ok) throw new Error(response.statusText);
     const state = await response.json();
-    renderState(state);
+    if (!isCurrentAccountRequest(request)) return false;
+    return renderState(state, request);
   } catch (error) {
+    if (isAbortError(error) || !isLatestRequest(request)) return false;
     if (await recoverStaleInstance(error)) return;
     els.statusText.textContent = error.message;
+    return false;
   }
 }
 
-async function loadDashboard() {
+async function loadDashboard(options = {}) {
+  if (options.source === "poll" && accountTransitionDepth > 0) return false;
+  const request = beginRequest("dashboard", {
+    accountId: options.accountId ?? selectedAccountId,
+    source: options.source || "dashboard",
+  });
   try {
     await checkRuntimeHealth();
-    const suffix = selectedAccountId ? `?account_id=${encodeURIComponent(selectedAccountId)}` : "";
-    const response = await fetchWithRecovery(`/api/dashboard${suffix}`);
+    if (!isCurrentAccountRequest(request)) return false;
+    const suffix = request.accountId ? `?account_id=${encodeURIComponent(request.accountId)}` : "";
+    const response = await fetchWithRecovery(`/api/dashboard${suffix}`, {
+      cache: "no-store",
+      signal: request.signal,
+    });
     if (!response.ok) throw new Error(response.statusText);
     const dashboard = await response.json();
-    renderDashboard(dashboard);
-    await maybeRecoverDashboardStream(dashboard);
+    if (!isCurrentAccountRequest(request)) return false;
+    if (!renderDashboard(dashboard, request)) return false;
+    await maybeRecoverDashboardStream(dashboard, request);
+    return true;
   } catch (error) {
+    if (isAbortError(error) || !isLatestRequest(request)) return false;
     if (await recoverStaleInstance(error)) return;
     els.topVolumeUpdated.textContent = error.message;
+    return false;
   }
 }
 
-function renderDashboard(dashboard) {
+function renderDashboard(dashboard, context) {
+  if (!isCurrentAccountContext(context)) return false;
   renderMarketClockInto(
     dashboard.market_clock,
     els.dashboardMarketStatus,
@@ -1213,6 +1368,7 @@ function renderDashboard(dashboard) {
     els.topVolumeUpdated.textContent = `${dashboard.account_name || "Connected account"} | list ${refreshed} | ${live}`;
   }
   renderTopVolumeRows(rows);
+  return true;
 }
 
 function renderDashboardTrader(dashboard) {
@@ -1227,7 +1383,8 @@ function renderDashboardTrader(dashboard) {
   els.dashboardTraderStatus.classList.toggle("closed", connected && !running);
 }
 
-async function maybeRecoverDashboardStream(dashboard) {
+async function maybeRecoverDashboardStream(dashboard, context) {
+  if (!isCurrentAccountContext(context)) return;
   const stream = dashboard.market_stream || {};
   const status = String(stream.status || "").toLowerCase();
   const age = Number(stream.last_message_age_seconds);
@@ -1249,8 +1406,8 @@ async function maybeRecoverDashboardStream(dashboard) {
   if (Date.now() - lastStreamRecoveryAt < 30000) return;
   lastStreamRecoveryAt = Date.now();
   try {
-    const recovered = await postJson("/api/dashboard/reconnect-stream", { account_id: selectedAccountId || null });
-    renderDashboard(recovered);
+    const recovered = await postJson("/api/dashboard/reconnect-stream", { account_id: context?.accountId || selectedAccountId || null });
+    renderDashboard(recovered, context);
   } catch (error) {
     els.dashboardStreamStatusText.textContent = "Recovery failed";
     els.dashboardStreamStatusDetail.textContent = error.message;
@@ -1605,9 +1762,11 @@ async function reconnectDashboardStream() {
   els.dashboardStreamStatusText.textContent = "Restarting";
   els.dashboardStreamStatusDetail.textContent = "Refreshing top-volume data and reconnecting the shared websocket.";
   try {
-    const dashboard = await postJson("/api/dashboard/reconnect-stream", { account_id: selectedAccountId || null, force: true });
-    renderDashboard(dashboard);
-    await loadState();
+    const context = makeRenderContext();
+    const dashboard = await postJson("/api/dashboard/reconnect-stream", { account_id: context.accountId || null, force: true });
+    if (renderDashboard(dashboard, context)) {
+      await loadState({ accountId: context.accountId, source: "dashboard-reconnect" });
+    }
   } catch (error) {
     els.dashboardStreamStatusText.textContent = "Reconnect failed";
     els.dashboardStreamStatusDetail.textContent = error.message;
@@ -1658,7 +1817,8 @@ function renderLookup(payload) {
   `;
 }
 
-function renderState(state) {
+function renderState(state, context) {
+  if (!stateMatchesRenderContext(state, context)) return false;
   renderSettingsDiagnostics(state.settings_diagnostics || {});
   if (isDraftAccount) {
     selectedConnected = false;
@@ -1672,7 +1832,7 @@ function renderState(state) {
     renderTradingToggle();
     els.cancelOrdersButton.disabled = true;
     els.purgeAccountButton.disabled = true;
-    return;
+    return true;
   }
 
   selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
@@ -1786,6 +1946,7 @@ function renderState(state) {
     els.logRows.appendChild(line);
   });
   els.logRows.scrollTop = els.logRows.scrollHeight;
+  return true;
 }
 
 function renderTradingToggle() {
@@ -1860,16 +2021,7 @@ function renderAccountCards(accounts) {
       <em class="${Number(account.daily_pl_raw || 0) >= 0 ? "positive" : "negative"}">${escapeHtml(dailyPlDisplay(account))}</em>
     `;
     card.addEventListener("click", async () => {
-      if (selectedAccountId || isDraftAccount) {
-        await saveCurrentAccountDraft(false);
-      }
-      selectedAccountId = account.account_id;
-      isDraftAccount = false;
-      const saved = findSavedAccount(selectedAccountId);
-      if (saved) applyAccount(saved);
-      fields.accountSelect.value = selectedAccountId;
-      await postJson("/api/select-account", { account_id: selectedAccountId });
-      await loadState();
+      await switchToAccount(account.account_id);
     });
     els.accountCards.appendChild(card);
   });
@@ -1915,12 +2067,12 @@ window.addEventListener("unhandledrejection", (event) => {
 
 checkRuntimeHealth().then(() => loadSettings()).then(async () => {
   updateAllTableSortButtons();
-  await loadState();
-  await loadDashboard();
+  await loadState({ accountId: selectedAccountId, source: "startup" });
+  await loadDashboard({ accountId: selectedAccountId, source: "startup" });
 }).catch(async (error) => {
   if (await recoverStaleInstance(error)) return;
   els.statusText.textContent = error.message;
   els.topVolumeUpdated.textContent = "This app instance is not responding.";
 });
-setInterval(loadState, 2000);
-setInterval(loadDashboard, 5000);
+setInterval(() => loadState({ source: "poll" }), 2000);
+setInterval(() => loadDashboard({ source: "poll" }), 5000);

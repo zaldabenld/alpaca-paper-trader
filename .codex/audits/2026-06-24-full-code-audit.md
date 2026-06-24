@@ -815,3 +815,74 @@ Checks:
 - `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices.
 Conclusion:
 - STEP3-CHILD-001 is logged and fixed. No Step 4 or Step 5 work was started.
+
+## Step 4 Implementation Notes
+
+### 2026-06-24 - Step 4 status update: AUDIT-007, AUDIT-009
+Status: Fixed in `codex/alpaca-frontend-state-layout`
+Evidence:
+- `python_app/static/app.js` now has per-channel request coordination for `health`, `state`, and `dashboard` requests.
+- State and dashboard polling use request sequence tokens, `AbortController` cancellation for superseded state/dashboard fetches, and selected-account context checks before rendering.
+- Aborted fetches no longer enter stale-instance recovery.
+- `renderState(state, context)` rejects stale selected-account responses before mutating selected-account UI, metrics, config fields, positions, tables, warnings, or buttons.
+- `renderDashboard(dashboard, context)` and dashboard stream recovery reject stale dashboard contexts before repainting visible dashboard warnings or stream status.
+- Account switching through the account select, account cards, and New account button now runs through `switchToAccount()`, which invalidates in-flight state/dashboard requests and pauses background polling during the transition.
+- Auto-save, settings reload, profile preset, custom-profile save, and account-specific action responses now carry guards so older responses cannot overwrite the form or selected account after a newer account switch.
+- Step 3 account metric labels and rendering helpers were preserved: `Daily P/L (equity)`, `Realized Today`, `dailyPlDisplay()`, `renderRealizedPlMetric()`, and the explicit raw/display/percent fields remain in use.
+
+### 2026-06-24 - Step 4 status update: AUDIT-015
+Status: Fixed in `codex/alpaca-frontend-state-layout`
+Evidence:
+- `python_app/static/styles.css` now collapses the Accounts layout to one column at `max-width: 1180px`, covering 1024px and 1100px desktop windows.
+- Account layout containers, panels, workspace, tabs, and tab panels now include `min-width: 0`/`max-width` containment where needed.
+- Metrics now use `repeat(auto-fit, minmax(128px, 1fr))` instead of forcing a six-column minimum.
+- Wide dashboard/account tables remain horizontally scrollable inside `.dashboard-table` or `.tab-panel` instead of expanding the whole page.
+- Browser automation was not available in this worktree: local `playwright` and `puppeteer` modules were absent, and tool discovery did not expose a browser screenshot tool. Added deterministic rendered-layout contract check `scripts/check_frontend_layout.py`.
+- Layout evidence from `.\.venv\Scripts\python.exe scripts\check_frontend_layout.py`:
+  - 1024px: Accounts layout collapsed, workspace width 988px, metric required width 828px, tables scroll locally, whole-page horizontal overflow `false`.
+  - 1100px: Accounts layout collapsed, workspace width 1064px, metric required width 828px, tables scroll locally, whole-page horizontal overflow `false`.
+  - 1280px launcher/default width from `Launch Alpaca Paper Trader.vbs --window-size=1280,900`: Accounts layout not collapsed, workspace width 906px, metric required width 828px, tables scroll locally, whole-page horizontal overflow `false`.
+
+### 2026-06-24 - Step 4 regression coverage update: AUDIT-007, AUDIT-009, AUDIT-015
+Status: Covered
+Evidence:
+- Added `tests/test_frontend_state_layout.py`.
+- Coverage pins state polling request tokens, abort/cancellation behavior, stale render rejection, dashboard request guards, latest-only health warning rendering, guarded account switching/auto-save, and Accounts layout containment rules.
+- Added `scripts/check_frontend_layout.py` for deterministic 1024px, 1100px, and 1280px launcher/default viewport layout evidence.
+
+### 2026-06-24 - Step 4 focused regression audit
+Status: Complete
+Checks:
+- `.\.venv\Scripts\python.exe scripts\run_regression_tests.py` passed: 27 tests, with 2 expected failures remaining only for out-of-scope AUDIT-018 and AUDIT-019.
+- `.\.venv\Scripts\python.exe -m compileall -q python_app` passed.
+- `node --check python_app\static\app.js` passed.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
+- `.\.venv\Scripts\python.exe scripts\check_frontend_layout.py` passed with the viewport evidence listed above.
+- `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices for edited static files.
+Regression review:
+- AUDIT-001: No regression observed; runtime currentness/backend restart behavior was not changed.
+- AUDIT-002: No regression observed; Step 3 Daily P/L amount/percent display remains covered and unchanged.
+- AUDIT-003: No regression observed; realized-today session date behavior remains covered and unchanged.
+- AUDIT-004: No regression observed; no broad monolith split or architecture refactor was attempted.
+- AUDIT-005: No regression observed; regression harness remains in place and now includes Step 4 frontend/layout coverage.
+- AUDIT-006: No regression observed; broad exception handling outside previously fixed settings paths was not changed.
+- AUDIT-007: Fixed; frontend polling now rejects stale state/dashboard/health responses through request sequencing, cancellation, and render guards.
+- AUDIT-008: No regression observed; stale-runtime health/recovery behavior was preserved.
+- AUDIT-009: Fixed; selected-account state responses and account switch/auto-save paths are guarded against older account-specific responses.
+- AUDIT-010: No regression observed; explicit trade-size-mode behavior remains covered and unchanged.
+- AUDIT-011: No regression observed; exposure-room downsizing behavior remains covered and unchanged.
+- AUDIT-012: No regression observed; invalid saved-account shell/diagnostic behavior remains covered and unchanged.
+- AUDIT-013: No regression observed; corrupt settings load and atomic save behavior remain covered and unchanged.
+- AUDIT-014: No regression observed; VBS launcher currentness behavior was not changed.
+- AUDIT-015: Fixed; Accounts view no longer requires whole-page horizontal panning at 1024px, 1100px, or 1280px launcher/default width.
+- AUDIT-016: No regression observed; standardized Daily P/L raw/display/percent contract remains covered and unchanged.
+- AUDIT-017: No regression observed; inverse ETF code/docs were not changed.
+- AUDIT-018: No regression observed; market-stream union behavior remains intentionally unchanged for Step 5 and still has an expected-failing future contract.
+- AUDIT-019: No regression observed; held-symbol stream behavior remains intentionally unchanged for Step 5 and still has an expected-failing future contract.
+- AUDIT-020: No regression observed; launcher fallback/currentness behavior was not changed.
+- AUDIT-021: No regression observed; day-tape/replay behavior was not changed.
+- STEP3-CHILD-001: No regression observed; settings diagnostics still do not clear an unresolved runtime-health error without a successful runtime-health payload.
+Conclusion:
+- No previous finding regressed in Step 4.
+- No new defects were discovered during Step 4 verification.
+- Step 5 market-stream union/held-symbol behavior was not started.
