@@ -12,6 +12,7 @@ from .helpers import configure_test_environment
 configure_test_environment()
 
 from alpaca_desktop import engine as engine_module
+from alpaca_desktop import server as server_module
 from alpaca_desktop.backtester import StrategyEvaluationContext
 from alpaca_desktop.engine import TraderEngine, TraderManager
 from alpaca_desktop.runtime_diagnostics import (
@@ -131,6 +132,19 @@ class RuntimeDiagnosticsFallbackTests(unittest.TestCase):
         self.assertIn("write_error", event)
         diagnostics = runtime_diagnostics_snapshot()
         self.assertEqual(diagnostics["entries"][-1]["area"], "replay")
+
+    def test_background_error_recorder_failure_records_diagnostic(self) -> None:
+        class FailingEngine:
+            def log(self, _level: str, _message: str) -> None:
+                raise RuntimeError("log unavailable")
+
+        with patch.object(server_module.manager, "connected_engines", return_value=[FailingEngine()]):
+            server_module.record_background_error(None, "Background refresh failed")
+
+        diagnostics = runtime_diagnostics_snapshot()
+        self.assertEqual(diagnostics["error_count"], 1)
+        self.assertEqual(diagnostics["entries"][-1]["area"], "background_loop")
+        self.assertIn("log unavailable", diagnostics["entries"][-1]["detail"])
 
 
 if __name__ == "__main__":

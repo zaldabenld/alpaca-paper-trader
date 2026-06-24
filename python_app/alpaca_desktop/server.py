@@ -23,7 +23,7 @@ from .engine import (
     config_from_profile,
     credential_validation_error,
 )
-from .runtime_diagnostics import runtime_diagnostics_snapshot
+from .runtime_diagnostics import record_runtime_diagnostic, runtime_diagnostics_snapshot
 from .storage import load_settings, protect_text, save_settings, unprotect_text
 
 
@@ -206,8 +206,14 @@ def record_background_error(account_engine: Any | None, message: str) -> None:
             engine.log("error", message)
             with engine.lock:
                 engine.last_error = message
-        except Exception:
-            pass
+        except Exception as exc:
+            record_runtime_diagnostic(
+                "background_loop",
+                f"Background error recorder failed while reporting: {message}",
+                exc,
+                severity="error",
+                source="server",
+            )
 
 
 @app.get("/")

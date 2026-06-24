@@ -1061,3 +1061,17 @@ Conclusion:
 - No previous finding regressed in Step 6.
 - No new defects were discovered during Step 6 verification.
 - Stable checkout, live backend, saved credentials, and real `%LOCALAPPDATA%\AlpacaPaperTrader` were not touched.
+
+### 2026-06-24 - Step 6 coordinator-found finding: STEP6-COORD-002 background error recorder can still silently drop failures
+Status: Fixed in `codex/alpaca-monolith-backtester-seam-v3`
+Evidence:
+- Coordinator review after Step 6 commit `63fa3ad` found `python_app/alpaca_desktop/server.py::record_background_error()` still catches a broad `Exception` and uses `pass`.
+- This is the fallback used by the background refresh/watchdog loop to surface failures through account logs and `last_error`.
+Impact:
+- If account-level error recording fails, the background-loop error can still disappear without entering the new runtime diagnostics ring, contradicting the Step 6 AUDIT-006 completion claim.
+Required fix:
+- Replace the silent `pass` with a runtime diagnostic entry that preserves the existing loop recovery behavior without exposing credentials or changing trading decisions.
+Fix evidence:
+- `record_background_error()` now records a `background_loop` runtime diagnostic if account-level error recording itself fails.
+- Added `test_background_error_recorder_failure_records_diagnostic` to `tests/test_backtester_boundary_diagnostics.py`.
+- Coordinator rerun passed: `scripts/run_regression_tests.py` 34 tests, Python compile, `node --check python_app\static\app.js`, `scripts/check_frontend_layout.py`, worktree-local `setup-worktree.ps1 -SmokeOnly`, and `git diff --check` with only LF-to-CRLF warnings.
