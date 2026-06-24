@@ -980,3 +980,6 @@ Resolution evidence:
 - Coordinator switched the worktree to `codex/alpaca-monolith-backtester-seam` at `032b0e5` and sent a corrective follow-up.
 - Polling showed the follow-up was recorded but no assistant turn ran; the thread remained `systemError`.
 - Coordinator committed this audit note and will launch a replacement Step 6 child from a fresh branch so work can continue from a clean, branch-attached state.
+- Replacement child `019efbcf-9b4f-75b2-a4a3-cb2114401413` materialized in `C:\Users\solo leveling\.codex\worktrees\411a\alpaca trading app`, also detached at `d130000`, and also reported `systemError` before any assistant response.
+- The repeated signature points to a Codex child-thread startup failure for this Step 6 launch pattern rather than a code or test failure inside the app.
+- Coordinator will try one reduced prompt/thread launch without the high-reasoning override; if that fails, continue with an isolated worker/subagent or coordinator-owned worktree so Step 6 does not halt.
