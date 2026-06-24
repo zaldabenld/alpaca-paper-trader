@@ -966,3 +966,17 @@ Verification:
 - `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed with worktree-local `LOCALAPPDATA`.
 - `.\.venv\Scripts\python.exe scripts\check_frontend_layout.py` passed.
 - `git diff --check` passed; warnings were only Git's existing LF-to-CRLF normalization notices.
+### 2026-06-24 - Step 6 coordinator finding: STEP6-COORD-001 child thread materialized detached and systemErrored before work
+Status: Replaced with clean child thread
+Evidence:
+- Step 6 `create_thread` returned only pending worktree id `local:7236e7da-ee57-4020-9c0f-d63bd339df83`.
+- The real child thread later materialized as `019efbcd-d267-7191-bf5a-9eb11b247761` in `C:\Users\solo leveling\.codex\worktrees\da22\alpaca trading app`, but Codex reported `systemError` before any assistant response.
+- Coordinator inspection showed the worktree at commit `032b0e5` with `## HEAD (no branch)` instead of branch `codex/alpaca-monolith-backtester-seam`.
+Impact:
+- Treating the queued worktree as started would silently halt the Step 6 fix and repeat the earlier coordination failure.
+Required fix:
+- Attach the worktree to `codex/alpaca-monolith-backtester-seam`, verify it is not the stable checkout, send a corrective follow-up to the child, and keep polling until the child either progresses or a replacement thread is launched.
+Resolution evidence:
+- Coordinator switched the worktree to `codex/alpaca-monolith-backtester-seam` at `032b0e5` and sent a corrective follow-up.
+- Polling showed the follow-up was recorded but no assistant turn ran; the thread remained `systemError`.
+- Coordinator committed this audit note and will launch a replacement Step 6 child from a fresh branch so work can continue from a clean, branch-attached state.
