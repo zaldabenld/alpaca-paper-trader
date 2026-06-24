@@ -534,3 +534,113 @@ Regression review:
 - AUDIT-019: No regression observed; held-position stream subscription behavior was not changed.
 - AUDIT-020: Fixed; the main `.cmd` launcher no longer falls back to the legacy PowerShell trader and now errors visibly on missing Python virtualenv.
 - AUDIT-021: No regression observed; day-tape/replay scripts were not changed except for adding an independent runtime-currentness regression script.
+
+## Step 2 Coordinator Notes
+
+### 2026-06-24 - Coordinator finding: STEP2-COORD-001 wrong checkout edits
+Status: Confirmed
+Evidence:
+- Step 2 child thread `019efb99-1f5f-77f3-a49f-ccaf537f74f4` was created from the saved project context with instructions to work in `C:\Users\solo leveling\Documents\alpaca-regression-harness`.
+- Coordinator polling found `C:\Users\solo leveling\Documents\alpaca-regression-harness` still clean while `C:\Users\solo leveling\Documents\alpaca trading app` had new Step 2 harness changes: modified `.codex/README.md` and `README.md`, plus untracked `scripts/run_regression_tests.py` and `tests/`.
+- This violated the worktree-only boundary and repeated the prior failure mode where a child session followed the saved project cwd instead of the requested worktree path.
+Action:
+- Interrupt or steer the child before accepting any Step 2 work.
+- Recover only confirmed child-created harness changes into the Step 2 worktree, and do not revert unrelated stable checkout changes.
+- For future child sessions, do not rely on a prompt-only worktree redirect when a thread starts in the saved project context.
+
+### 2026-06-24 - Coordinator finding: STEP2-COORD-002 handoff moved stable dirty state
+Status: Confirmed
+Evidence:
+- To interrupt the wrong-checkout Step 2 child, the coordinator used `handoff_thread` on thread `019efb99-1f5f-77f3-a49f-ccaf537f74f4`.
+- The handoff completed to `C:\Users\solo leveling\.codex\worktrees\adf2\alpaca trading app` on branch `codex/add-regression-harness`.
+- After handoff, the stable checkout `C:\Users\solo leveling\Documents\alpaca trading app` became clean, while the temporary Codex worktree contained the pre-existing stable dirty files: `python_app/alpaca_desktop/engine.py`, `python_app/static/app.js`, `python_app/static/index.html`, `.codex/audits/`, and `.codex/build-notes/`.
+Impact:
+- The coordinator interruption changed stable checkout state while trying to stop a child-session drift.
+Action:
+- Restore the pre-existing stable dirty state from the handoff stash/worktree without reintroducing the misplaced Step 2 harness files into stable.
+- Move forward only after stable, the intended Step 2 worktree, and the temporary handoff worktree are inventoried.
+
+## Step 2 Baseline Confirmation Notes
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-005
+Status: Confirmed
+Evidence:
+- Repo-local inventory before Step 2 had no `tests/` directory and no consolidated automated test runner.
+- Existing automated coverage was limited to `scripts/test_runtime_currentness.py`, added in Step 1 for AUDIT-001/AUDIT-008/AUDIT-014/AUDIT-020 only.
+Step 2 harness note:
+- A repo-local regression command will be added before behavior fixes.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-002
+Status: Confirmed
+Evidence:
+- `python_app/alpaca_desktop/engine.py::refresh()` stores selected-account `daily_pl` and `daily_pl_display`, but no daily P/L percent fields.
+- `python_app/static/app.js::renderState()` renders only `account.daily_pl_display` for the selected account Daily P/L metric.
+- Realized P/L still renders as a separate `realized_pl`/`realized_pl_pct_display` metric, which can visually disagree with equity-based daily P/L.
+Step 2 harness note:
+- Baseline tests will cover the current selected-account daily P/L payload shape and mark the missing daily P/L percent contract as expected-failing.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-003
+Status: Confirmed
+Evidence:
+- `python_app/alpaca_desktop/engine.py::daily_realized_pl_summary()` derives `today` from `datetime.now().astimezone().date()`.
+- The function includes only sell rows whose `sort_time` resolves to that local date, with no explicit session date in the returned payload.
+Step 2 harness note:
+- Baseline tests will cover current-date sell inclusion and prior-date sell exclusion.
+
+### 2026-06-24 - Step 2 baseline verification note: AUDIT-010
+Status: Confirmed, with stale-detail correction
+Evidence:
+- `python_app/alpaca_desktop/engine.py::AppConfig` still has independent `max_trade_notional` and `max_trade_percent` fields and no explicit `trade_size_mode`.
+- Current code verification shows `AppConfig(profile="neutral", max_trade_notional="20")` preserves `max_trade_notional=20` and default `max_trade_percent=7.0`, leaving both caps active.
+- This differs from the earlier audit note that said the notional value normalized to zero. The underlying gap remains: dollar-only intent depends on caller behavior, and conflicting sizing fields are accepted instead of rejected or migrated through an explicit mode.
+Step 2 harness note:
+- Baseline tests will pin the current implicit-conflict behavior and mark rejection of conflicting sizing fields as expected-failing.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-011
+Status: Confirmed
+Evidence:
+- `python_app/alpaca_desktop/engine.py::trade_notional()` returns `Decimal("0")` when `exposure_room < planned_cap`.
+- The current code does not try `min(planned_cap, exposure_room)` even when the remaining exposure room is above the minimum entry notional.
+Step 2 harness note:
+- A baseline test will assert the desired downsize behavior and mark it expected-failing until Step 3.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-012
+Status: Confirmed
+Evidence:
+- `python_app/alpaca_desktop/server.py::load_saved_settings_to_manager()` catches all exceptions while parsing each saved account and then `continue`s.
+- The invalid account is not preserved as a visible shell with a settings-load error.
+Step 2 harness note:
+- Baseline tests will pin current invalid-account drop behavior and mark visible preservation of invalid accounts as expected-failing.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-013
+Status: Confirmed
+Evidence:
+- `python_app/alpaca_desktop/storage.py::load_settings()` catches all exceptions from reading/parsing `python-settings.json` and returns `{}`.
+- `python_app/alpaca_desktop/storage.py::save_settings()` writes JSON directly to `SETTINGS_PATH` with no temp-file replace or backup path.
+Step 2 harness note:
+- Baseline tests will mark corrupt-settings load error surfacing as expected-failing and verify save write errors still propagate.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-016
+Status: Confirmed
+Evidence:
+- Selected-account payloads use `account.daily_pl` for the raw value and `account.daily_pl_display` for display.
+- Account-card summaries use `summary.daily_pl` for the formatted display string and `summary.daily_pl_raw` for the raw value.
+- `python_app/static/app.js` consumes those two shapes through separate rendering paths.
+Step 2 harness note:
+- Baseline tests will pin the current overloaded contract and mark a standardized raw/display/percent contract as expected-failing.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-018
+Status: Confirmed
+Evidence:
+- `python_app/alpaca_desktop/engine.py::TraderManager.market_data_symbols()` builds eligible connected engines but returns as soon as the first eligible engine yields dashboard symbols.
+- It uses only that engine's `trading_symbols()` for both dashboard and bar subscriptions.
+Step 2 harness note:
+- Baseline tests will pin current first-account-only behavior and mark unioned bar-symbol coverage as expected-failing.
+
+### 2026-06-24 - Step 2 baseline confirmation: AUDIT-019
+Status: Confirmed
+Evidence:
+- `python_app/alpaca_desktop/engine.py::TraderEngine.scan_symbols()` merges `trading_symbols()` with `position_symbols_for_market_data()`.
+- `python_app/alpaca_desktop/engine.py::TraderManager.market_data_symbols()` calls `engine.trading_symbols()` instead of `engine.scan_symbols()`, so held positions can be omitted from shared bar subscriptions.
+Step 2 harness note:
+- Baseline tests will prove held symbols are present in `scan_symbols()` but absent from current market-stream bar symbols, with the desired inclusion marked expected-failing.
