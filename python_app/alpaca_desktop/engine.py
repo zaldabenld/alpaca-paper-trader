@@ -201,7 +201,7 @@ ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
         "max_session_extension": Decimal("6.0"),
         "max_session_pullback": Decimal("0.9"),
         "max_recent_pullback": Decimal("0.55"),
-        "late_momentum_floor": Decimal("0.50"),
+        "late_momentum_floor": Decimal("0"),
     },
     "neutral": {
         "min_price": Decimal("3"),
@@ -213,7 +213,7 @@ ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
         "max_session_extension": Decimal("8.0"),
         "max_session_pullback": Decimal("0.9"),
         "max_recent_pullback": Decimal("0.55"),
-        "late_momentum_floor": Decimal("0.50"),
+        "late_momentum_floor": Decimal("0"),
     },
     "aggressive": {
         "min_price": Decimal("2"),
@@ -225,7 +225,7 @@ ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
         "max_session_extension": Decimal("10.0"),
         "max_session_pullback": Decimal("0.9"),
         "max_recent_pullback": Decimal("0.55"),
-        "late_momentum_floor": Decimal("0.50"),
+        "late_momentum_floor": Decimal("0"),
     },
 }
 
@@ -267,7 +267,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "max_vwap_distance_percent": "2.25",
         "max_session_pullback_percent": "0.9",
         "max_recent_pullback_percent": "0.55",
-        "late_momentum_floor_percent": "0.50",
+        "late_momentum_floor_percent": "0",
         "smi_period": 10,
         "min_smi": "40",
         "atr_period": 14,
@@ -323,7 +323,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "max_vwap_distance_percent": "2.25",
         "max_session_pullback_percent": "0.9",
         "max_recent_pullback_percent": "0.55",
-        "late_momentum_floor_percent": "0.50",
+        "late_momentum_floor_percent": "0",
         "smi_period": 10,
         "min_smi": "40",
         "atr_period": 14,
@@ -379,7 +379,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "max_vwap_distance_percent": "2.25",
         "max_session_pullback_percent": "0.9",
         "max_recent_pullback_percent": "0.55",
-        "late_momentum_floor_percent": "0.50",
+        "late_momentum_floor_percent": "0",
         "smi_period": 10,
         "min_smi": "40",
         "atr_period": 14,
@@ -496,7 +496,7 @@ class AppConfig(BaseModel):
     max_vwap_distance_percent: Decimal = Decimal("2.25")
     max_session_pullback_percent: Decimal = Decimal("0.9")
     max_recent_pullback_percent: Decimal = Decimal("0.55")
-    late_momentum_floor_percent: Decimal = Decimal("0.50")
+    late_momentum_floor_percent: Decimal = Decimal("0")
     smi_period: int = 10
     min_smi: Decimal = Decimal("40")
     atr_period: int = 14
@@ -826,7 +826,7 @@ RETUNED_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
     "max_vwap_distance_percent": Decimal("2.25"),
     "max_session_pullback_percent": Decimal("0.9"),
     "max_recent_pullback_percent": Decimal("0.55"),
-    "late_momentum_floor_percent": Decimal("0.50"),
+    "late_momentum_floor_percent": Decimal("0"),
     "min_smi": Decimal("40"),
     "min_buy_volume_ratio": Decimal("0.50"),
     "reentry_score_boost": Decimal("12"),
@@ -876,6 +876,10 @@ PROMOTED_H2_SCORE_WEIGHTS: dict[str, Decimal] = {
     "score_weight_smi_overheat_penalty": Decimal("4"),
 }
 
+PROMOTED_H2_SIGNAL_DEFAULTS: dict[str, Decimal] = {
+    "late_momentum_floor_percent": Decimal("0"),
+}
+
 
 def sanitize_profile_key(value: str) -> str:
     raw = str(value or "").strip().lower().replace(" ", "-")
@@ -911,10 +915,23 @@ def retune_legacy_conservative_config(config: AppConfig) -> AppConfig:
 
 
 def retune_promoted_h2_config(config: AppConfig) -> AppConfig:
-    if not all(config_value_matches(getattr(config, key), value) for key, value in OLD_DEFAULT_SCORE_WEIGHTS.items()):
+    has_old_score_weights = all(
+        config_value_matches(getattr(config, key), value) for key, value in OLD_DEFAULT_SCORE_WEIGHTS.items()
+    )
+    has_promoted_score_weights = all(
+        config_value_matches(getattr(config, key), value) for key, value in PROMOTED_H2_SCORE_WEIGHTS.items()
+    )
+    if not (has_old_score_weights or has_promoted_score_weights):
+        return config
+    updates: dict[str, Decimal] = {}
+    if has_old_score_weights:
+        updates.update(PROMOTED_H2_SCORE_WEIGHTS)
+    if config_value_matches(config.late_momentum_floor_percent, Decimal("0.50")):
+        updates.update(PROMOTED_H2_SIGNAL_DEFAULTS)
+    if not updates:
         return config
     try:
-        return AppConfig(**(config.model_dump(mode="json") | PROMOTED_H2_SCORE_WEIGHTS))
+        return AppConfig(**(config.model_dump(mode="json") | updates))
     except (TypeError, ValueError) as exc:
         record_runtime_diagnostic(
             "config",
