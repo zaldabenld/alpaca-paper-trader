@@ -450,6 +450,12 @@ PROFILE_STRATEGY_KEYS = {
     "score_weight_flow",
     "score_weight_pullback_penalty",
     "score_weight_overbought_penalty",
+    "score_weight_volatility_penalty",
+    "score_weight_session_extension_penalty",
+    "score_weight_vwap_extension_penalty",
+    "score_weight_session_pullback_penalty",
+    "score_weight_recent_pullback_penalty",
+    "score_weight_smi_overheat_penalty",
 }
 
 
@@ -509,19 +515,25 @@ class AppConfig(BaseModel):
     cooldown_minutes: int = 0
     entry_open_guard_minutes: int = 15
     entry_close_guard_minutes: int = 15
-    score_weight_rsi: Decimal = Decimal("12")
-    score_weight_relative_volume: Decimal = Decimal("12")
-    score_weight_momentum: Decimal = Decimal("20")
+    score_weight_rsi: Decimal = Decimal("5")
+    score_weight_relative_volume: Decimal = Decimal("13")
+    score_weight_momentum: Decimal = Decimal("14")
     score_weight_recent_momentum: Decimal = Decimal("8")
-    score_weight_long_momentum: Decimal = Decimal("15")
-    score_weight_session_change: Decimal = Decimal("12")
-    score_weight_vwap: Decimal = Decimal("8")
-    score_weight_smi: Decimal = Decimal("8")
-    score_weight_volatility: Decimal = Decimal("3")
-    score_weight_liquidity_bonus: Decimal = Decimal("2.5")
-    score_weight_flow: Decimal = Decimal("5")
-    score_weight_pullback_penalty: Decimal = Decimal("12")
-    score_weight_overbought_penalty: Decimal = Decimal("6")
+    score_weight_long_momentum: Decimal = Decimal("14")
+    score_weight_session_change: Decimal = Decimal("16")
+    score_weight_vwap: Decimal = Decimal("14")
+    score_weight_smi: Decimal = Decimal("7")
+    score_weight_volatility: Decimal = Decimal("0")
+    score_weight_liquidity_bonus: Decimal = Decimal("1.5")
+    score_weight_flow: Decimal = Decimal("3")
+    score_weight_pullback_penalty: Decimal = Decimal("0")
+    score_weight_overbought_penalty: Decimal = Decimal("0")
+    score_weight_volatility_penalty: Decimal = Decimal("4")
+    score_weight_session_extension_penalty: Decimal = Decimal("4")
+    score_weight_vwap_extension_penalty: Decimal = Decimal("10")
+    score_weight_session_pullback_penalty: Decimal = Decimal("9")
+    score_weight_recent_pullback_penalty: Decimal = Decimal("6")
+    score_weight_smi_overheat_penalty: Decimal = Decimal("4")
 
     @field_validator("profile")
     @classmethod
@@ -603,6 +615,12 @@ class AppConfig(BaseModel):
         "score_weight_flow",
         "score_weight_pullback_penalty",
         "score_weight_overbought_penalty",
+        "score_weight_volatility_penalty",
+        "score_weight_session_extension_penalty",
+        "score_weight_vwap_extension_penalty",
+        "score_weight_session_pullback_penalty",
+        "score_weight_recent_pullback_penalty",
+        "score_weight_smi_overheat_penalty",
     )
     @classmethod
     def validate_nonnegative_decimal(cls, value: Decimal) -> Decimal:
@@ -820,6 +838,44 @@ RETUNED_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
     "entry_close_guard_minutes": 15,
 }
 
+OLD_DEFAULT_SCORE_WEIGHTS: dict[str, Decimal] = {
+    "score_weight_rsi": Decimal("12"),
+    "score_weight_relative_volume": Decimal("12"),
+    "score_weight_momentum": Decimal("20"),
+    "score_weight_recent_momentum": Decimal("8"),
+    "score_weight_long_momentum": Decimal("15"),
+    "score_weight_session_change": Decimal("12"),
+    "score_weight_vwap": Decimal("8"),
+    "score_weight_smi": Decimal("8"),
+    "score_weight_volatility": Decimal("3"),
+    "score_weight_liquidity_bonus": Decimal("2.5"),
+    "score_weight_flow": Decimal("5"),
+    "score_weight_pullback_penalty": Decimal("12"),
+    "score_weight_overbought_penalty": Decimal("6"),
+}
+
+PROMOTED_H2_SCORE_WEIGHTS: dict[str, Decimal] = {
+    "score_weight_rsi": Decimal("5"),
+    "score_weight_relative_volume": Decimal("13"),
+    "score_weight_momentum": Decimal("14"),
+    "score_weight_recent_momentum": Decimal("8"),
+    "score_weight_long_momentum": Decimal("14"),
+    "score_weight_session_change": Decimal("16"),
+    "score_weight_vwap": Decimal("14"),
+    "score_weight_smi": Decimal("7"),
+    "score_weight_volatility": Decimal("0"),
+    "score_weight_liquidity_bonus": Decimal("1.5"),
+    "score_weight_flow": Decimal("3"),
+    "score_weight_pullback_penalty": Decimal("0"),
+    "score_weight_overbought_penalty": Decimal("0"),
+    "score_weight_volatility_penalty": Decimal("4"),
+    "score_weight_session_extension_penalty": Decimal("4"),
+    "score_weight_vwap_extension_penalty": Decimal("10"),
+    "score_weight_session_pullback_penalty": Decimal("9"),
+    "score_weight_recent_pullback_penalty": Decimal("6"),
+    "score_weight_smi_overheat_penalty": Decimal("4"),
+}
+
 
 def sanitize_profile_key(value: str) -> str:
     raw = str(value or "").strip().lower().replace(" ", "-")
@@ -854,6 +910,25 @@ def retune_legacy_conservative_config(config: AppConfig) -> AppConfig:
         return config
 
 
+def retune_promoted_h2_config(config: AppConfig) -> AppConfig:
+    if not all(config_value_matches(getattr(config, key), value) for key, value in OLD_DEFAULT_SCORE_WEIGHTS.items()):
+        return config
+    try:
+        return AppConfig(**(config.model_dump(mode="json") | PROMOTED_H2_SCORE_WEIGHTS))
+    except (TypeError, ValueError) as exc:
+        record_runtime_diagnostic(
+            "config",
+            "Promoted H2 score retune failed; keeping original config",
+            exc,
+            source="engine",
+        )
+        return config
+
+
+def retune_strategy_config(config: AppConfig) -> AppConfig:
+    return retune_promoted_h2_config(retune_legacy_conservative_config(config))
+
+
 def config_from_profile(
     profile: str,
     current: dict[str, Any] | None = None,
@@ -862,7 +937,7 @@ def config_from_profile(
     profile_key = sanitize_profile_key(profile) or "neutral"
     catalog = profiles or PROFILE_PRESETS
     if profile_key not in catalog and current:
-        return retune_legacy_conservative_config(AppConfig(**(current | {"profile": profile_key})))
+        return retune_strategy_config(AppConfig(**(current | {"profile": profile_key})))
     preset = dict(catalog.get(profile_key, catalog.get("neutral", PROFILE_PRESETS["neutral"])))
     if current:
         base = dict(current)
@@ -870,10 +945,10 @@ def config_from_profile(
             if key in preset:
                 base[key] = preset[key]
         base["profile"] = profile_key
-        return retune_legacy_conservative_config(AppConfig(**base))
+        return retune_strategy_config(AppConfig(**base))
     base = dict(preset)
     base["profile"] = profile_key
-    return retune_legacy_conservative_config(AppConfig(**base))
+    return retune_strategy_config(AppConfig(**base))
 
 
 def model_dict(model: Any) -> dict[str, Any]:
@@ -1365,7 +1440,7 @@ class TraderEngine:
         validation_error = credential_validation_error(api_key, secret_key) if api_key or secret_key else ""
         with self.lock:
             self.name = settings.name.strip() or "Paper Account"
-            self.config = retune_legacy_conservative_config(settings.config)
+            self.config = retune_strategy_config(settings.config)
             self.settings_load_error = settings.settings_load_error
             self.api_key = api_key if not validation_error else ""
             self.secret_key = secret_key if looks_like_secret_key(secret_key) else ""
@@ -1390,7 +1465,7 @@ class TraderEngine:
             raise RuntimeError(validation_error)
         with self.lock:
             self.name = payload.name.strip() or "Paper Account"
-            self.config = retune_legacy_conservative_config(payload.config)
+            self.config = retune_strategy_config(payload.config)
             self.settings_load_error = ""
             if api_key:
                 self.api_key = api_key
@@ -1556,7 +1631,7 @@ class TraderEngine:
             self.stop_streams_locked()
             self.close_api_clients_locked()
             self.name = payload.name.strip() or "Paper Account"
-            self.config = retune_legacy_conservative_config(payload.config)
+            self.config = retune_strategy_config(payload.config)
             self.api_key = api_key
             self.secret_key = secret_key
             self.remember = payload.remember
@@ -2890,7 +2965,10 @@ class TraderEngine:
             vwap_score = clamp_decimal(snapshot.vwap_distance_percent / Decimal("1.5")) * config.score_weight_vwap
             if snapshot.vwap_distance_percent > Decimal("2"):
                 excess_range = max(limits["max_vwap_extension"] - Decimal("2"), Decimal("1"))
-                vwap_score -= clamp_decimal((snapshot.vwap_distance_percent - Decimal("2")) / excess_range) * Decimal("10")
+                vwap_score -= (
+                    clamp_decimal((snapshot.vwap_distance_percent - Decimal("2")) / excess_range)
+                    * config.score_weight_vwap_extension_penalty
+                )
             score += max(Decimal("0"), vwap_score)
         if snapshot.smi is not None:
             smi_range = max(Decimal("80") - config.min_smi, Decimal("1"))
@@ -2906,18 +2984,37 @@ class TraderEngine:
         penalty = Decimal("0")
         session_change = getattr(snapshot, "session_change_percent", None)
         if session_change is not None and session_change > Decimal("4"):
-            excess_range = max(limits["max_session_extension"] - Decimal("4"), Decimal("1"))
-            penalty += clamp_decimal((session_change - Decimal("4")) / excess_range) * Decimal("8")
+            penalty += (
+                clamp_decimal((session_change - Decimal("4")) / Decimal("2"))
+                * config.score_weight_session_extension_penalty
+            )
         session_pullback = getattr(snapshot, "session_pullback_percent", None)
         if session_pullback is not None:
-            penalty += clamp_decimal(session_pullback / limits["max_session_pullback"]) * config.score_weight_pullback_penalty
+            session_pullback_weight = (
+                config.score_weight_session_pullback_penalty
+                if config.score_weight_session_pullback_penalty > 0
+                else config.score_weight_pullback_penalty
+            )
+            penalty += clamp_decimal(session_pullback / limits["max_session_pullback"]) * session_pullback_weight
         recent_pullback = getattr(snapshot, "recent_pullback_percent", None)
         if recent_pullback is not None:
-            penalty += clamp_decimal(recent_pullback / limits["max_recent_pullback"]) * config.score_weight_pullback_penalty
+            recent_pullback_weight = (
+                config.score_weight_recent_pullback_penalty
+                if config.score_weight_recent_pullback_penalty > 0
+                else config.score_weight_pullback_penalty
+            )
+            penalty += clamp_decimal(recent_pullback / limits["max_recent_pullback"]) * recent_pullback_weight
+        if volatility is not None:
+            penalty += clamp_decimal(volatility / Decimal("2")) * config.score_weight_volatility_penalty
         if snapshot.smi is not None and snapshot.smi > Decimal("85"):
-            penalty += clamp_decimal((snapshot.smi - Decimal("85")) / Decimal("15")) * config.score_weight_overbought_penalty
+            overheat_weight = (
+                config.score_weight_smi_overheat_penalty
+                if config.score_weight_smi_overheat_penalty > 0
+                else config.score_weight_overbought_penalty
+            )
+            penalty += clamp_decimal((snapshot.smi - Decimal("85")) / Decimal("15")) * overheat_weight
 
-        return max(Decimal("0"), score - penalty).quantize(Decimal("0.1"))
+        return min(Decimal("100"), max(Decimal("0"), score - penalty)).quantize(Decimal("0.1"))
 
     def apply_strategy(
         self,
@@ -4717,7 +4814,7 @@ class TraderManager:
         engine = TraderEngine(account_id, name or f"Account {len(self.accounts) + 1}")
         engine.replay_recorder = self.record_replay_event
         if config is not None:
-            engine.config = config
+            engine.config = retune_strategy_config(config)
         with self.lock:
             self.accounts[account_id] = engine
             if not self.selected_account_id:

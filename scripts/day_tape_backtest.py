@@ -15,7 +15,14 @@ if str(PYTHON_APP) not in sys.path:
     sys.path.insert(0, str(PYTHON_APP))
 
 from alpaca_desktop.backtester import StrategyEvaluationContext
-from alpaca_desktop.engine import AppConfig, DASHBOARD_TOP_LIMIT, PROFILE_STRATEGY_KEYS, TOP_VOLUME_SOURCE, TraderEngine
+from alpaca_desktop.engine import (
+    AppConfig,
+    DASHBOARD_TOP_LIMIT,
+    PROFILE_STRATEGY_KEYS,
+    TOP_VOLUME_SOURCE,
+    TraderEngine,
+    retune_strategy_config,
+)
 from alpaca_desktop.strategy import decimal_value, money, order_quantity
 
 REPLAY_EQUITY = Decimal("1000")
@@ -40,6 +47,12 @@ BACKTEST_STRATEGY_KEYS = set(PROFILE_STRATEGY_KEYS) | {
     "score_weight_flow",
     "score_weight_pullback_penalty",
     "score_weight_overbought_penalty",
+    "score_weight_volatility_penalty",
+    "score_weight_session_extension_penalty",
+    "score_weight_vwap_extension_penalty",
+    "score_weight_session_pullback_penalty",
+    "score_weight_recent_pullback_penalty",
+    "score_weight_smi_overheat_penalty",
 }
 
 
@@ -263,7 +276,7 @@ def replay_config(
             "market_hours_only": False,
         }
     )
-    return AppConfig(**payload)
+    return retune_strategy_config(AppConfig(**payload))
 
 
 def event_payload(event: dict[str, Any]) -> dict[str, Any]:
