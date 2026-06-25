@@ -2056,7 +2056,7 @@ function backtestString(id, fallback) {
 function readBacktestPayload() {
   return {
     days: boundedIntegerInput(els.backtestDays, 1, 1, 30),
-    max_events: boundedIntegerInput(els.backtestMaxEvents, 50000, 0, 500000),
+    max_events: boundedIntegerInput(els.backtestMaxEvents, 20000, 0, 500000),
     latest_events: Boolean(els.backtestLatestEvents?.checked),
     strategy_overrides: {
       min_entry_score: backtestNumber("backtestMinEntryScore", 44),

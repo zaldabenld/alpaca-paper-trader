@@ -23,7 +23,7 @@ import pre_live_backup
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_URL = "http://127.0.0.1:8765"
 DEFAULT_BACKTEST_DAYS = 1
-DEFAULT_BACKTEST_MAX_EVENTS = 50000
+DEFAULT_BACKTEST_MAX_EVENTS = 20000
 AUDIT_LOG = REPO_ROOT / ".codex" / "audits" / "2026-06-24-full-code-audit.md"
 
 

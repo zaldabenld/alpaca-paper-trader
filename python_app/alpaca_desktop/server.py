@@ -81,7 +81,7 @@ class AccountActionPayload(BaseModel):
 
 class DayTapeBacktestPayload(BaseModel):
     days: int = Field(default=1, ge=1, le=30)
-    max_events: int = Field(default=50000, ge=0, le=500000)
+    max_events: int = Field(default=20000, ge=0, le=500000)
     latest_events: bool = True
     strategy_overrides: dict[str, Any] = Field(default_factory=dict)
     sizing_overrides: dict[str, Any] = Field(default_factory=dict)
