@@ -69,10 +69,82 @@ def copy_file(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
-def copy_dir(source: Path, destination: Path) -> None:
+def latest_backup_root(backup_root: Path) -> Path | None:
+    if not backup_root.exists():
+        return None
+    backups = [item for item in backup_root.iterdir() if item.is_dir()]
+    if not backups:
+        return None
+    return max(backups, key=lambda item: item.stat().st_mtime)
+
+
+def reusable_file(source: Path, previous: Path | None) -> bool:
+    if previous is None or not previous.exists() or not previous.is_file():
+        return False
+    try:
+        source_stat = source.stat()
+        previous_stat = previous.stat()
+    except OSError:
+        return False
+    return source_stat.st_size == previous_stat.st_size and source_stat.st_mtime_ns == previous_stat.st_mtime_ns
+
+
+def core_relative_files(source_root: Path) -> list[tuple[Path, int]]:
+    files: list[tuple[Path, int]] = []
+    for name in CORE_FILES:
+        source = source_root / name
+        if source.exists() and source.is_file():
+            try:
+                files.append((Path(name), source.stat().st_size))
+            except OSError:
+                pass
+    for name in CORE_DIRS:
+        source = source_root / name
+        if not source.exists() or not source.is_dir():
+            continue
+        for item in source.rglob("*"):
+            if not item.is_file():
+                continue
+            try:
+                files.append((Path(name) / item.relative_to(source), item.stat().st_size))
+            except OSError:
+                continue
+    return files
+
+
+def reusable_backup_bytes(source_root: Path, previous_root: Path | None) -> int:
+    if previous_root is None:
+        return 0
+    reusable = 0
+    for relative, bytes_total in core_relative_files(source_root):
+        if reusable_file(source_root / relative, previous_root / relative):
+            reusable += bytes_total
+    return reusable
+
+
+def copy_file_reusing_previous(source: Path, destination: Path, previous: Path | None) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if reusable_file(source, previous):
+        try:
+            os.link(previous, destination)
+            return
+        except OSError:
+            pass
+    shutil.copy2(source, destination)
+
+
+def copy_dir(source: Path, destination: Path, previous: Path | None = None) -> None:
     if destination.exists():
         shutil.rmtree(destination)
-    shutil.copytree(source, destination)
+    destination.mkdir(parents=True, exist_ok=False)
+    for item in source.rglob("*"):
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if item.is_file():
+            copy_file_reusing_previous(item, target, previous / relative if previous is not None else None)
 
 
 def build_backup(execute: bool, backup_root: Path) -> int:
@@ -107,6 +179,9 @@ def build_backup(execute: bool, backup_root: Path) -> int:
     total_bytes = sum(bytes_total for _source, _destination, bytes_total in planned_files) + sum(
         bytes_total for _source, _destination, _count, bytes_total in planned_dirs
     )
+    previous_root = latest_backup_root(backup_root)
+    reusable_bytes = reusable_backup_bytes(source_root, previous_root)
+    additional_bytes = max(0, total_bytes - reusable_bytes)
     free_bytes = available_bytes(backup_root)
 
     print("Planned file backups:")
@@ -124,6 +199,10 @@ def build_backup(execute: bool, backup_root: Path) -> int:
         print("  none")
 
     print(f"Planned backup total: {format_bytes(total_bytes)}")
+    if previous_root is not None:
+        print(f"Latest reusable backup: {previous_root}")
+        print(f"Reusable unchanged bytes: {format_bytes(reusable_bytes)}")
+    print(f"Additional disk space required: {format_bytes(additional_bytes)}")
     print(f"Available backup disk space: {format_bytes(free_bytes)}")
 
     if not execute:
@@ -131,19 +210,21 @@ def build_backup(execute: bool, backup_root: Path) -> int:
         print("Dry run only. Re-run with --execute after live restart approval.")
         return 0
 
-    if total_bytes > free_bytes:
+    if additional_bytes > free_bytes:
         print()
         print(
-            "Backup aborted: planned backup is larger than available destination disk space. "
+            "Backup aborted: additional backup data is larger than available destination disk space. "
             "No files were copied."
         )
         return 1
 
     destination_root.mkdir(parents=True, exist_ok=False)
     for source, destination, _bytes_total in planned_files:
-        copy_file(source, destination)
+        relative = source.relative_to(source_root)
+        copy_file_reusing_previous(source, destination, previous_root / relative if previous_root is not None else None)
     for source, destination, _count, _bytes_total in planned_dirs:
-        copy_dir(source, destination)
+        relative = source.relative_to(source_root)
+        copy_dir(source, destination, previous_root / relative if previous_root is not None else None)
 
     print()
     print(f"Backup complete: {destination_root}")

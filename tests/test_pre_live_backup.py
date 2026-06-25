@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import shutil
 import sys
 import tempfile
 import unittest
@@ -99,6 +100,35 @@ class PreLiveBackupTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertFalse(backup_root.exists())
             self.assertIn("Backup aborted", output.getvalue())
+
+    def test_execute_reuses_latest_backup_for_unchanged_files_when_space_is_tight(self) -> None:
+        module = load_backup_module()
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            source = root / "AlpacaPaperTrader"
+            backup_root = root / "backups"
+            previous = backup_root / "20260625T000000Z"
+            source.mkdir()
+            previous.mkdir(parents=True)
+            source_file = source / "python-settings.json"
+            previous_file = previous / "python-settings.json"
+            source_file.write_text("settings", encoding="utf-8")
+            shutil.copy2(source_file, previous_file)
+
+            output = io.StringIO()
+            with (
+                patch.object(module, "app_data_dir", return_value=source),
+                patch.object(module, "available_bytes", return_value=1),
+                redirect_stdout(output),
+            ):
+                exit_code = module.build_backup(execute=True, backup_root=backup_root)
+
+            self.assertEqual(exit_code, 0)
+            backups = sorted(item for item in backup_root.iterdir() if item.is_dir())
+            self.assertEqual(len(backups), 2)
+            latest = backups[-1]
+            self.assertTrue((latest / "python-settings.json").samefile(previous_file))
+            self.assertIn("Reusable unchanged bytes", output.getvalue())
 
 
 if __name__ == "__main__":

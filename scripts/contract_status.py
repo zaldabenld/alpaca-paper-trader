@@ -229,8 +229,11 @@ def run_app_data_preservation_check() -> tuple[bool, str]:
         planned_bytes += bytes_total
         planned_dir_counts.append(f"{name}:{count}")
 
+    previous_root = pre_live_backup.latest_backup_root(pre_live_backup.DEFAULT_BACKUP_ROOT)
+    reusable_bytes = pre_live_backup.reusable_backup_bytes(source_root, previous_root)
+    additional_bytes = max(0, planned_bytes - reusable_bytes)
     free_bytes = pre_live_backup.available_bytes(pre_live_backup.DEFAULT_BACKUP_ROOT)
-    enough_space = planned_bytes <= free_bytes
+    enough_space = additional_bytes <= free_bytes
     ok = script_covers_expected and not missing_required and enough_space
     detail = (
         "app data backup plan "
@@ -238,6 +241,8 @@ def run_app_data_preservation_check() -> tuple[bool, str]:
         f"files={','.join(present_files) or 'none'}, "
         f"dirs={','.join(planned_dir_counts) or 'none'}, "
         f"planned={pre_live_backup.format_bytes(planned_bytes)}, "
+        f"reusable={pre_live_backup.format_bytes(reusable_bytes)}, "
+        f"additional={pre_live_backup.format_bytes(additional_bytes)}, "
         f"available={pre_live_backup.format_bytes(free_bytes)}"
     )
     if not script_covers_expected:
