@@ -67,6 +67,7 @@ const fields = {
 const els = {
   statusText: document.querySelector("#statusText"),
   runtimeHealthBanner: document.querySelector("#runtimeHealthBanner"),
+  runtimeHealthTitle: document.querySelector("#runtimeHealthTitle"),
   runtimeHealthText: document.querySelector("#runtimeHealthText"),
   dashboardView: document.querySelector("#dashboardView"),
   accountsView: document.querySelector("#accountsView"),
@@ -99,7 +100,6 @@ const els = {
   dailyPlDetail: document.querySelector("#dailyPlDetail"),
   realizedPl: document.querySelector("#realizedPl"),
   realizedPlDetail: document.querySelector("#realizedPlDetail"),
-  realizedPercentToggle: document.querySelector("#realizedPercentToggle"),
   buyingPower: document.querySelector("#buyingPower"),
   cash: document.querySelector("#cash"),
   lastRefresh: document.querySelector("#lastRefresh"),
@@ -112,6 +112,24 @@ const els = {
   intentRows: document.querySelector("#intentRows"),
   replayRows: document.querySelector("#replayRows"),
   replayStatus: document.querySelector("#replayStatus"),
+  backtestDays: document.querySelector("#backtestDays"),
+  backtestMaxEvents: document.querySelector("#backtestMaxEvents"),
+  backtestLatestEvents: document.querySelector("#backtestLatestEvents"),
+  runBacktestButton: document.querySelector("#runBacktestButton"),
+  backtestRunStatus: document.querySelector("#backtestRunStatus"),
+  backtestSummary: document.querySelector("#backtestSummary"),
+  backtestDetail: document.querySelector("#backtestDetail"),
+  backtestEngine: document.querySelector("#backtestEngine"),
+  backtestStrategy: document.querySelector("#backtestStrategy"),
+  backtestHarness: document.querySelector("#backtestHarness"),
+  backtestEvaluations: document.querySelector("#backtestEvaluations"),
+  backtestAccepted: document.querySelector("#backtestAccepted"),
+  backtestRejected: document.querySelector("#backtestRejected"),
+  backtestSource: document.querySelector("#backtestSource"),
+  backtestStatus: document.querySelector("#backtestStatus"),
+  backtestCheckRows: document.querySelector("#backtestCheckRows"),
+  backtestAcceptedRows: document.querySelector("#backtestAcceptedRows"),
+  backtestRejectedRows: document.querySelector("#backtestRejectedRows"),
   logRows: document.querySelector("#logRows"),
   newAccountButton: document.querySelector("#newAccountButton"),
   saveAccountButton: document.querySelector("#saveAccountButton"),
@@ -355,6 +373,21 @@ const sortableTables = {
     defaultDirection: "desc",
     columns: ["time", "kind", "summary"],
   },
+  backtestCheckRows: {
+    defaultKey: "name",
+    defaultDirection: "asc",
+    columns: ["name", "status", "detail"],
+  },
+  backtestAcceptedRows: {
+    defaultKey: "score",
+    defaultDirection: "desc",
+    columns: ["symbol", "score", "entry_price", "qty", "notional"],
+  },
+  backtestRejectedRows: {
+    defaultKey: "symbol",
+    defaultDirection: "asc",
+    columns: ["symbol", "reason"],
+  },
 };
 
 function selectedAccountKey(accountId = selectedAccountId) {
@@ -463,7 +496,6 @@ let currentPositionRows = [];
 let currentTradeHistoryRows = [];
 let currentSelectedAccount = {};
 let showPositionPlPercent = false;
-let showRealizedPlPercent = false;
 let suppressProfileDirty = false;
 let staleInstanceRedirecting = false;
 let lastStreamRecoveryAt = 0;
@@ -480,11 +512,6 @@ els.navButtons.forEach((button) => {
 els.positionsPercentToggle.addEventListener("change", () => {
   showPositionPlPercent = els.positionsPercentToggle.checked;
   renderPositionRows();
-});
-
-els.realizedPercentToggle.addEventListener("change", () => {
-  showRealizedPlPercent = els.realizedPercentToggle.checked;
-  renderRealizedPlMetric();
 });
 
 document.querySelectorAll(".tab").forEach((button) => {
@@ -638,6 +665,10 @@ fields.lookupSymbol.addEventListener("keydown", async (event) => {
   event.preventDefault();
   await lookupSymbol();
 });
+
+if (els.runBacktestButton) {
+  els.runBacktestButton.addEventListener("click", runDayTapeBacktest);
+}
 
 function showView(viewId) {
   document.querySelectorAll(".view").forEach((view) => view.classList.remove("active"));
@@ -1173,19 +1204,23 @@ function renderRuntimeHealth(health) {
   const runtimeWarning = runtimeDiagnosticsSummary(health?.runtime_diagnostics || {});
   if (!health || (health.current === true && !settingsWarning && !runtimeWarning)) {
     els.runtimeHealthBanner.hidden = true;
+    if (els.runtimeHealthTitle) els.runtimeHealthTitle.textContent = "Runtime warning";
     els.runtimeHealthText.textContent = "";
     return;
   }
-  els.runtimeHealthText.textContent = health.current === false ? healthSummary(health) : (settingsWarning || runtimeWarning);
-  els.runtimeHealthBanner.hidden = false;
-  els.statusText.textContent = health.current === false
+  const title = health.current === false
     ? "Stale runtime warning"
     : (settingsWarning ? "Settings warning" : "Runtime warning");
+  if (els.runtimeHealthTitle) els.runtimeHealthTitle.textContent = title;
+  els.runtimeHealthText.textContent = health.current === false ? healthSummary(health) : (settingsWarning || runtimeWarning);
+  els.runtimeHealthBanner.hidden = false;
+  els.statusText.textContent = title;
 }
 
 function renderRuntimeHealthError(message) {
   runtimeStale = true;
   if (els.runtimeHealthBanner && els.runtimeHealthText) {
+    if (els.runtimeHealthTitle) els.runtimeHealthTitle.textContent = "Runtime health unavailable";
     els.runtimeHealthText.textContent = message;
     els.runtimeHealthBanner.hidden = false;
   }
@@ -1885,7 +1920,7 @@ function renderState(state, context) {
   currentSelectedAccount = account;
   els.equity.textContent = account.equity_display || "$0.00";
   els.dailyPl.textContent = dailyPlDisplay(account);
-  els.dailyPl.className = Number(account.daily_pl_raw || 0) >= 0 ? "positive" : "negative";
+  els.dailyPl.className = metricPolarityClass(account.daily_pl_raw);
   if (els.dailyPlDetail) els.dailyPlDetail.textContent = metricSessionDetail(account.daily_pl_session_date);
   renderRealizedPlMetric(account);
   els.buyingPower.textContent = account.buying_power_display || "$0.00";
@@ -1973,23 +2008,159 @@ function renderTradingToggle() {
 }
 
 function renderRealizedPlMetric(account = currentSelectedAccount) {
-  const rawValue = Number(account.realized_pl_raw ?? account.realized_pl ?? 0);
-  const display = showRealizedPlPercent
-    ? account.realized_pl_pct_display || "0.00%"
-    : account.realized_pl_display || "$0.00";
+  const rawText = account.realized_pl_raw ?? account.realized_pl ?? "";
+  const display = account.realized_pl_display || "Unavailable";
   els.realizedPl.textContent = display;
-  els.realizedPl.className = rawValue >= 0 ? "positive" : "negative";
+  els.realizedPl.className = metricPolarityClass(rawText);
   if (els.realizedPlDetail) els.realizedPlDetail.textContent = metricSessionDetail(account.realized_pl_session_date);
 }
 
+function metricPolarityClass(rawValue) {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === "") return "";
+  return Number(rawValue) >= 0 ? "positive" : "negative";
+}
+
 function dailyPlDisplay(account = {}) {
-  const amount = account.daily_pl_display || account.daily_pl || "$0.00";
-  const pct = account.daily_pl_pct_display || "0.00%";
+  const amount = account.daily_pl_display || account.daily_pl || "Unavailable";
+  const pct = account.daily_pl_pct_display || "";
+  if (amount === "Unavailable" || pct === "Unavailable" || !pct) return amount;
   return `${amount} (${pct})`;
 }
 
 function metricSessionDetail(sessionDate) {
   return sessionDate ? `Session ${sessionDate}` : "";
+}
+
+function boundedIntegerInput(input, fallback, min, max) {
+  const value = parseInt(input?.value ?? "", 10);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function formatCount(value) {
+  const numberValue = Number(value || 0);
+  return Number.isFinite(numberValue) ? numberValue.toLocaleString() : "0";
+}
+
+function backtestNumber(id, fallback) {
+  const input = document.querySelector(`#${id}`);
+  const value = Number(input?.value ?? "");
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function backtestString(id, fallback) {
+  const input = document.querySelector(`#${id}`);
+  return String(input?.value || fallback);
+}
+
+function readBacktestPayload() {
+  return {
+    days: boundedIntegerInput(els.backtestDays, 1, 1, 30),
+    max_events: boundedIntegerInput(els.backtestMaxEvents, 50000, 0, 500000),
+    latest_events: Boolean(els.backtestLatestEvents?.checked),
+    strategy_overrides: {
+      min_entry_score: backtestNumber("backtestMinEntryScore", 44),
+      min_session_change_percent: backtestNumber("backtestMinSessionChange", 1.35),
+      min_recent_momentum_percent: backtestNumber("backtestMinRecentMomentum", 0.05),
+      min_long_momentum_percent: backtestNumber("backtestMinLongMomentum", 0.05),
+      min_vwap_distance_percent: backtestNumber("backtestMinVwapDistance", 0.05),
+      max_vwap_distance_percent: backtestNumber("backtestMaxVwapDistance", 2.25),
+      max_session_pullback_percent: backtestNumber("backtestMaxSessionPullback", 0.9),
+      max_recent_pullback_percent: backtestNumber("backtestMaxRecentPullback", 0.55),
+      buy_rsi_min: backtestNumber("backtestBuyRsiMin", 42),
+      buy_rsi_max: backtestNumber("backtestBuyRsiMax", 68),
+      min_smi: backtestNumber("backtestMinSmi", 40),
+      volume_multiplier: backtestNumber("backtestVolumeMultiplier", 1.5),
+      min_avg_volume: backtestNumber("backtestMinAvgVolume", 0),
+      take_profit_percent: backtestNumber("backtestTakeProfit", 2.5),
+      stop_loss_percent: backtestNumber("backtestStopLoss", 1.25),
+      inverse_etf_mode: backtestString("backtestInverseEtfMode", "allow"),
+      score_weight_rsi: backtestNumber("backtestWeightRsi", 12),
+      score_weight_relative_volume: backtestNumber("backtestWeightRelativeVolume", 12),
+      score_weight_momentum: backtestNumber("backtestWeightMomentum", 20),
+      score_weight_recent_momentum: backtestNumber("backtestWeightRecentMomentum", 8),
+      score_weight_long_momentum: backtestNumber("backtestWeightLongMomentum", 15),
+      score_weight_session_change: backtestNumber("backtestWeightSessionChange", 12),
+      score_weight_vwap: backtestNumber("backtestWeightVwap", 8),
+      score_weight_smi: backtestNumber("backtestWeightSmi", 8),
+      score_weight_volatility: backtestNumber("backtestWeightVolatility", 3),
+      score_weight_flow: backtestNumber("backtestWeightFlow", 5),
+      score_weight_pullback_penalty: backtestNumber("backtestWeightPullbackPenalty", 12),
+      score_weight_overbought_penalty: backtestNumber("backtestWeightOverboughtPenalty", 6),
+    },
+    sizing_overrides: {
+      starting_equity: backtestNumber("backtestStartingEquity", 1000),
+      starting_cash: backtestNumber("backtestStartingCash", 1000),
+      trade_size_mode: backtestString("backtestTradeSizeMode", "percent"),
+      trade_percent: backtestNumber("backtestTradePercent", 5),
+      trade_notional: backtestNumber("backtestTradeNotional", 0),
+      max_positions: backtestNumber("backtestMaxPositions", 20),
+      total_exposure_percent: backtestNumber("backtestTotalExposure", 100),
+    },
+  };
+}
+
+async function runDayTapeBacktest() {
+  if (!els.runBacktestButton) return;
+  const previousText = els.runBacktestButton.textContent;
+  els.runBacktestButton.disabled = true;
+  els.runBacktestButton.textContent = "Running";
+  els.backtestRunStatus.textContent = "Reading day tape";
+  try {
+    const report = await postJson("/api/backtest/day-tape", readBacktestPayload());
+    renderBacktestReport(report);
+  } catch (error) {
+    els.backtestRunStatus.textContent = `Backtest failed: ${error.message}`;
+  } finally {
+    els.runBacktestButton.disabled = false;
+    els.runBacktestButton.textContent = previousText;
+  }
+}
+
+function renderBacktestReport(report = {}) {
+  const summary = report.summary || {};
+  const counts = summary.counts || {};
+  const expectedSource = summary.expected_top_volume_source || "alpaca_most_actives_volume";
+  const evaluationsBySource = summary.evaluations_by_top_volume_source || {};
+  const sourceEvaluations = evaluationsBySource[expectedSource] || 0;
+  const statusText = report.ok ? "Pass" : report.pending ? "Pending" : "Review";
+
+  els.backtestSummary.hidden = false;
+  els.backtestDetail.hidden = false;
+  els.backtestEngine.textContent = summary.selection_engine || "-";
+  const strategyOverrides = summary.strategy_overrides || {};
+  const harness = summary.sizing_harness || {};
+  els.backtestStrategy.textContent = `${Object.keys(strategyOverrides).length} override(s)`;
+  els.backtestHarness.textContent = `${harness.trade_size_mode || "-"} ${harness.max_positions || "-"} pos`;
+  els.backtestEvaluations.textContent = formatCount(counts.evaluations);
+  els.backtestAccepted.textContent = formatCount(counts.accepted_trades);
+  els.backtestRejected.textContent = formatCount(counts.rejected_candidates);
+  els.backtestSource.textContent = `${expectedSource}: ${formatCount(sourceEvaluations)}`;
+  els.backtestStatus.textContent = statusText;
+  els.backtestStatus.className = report.ok ? "positive" : "negative";
+  els.backtestRunStatus.textContent = report.pending || `Files: ${(report.files || []).join(", ") || "none"}`;
+
+  const checkRows = (report.checks || []).map((item) => ({
+    name: item.name || "",
+    status: item.ok ? "OK" : "Review",
+    detail: item.detail || "",
+  }));
+  renderRows(els.backtestCheckRows, checkRows, ["name", "status", "detail"]);
+
+  const acceptedRows = (summary.accepted_trades || []).slice(0, 50).map((trade) => ({
+    symbol: trade.symbol || "",
+    score: trade.score || "",
+    entry_price: trade.entry_price || "",
+    qty: trade.qty || "",
+    notional: trade.notional || "",
+  }));
+  renderRows(els.backtestAcceptedRows, acceptedRows, ["symbol", "score", "entry_price", "qty", "notional"]);
+
+  const rejectedRows = (summary.rejected_candidates_sample || []).slice(0, 50).map((row) => ({
+    symbol: row.symbol || "",
+    reason: row.reason || "",
+  }));
+  renderRows(els.backtestRejectedRows, rejectedRows, ["symbol", "reason"]);
 }
 
 function renderReplay(replay) {

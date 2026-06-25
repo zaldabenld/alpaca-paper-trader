@@ -20,6 +20,15 @@ This is a local Windows Alpaca paper-trading app. Treat it as a trading and cred
 - If a worktree needs app data, set `LOCALAPPDATA` to a worktree-local path such as `$PWD\.runtime\localappdata`.
 - Do not reuse the real `%LOCALAPPDATA%\AlpacaPaperTrader` settings from worktrees.
 
+## Scope And Proof Gates
+
+- Fix one user-visible issue at a time unless the user explicitly widens scope.
+- Before editing, state the focused acceptance proof for that issue and the authoritative source it will be checked against.
+- Acceptance proof must verify the user-visible symptom against the authoritative source, not only against app-derived fields.
+- Do not expand into adjacent strategy, replay, backtester, launcher, or UI work without explicit approval.
+- Keep risky code changes in a Codex worktree until the focused proof passes; only then prepare a guarded stable checkout cutover.
+- Stop and report if the current working directory is the stable checkout but the task requires a worktree.
+
 ## Project Commands
 
 - Set up a worktree environment: `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1`

@@ -49,6 +49,20 @@ Function InstanceUrl()
     On Error GoTo 0
 End Function
 
+Sub DeleteInstanceIfUrl(expectedUrl)
+    On Error Resume Next
+    If Not fso.FileExists(instancePath) Then Exit Sub
+
+    Set file = fso.OpenTextFile(instancePath, 1, False)
+    text = file.ReadAll
+    file.Close
+
+    If JsonValue(text, "url") = expectedUrl Then
+        fso.DeleteFile instancePath, True
+    End If
+    On Error GoTo 0
+End Sub
+
 Function RuntimeHealth(url)
     RuntimeHealth = ""
     If Len(url) = 0 Then Exit Function
@@ -98,13 +112,13 @@ Function ActiveUrl()
     If Len(url) = 0 Then Exit Function
 
     healthText = RuntimeHealth(url)
-    If Len(healthText) > 0 And IsCurrentHealth(healthText) Then
+    If Len(healthText) = 0 Then Exit Function
+
+    If IsCurrentHealth(healthText) Then
         ActiveUrl = url
     Else
         ShowRuntimeWarning url, healthText
-        On Error Resume Next
-        If fso.FileExists(instancePath) Then fso.DeleteFile instancePath, True
-        On Error GoTo 0
+        DeleteInstanceIfUrl url
     End If
 End Function
 

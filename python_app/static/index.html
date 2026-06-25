@@ -22,13 +22,14 @@
           <nav class="topnav" aria-label="App views">
             <button class="nav-button active" data-view="dashboardView" type="button">Dashboard</button>
             <button class="nav-button" data-view="accountsView" type="button">Accounts</button>
+            <button class="nav-button" data-view="backtestView" type="button">Backtest</button>
           </nav>
           <div class="mode-pill">Paper API</div>
         </div>
       </header>
 
       <section id="runtimeHealthBanner" class="runtime-warning" hidden>
-        <strong>Stale runtime warning</strong>
+        <strong id="runtimeHealthTitle">Runtime warning</strong>
         <span id="runtimeHealthText"></span>
       </section>
 
@@ -102,6 +103,157 @@
             </thead>
             <tbody id="topVolumeRows"></tbody>
           </table>
+        </section>
+      </section>
+
+      <section id="backtestView" class="view dashboard-view">
+        <section class="panel backtest-runner">
+          <div class="table-heading">
+            <div>
+              <h2>Backtest</h2>
+            </div>
+          </div>
+          <div class="backtest-controls">
+            <label>
+              <span>Days</span>
+              <input id="backtestDays" min="1" max="30" step="1" type="number" value="1" />
+            </label>
+            <label>
+              <span>Max events</span>
+              <input id="backtestMaxEvents" min="0" max="500000" step="1000" type="number" value="50000" />
+            </label>
+            <label class="check-row compact-toggle">
+              <input id="backtestLatestEvents" checked type="checkbox" />
+              <span>Latest window</span>
+            </label>
+            <button id="runBacktestButton" type="button">Run Backtest</button>
+            <span id="backtestRunStatus" class="inline-status"></span>
+          </div>
+          <div class="backtest-parameter-grid">
+            <section>
+              <h3>Selection</h3>
+              <label><span>Score threshold</span><input id="backtestMinEntryScore" type="number" min="0" max="100" step="1" value="44" /></label>
+              <label><span>Session change %</span><input id="backtestMinSessionChange" type="number" min="0" max="20" step="0.05" value="1.35" /></label>
+              <label><span>Recent momentum %</span><input id="backtestMinRecentMomentum" type="number" min="0" max="20" step="0.05" value="0.05" /></label>
+              <label><span>Long momentum %</span><input id="backtestMinLongMomentum" type="number" min="0" max="20" step="0.05" value="0.05" /></label>
+              <label><span>VWAP min %</span><input id="backtestMinVwapDistance" type="number" min="0" max="20" step="0.05" value="0.05" /></label>
+              <label><span>VWAP max %</span><input id="backtestMaxVwapDistance" type="number" min="0" max="50" step="0.05" value="2.25" /></label>
+              <label><span>Session pullback max %</span><input id="backtestMaxSessionPullback" type="number" min="0" max="50" step="0.05" value="0.9" /></label>
+              <label><span>Recent pullback max %</span><input id="backtestMaxRecentPullback" type="number" min="0" max="50" step="0.05" value="0.55" /></label>
+            </section>
+            <section>
+              <h3>Signals & Exits</h3>
+              <label><span>RSI min</span><input id="backtestBuyRsiMin" type="number" min="0" max="100" step="1" value="42" /></label>
+              <label><span>RSI max</span><input id="backtestBuyRsiMax" type="number" min="0" max="100" step="1" value="68" /></label>
+              <label><span>SMI min</span><input id="backtestMinSmi" type="number" min="-100" max="100" step="1" value="40" /></label>
+              <label><span>Volume multiplier</span><input id="backtestVolumeMultiplier" type="number" min="0" max="20" step="0.1" value="1.5" /></label>
+              <label><span>Min average volume</span><input id="backtestMinAvgVolume" type="number" min="0" max="1000000000" step="10000" value="0" /></label>
+              <label><span>Take profit %</span><input id="backtestTakeProfit" type="number" min="0" max="100" step="0.05" value="2.5" /></label>
+              <label><span>Stop loss %</span><input id="backtestStopLoss" type="number" min="0" max="100" step="0.05" value="1.25" /></label>
+              <label><span>Inverse ETFs</span><select id="backtestInverseEtfMode"><option value="allow" selected>Allow same rules</option><option value="exclude">Exclude</option><option value="inverse_only">Inverse only</option></select></label>
+            </section>
+            <section>
+              <h3>Score Weights</h3>
+              <label><span>RSI</span><input id="backtestWeightRsi" type="number" min="0" max="100" step="0.5" value="12" /></label>
+              <label><span>Relative volume</span><input id="backtestWeightRelativeVolume" type="number" min="0" max="100" step="0.5" value="12" /></label>
+              <label><span>Momentum</span><input id="backtestWeightMomentum" type="number" min="0" max="100" step="0.5" value="20" /></label>
+              <label><span>Recent momentum</span><input id="backtestWeightRecentMomentum" type="number" min="0" max="100" step="0.5" value="8" /></label>
+              <label><span>Long momentum</span><input id="backtestWeightLongMomentum" type="number" min="0" max="100" step="0.5" value="15" /></label>
+              <label><span>Session change</span><input id="backtestWeightSessionChange" type="number" min="0" max="100" step="0.5" value="12" /></label>
+              <label><span>VWAP</span><input id="backtestWeightVwap" type="number" min="0" max="100" step="0.5" value="8" /></label>
+              <label><span>SMI</span><input id="backtestWeightSmi" type="number" min="0" max="100" step="0.5" value="8" /></label>
+              <label><span>Volatility</span><input id="backtestWeightVolatility" type="number" min="0" max="100" step="0.5" value="3" /></label>
+              <label><span>Flow</span><input id="backtestWeightFlow" type="number" min="0" max="100" step="0.5" value="5" /></label>
+              <label><span>Pullback penalty</span><input id="backtestWeightPullbackPenalty" type="number" min="0" max="100" step="0.5" value="12" /></label>
+              <label><span>Overbought penalty</span><input id="backtestWeightOverboughtPenalty" type="number" min="0" max="100" step="0.5" value="6" /></label>
+            </section>
+            <section>
+              <h3>Sizing Harness</h3>
+              <label><span>Account equity</span><input id="backtestStartingEquity" type="number" min="1" max="100000000" step="100" value="1000" /></label>
+              <label><span>Cash</span><input id="backtestStartingCash" type="number" min="0" max="100000000" step="100" value="1000" /></label>
+              <label><span>Sizing mode</span><select id="backtestTradeSizeMode"><option value="percent" selected>Percent</option><option value="notional">Dollar</option></select></label>
+              <label><span>Trade %</span><input id="backtestTradePercent" type="number" min="0" max="100" step="0.25" value="5" /></label>
+              <label><span>Trade $</span><input id="backtestTradeNotional" type="number" min="0" max="1000000" step="10" value="0" /></label>
+              <label><span>Max positions</span><input id="backtestMaxPositions" type="number" min="1" max="200" step="1" value="20" /></label>
+              <label><span>Total exposure %</span><input id="backtestTotalExposure" type="number" min="0" max="1000" step="1" value="100" /></label>
+            </section>
+          </div>
+          <section id="backtestSummary" class="backtest-summary" hidden>
+            <article>
+              <span>Engine</span>
+              <strong id="backtestEngine">-</strong>
+            </article>
+            <article>
+              <span>Strategy</span>
+              <strong id="backtestStrategy">-</strong>
+            </article>
+            <article>
+              <span>Harness</span>
+              <strong id="backtestHarness">-</strong>
+            </article>
+            <article>
+              <span>Evaluations</span>
+              <strong id="backtestEvaluations">-</strong>
+            </article>
+            <article>
+              <span>Accepted</span>
+              <strong id="backtestAccepted">-</strong>
+            </article>
+            <article>
+              <span>Rejected</span>
+              <strong id="backtestRejected">-</strong>
+            </article>
+            <article>
+              <span>Source</span>
+              <strong id="backtestSource">-</strong>
+            </article>
+            <article>
+              <span>Status</span>
+              <strong id="backtestStatus">-</strong>
+            </article>
+          </section>
+          <div id="backtestDetail" class="backtest-detail" hidden>
+            <section>
+              <h3>Checks</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Status</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody id="backtestCheckRows"></tbody>
+              </table>
+            </section>
+            <section>
+              <h3>Accepted Trades</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Score</th>
+                    <th>Entry</th>
+                    <th>Qty</th>
+                    <th>Notional</th>
+                  </tr>
+                </thead>
+                <tbody id="backtestAcceptedRows"></tbody>
+              </table>
+            </section>
+            <section>
+              <h3>Rejected Sample</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="backtestRejectedRows"></tbody>
+              </table>
+            </section>
+          </div>
         </section>
       </section>
 
@@ -276,8 +428,8 @@
                 <label>
                   Inverse ETFs
                   <select id="inverseEtfMode">
-                    <option value="exclude">Exclude auto set</option>
-                    <option value="allow" selected>Allow top-volume set</option>
+                    <option value="exclude">Exclude inverse ETFs</option>
+                    <option value="allow" selected>Allow Alpaca top-25</option>
                     <option value="inverse_only">Inverse set only</option>
                   </select>
                 </label>
@@ -319,7 +471,7 @@
               <h3>Symbols & Data</h3>
               <label class="check-row">
                 <input id="useTopVolumeSymbols" type="checkbox" checked />
-                <span>Trade S&P 500 top 25</span>
+                <span>Trade Alpaca top 25 volume</span>
               </label>
               <label>
                 Fallback tickers
@@ -427,11 +579,7 @@
             </article>
             <article class="realized-pl-card">
               <div class="metric-heading">
-                <span>Realized Today</span>
-                <label class="check-row compact-toggle metric-toggle">
-                  <input id="realizedPercentToggle" type="checkbox" />
-                  <span>%</span>
-                </label>
+                <span>Closed P/L Today</span>
               </div>
               <strong id="realizedPl">$0.00</strong>
               <small id="realizedPlDetail" class="metric-detail"></small>

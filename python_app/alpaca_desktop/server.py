@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import binascii
+import importlib.util
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -28,7 +30,10 @@ from .storage import load_settings, protect_text, save_settings, unprotect_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parent
 STATIC_DIR = ROOT / "static"
+DAY_TAPE_BACKTEST_SCRIPT = REPO_ROOT / "scripts" / "day_tape_backtest.py"
+_day_tape_backtest_module: Any | None = None
 
 app = FastAPI(title="Alpaca Paper Trader")
 app.add_middleware(
@@ -72,6 +77,14 @@ class CustomProfilePayload(BaseModel):
 class AccountActionPayload(BaseModel):
     account_id: str | None = None
     force: bool = False
+
+
+class DayTapeBacktestPayload(BaseModel):
+    days: int = Field(default=1, ge=1, le=30)
+    max_events: int = Field(default=50000, ge=0, le=500000)
+    latest_events: bool = True
+    strategy_overrides: dict[str, Any] = Field(default_factory=dict)
+    sizing_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 _last_refresh_by_account: dict[str, float] = {}
@@ -232,6 +245,8 @@ async def get_health(request: Request) -> dict[str, Any]:
     if not runtime_url:
         runtime_url = str(request.base_url).rstrip("/")
     payload = currentness_payload(url=runtime_url)
+    payload["paper_trading_only"] = True
+    payload["broker_mode"] = "paper"
     payload["settings_diagnostics"] = manager.settings_diagnostics()
     payload["runtime_diagnostics"] = runtime_diagnostics_snapshot()
     return payload
@@ -370,6 +385,161 @@ async def refresh_all() -> dict[str, Any]:
 @app.get("/api/dashboard")
 async def get_dashboard(account_id: str | None = None) -> dict[str, Any]:
     return manager.dashboard_state(account_id)
+
+
+def day_tape_backtest_module() -> Any:
+    global _day_tape_backtest_module
+    if _day_tape_backtest_module is not None:
+        return _day_tape_backtest_module
+    spec = importlib.util.spec_from_file_location("day_tape_backtest_app", DAY_TAPE_BACKTEST_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load day-tape backtester from {DAY_TAPE_BACKTEST_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _day_tape_backtest_module = module
+    return module
+
+
+def day_tape_backtest_check(name: str, ok: bool, detail: str) -> dict[str, Any]:
+    return {"name": name, "ok": bool(ok), "detail": detail}
+
+
+def day_tape_backtest_report(payload: DayTapeBacktestPayload) -> dict[str, Any]:
+    module = day_tape_backtest_module()
+    tape_dir = module.default_tape_dir()
+    files = module.selected_files(tape_dir, payload.days)
+    parameters = {
+        "days": payload.days,
+        "max_events": payload.max_events,
+        "latest_events": payload.latest_events,
+        "strategy_overrides": payload.strategy_overrides,
+        "sizing_overrides": payload.sizing_overrides,
+    }
+    if not files:
+        return {
+            "ok": False,
+            "pending": "No day-tape files found.",
+            "tape_dir": str(tape_dir),
+            "files": [],
+            "parameters": parameters,
+            "summary": {},
+            "checks": [
+                day_tape_backtest_check(
+                    "day_tape_files",
+                    False,
+                    f"No day-tape files found in {tape_dir}",
+                )
+            ],
+        }
+
+    summary = module.run_backtest(
+        files,
+        payload.max_events,
+        latest_events=payload.latest_events,
+        strategy_overrides=payload.strategy_overrides,
+        sizing_overrides=payload.sizing_overrides,
+    )
+    counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+    harness = summary.get("sizing_harness") if isinstance(summary.get("sizing_harness"), dict) else {}
+    expected_source = str(summary.get("expected_top_volume_source") or "alpaca_most_actives_volume")
+    top_volume_sources = summary.get("top_volume_sources")
+    if not isinstance(top_volume_sources, list):
+        top_volume_sources = []
+    contexts_by_source = (
+        summary.get("top_volume_contexts_by_source")
+        if isinstance(summary.get("top_volume_contexts_by_source"), dict)
+        else {}
+    )
+    evaluations_by_source = (
+        summary.get("evaluations_by_top_volume_source")
+        if isinstance(summary.get("evaluations_by_top_volume_source"), dict)
+        else {}
+    )
+    sizing_diagnostic = bool(payload.sizing_overrides)
+    harness_ok = (
+        str(harness.get("trade_size_mode") or "") in {"percent", "notional"}
+        and int(harness.get("max_positions") or 0) > 0
+        and str(harness.get("starting_equity") or "") not in {"", "0"}
+    )
+    if sizing_diagnostic:
+        harness_detail = (
+            f"diagnostic {harness.get('trade_size_mode')} sizing, "
+            f"equity={harness.get('starting_equity')}, cash={harness.get('starting_cash')}, "
+            f"max_positions={harness.get('max_positions')}, exposure={harness.get('total_exposure_percent')}%"
+        )
+    else:
+        harness_ok = harness_ok and (
+            harness.get("starting_equity") == "1000"
+            and harness.get("starting_cash") == "1000"
+            and int(harness.get("max_positions") or 0) == 20
+            and str(harness.get("trade_percent") or "") == "5"
+            and str(harness.get("total_exposure_percent") or "") == "100"
+        )
+        harness_detail = "fixed $1000 equity/cash, 20 positions, 5% slot, 100% exposure harness"
+    checks = [
+        day_tape_backtest_check(
+            "day_tape_files",
+            True,
+            f"{len(files)} tape file(s) selected",
+        ),
+        day_tape_backtest_check(
+            "selection_engine",
+            summary.get("selection_engine") == "app_engine",
+            f"selection_engine={summary.get('selection_engine') or 'missing'}",
+        ),
+        day_tape_backtest_check(
+            "sizing_harness",
+            harness_ok,
+            harness_detail,
+        ),
+        day_tape_backtest_check(
+            "expected_top_volume_source",
+            expected_source in top_volume_sources and int(contexts_by_source.get(expected_source) or 0) > 0,
+            f"{expected_source} contexts={int(contexts_by_source.get(expected_source) or 0)}",
+        ),
+        day_tape_backtest_check(
+            "evaluations",
+            int(counts.get("evaluations") or 0) > 0,
+            f"evaluations={int(counts.get('evaluations') or 0)}",
+        ),
+        day_tape_backtest_check(
+            "expected_source_evaluations",
+            int(evaluations_by_source.get(expected_source) or 0) > 0,
+            f"{expected_source} evaluations={int(evaluations_by_source.get(expected_source) or 0)}",
+        ),
+        day_tape_backtest_check(
+            "rejected_candidates",
+            int(counts.get("rejected_candidates") or 0) > 0,
+            f"rejected_candidates={int(counts.get('rejected_candidates') or 0)}",
+        ),
+        day_tape_backtest_check(
+            "parse_errors",
+            int(counts.get("parse_errors") or 0) == 0,
+            f"parse_errors={int(counts.get('parse_errors') or 0)}",
+        ),
+    ]
+    ok = all(bool(item["ok"]) for item in checks)
+    pending = ""
+    if not ok and int(contexts_by_source.get(expected_source) or 0) > 0 and int(evaluations_by_source.get(expected_source) or 0) == 0:
+        pending = "Fresh Alpaca top-volume tape exists, waiting for market-open strategy-scan evaluations."
+    return {
+        "ok": ok,
+        "pending": pending,
+        "tape_dir": str(tape_dir),
+        "files": [item.name for item in files],
+        "parameters": parameters,
+        "summary": summary,
+        "checks": checks,
+    }
+
+
+@app.post("/api/backtest/day-tape")
+async def run_day_tape_backtest(payload: DayTapeBacktestPayload) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(day_tape_backtest_report, payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/dashboard/top-volume")

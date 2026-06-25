@@ -1143,3 +1143,1141 @@ Live deployment plan:
 - After launch, verify that saved accounts still load, settings diagnostics are clear or explicitly understood, runtime diagnostics have no new deployment errors, and day-tape recording resumes or remains correctly closed-market idle. Verify account count/names only locally and do not expose account identifiers.
 - Confirm that saved sizing/exposure/auto-connect/auto-start settings are unchanged from the pre-deploy snapshot unless the user explicitly approved a settings change.
 - Rollback plan: if health/currentness, settings load, credential access, or day-tape continuity fails, stop and preserve logs. Revert code to the previous stable commit only with user approval, and restore settings/day-tape backups only if the file state was changed or corrupted.
+
+### 2026-06-24 - Goal resume live-runtime check
+Status: Live deployment still pending approval
+Evidence:
+- Stable checkout has five pre-existing dirty files before this pass: `Launch Alpaca Paper Trader.vbs`, `python_app/alpaca_desktop/engine.py`, `python_app/run.py`, `scripts/test_runtime_currentness.py`, and `tests/test_backtester_boundary_diagnostics.py`.
+- Offline checks against the current dirty checkout passed: `scripts/run_regression_tests.py` ran 38 tests, Python compile passed, `node --check python_app\static\app.js` passed, `git diff --check` passed with only LF-to-CRLF normalization warnings, `setup-worktree.ps1 -SmokeOnly` passed with isolated `LOCALAPPDATA`, and `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- Read-only live `/api/health` check found the backend reachable at `http://127.0.0.1:8765`, but `status=stale`, `current=False`, and the live `source_stamp` did not match the current checkout source stamp.
+Impact:
+- The current disk code is regression-clean, but the running desktop app is still not satisfying the no-stale-runtime-warning acceptance item until an approved live restart/replacement loads the current source.
+Verification needed:
+- Before live replacement, take the planned pre-deploy backup/snapshot without exposing credentials or account identifiers.
+- After live replacement, verify `/api/health` reports `current=True` and matching source stamp, then verify all saved accounts, Daily P/L fields, sizing mode, runtime diagnostics, and day-tape continuity locally.
+
+### 2026-06-24 - Goal resume finding: AUDIT-022 top-volume universe still seeded from local S&P list
+Status: Fixed locally, not live until approved restart/replacement
+Evidence:
+- `python_app/alpaca_desktop/sp500.py` contains a hardcoded S&P 500 symbol list.
+- `python_app/alpaca_desktop/engine.py::refresh_top_volume()` calls `fetch_stock_snapshots_chunked(data_client, list(SP500_SYMBOLS), feed)` and ranks those snapshot rows by daily volume.
+- The installed Alpaca client exposes `ScreenerClient.get_most_actives()` with `MostActivesRequest`, so a direct Alpaca top-volume source is available.
+Impact:
+- Although snapshot price/volume data comes from Alpaca, the live candidate universe is constrained by a local list that can become stale and violates the contract's "no hardcoded lists, stale cache, mock data, or outside data sources for live candidate selection" rule.
+Required fix:
+- Use Alpaca's screener/most-actives API as the primary top-volume candidate source, then enrich/rank the returned symbols with Alpaca snapshots.
+- Keep held-position monitoring separate and keep the bounded inverse ETF set only as an explicit strategy extension that must pass the same rules as other symbols.
+Verification needed:
+- Add regression coverage proving `refresh_top_volume()` uses the screener source before snapshot enrichment and does not call the hardcoded S&P list for live top-volume selection.
+- Rerun the full offline regression set and isolated smoke checks.
+Fix evidence:
+- Removed the local `python_app/alpaca_desktop/sp500.py` symbol list and removed the `SP500_SYMBOLS` import from the live engine.
+- Added `fetch_most_active_symbols()` using Alpaca `ScreenerClient.get_most_actives(MostActivesRequest(top=25, by=MostActivesBy.VOLUME))`.
+- `refresh_top_volume()` now uses the Alpaca most-actives response as the ranked universe, then enriches only those returned symbols with Alpaca snapshots for display price/status context.
+- Updated day-tape top-volume source labels from `sp500_snapshot_volume` to `alpaca_most_actives_volume`.
+- Updated README and the account settings checkbox copy from S&P wording to Alpaca top-25 volume wording.
+Verification:
+- `scripts/run_regression_tests.py` passed: 39 tests, including `test_top_volume_refresh_uses_alpaca_most_actives_screener`.
+- Python compile, `node --check python_app\static\app.js`, `git diff --check`, `setup-worktree.ps1 -SmokeOnly`, and `scripts/check_frontend_layout.py` all passed.
+- `rg` found no remaining live-code or user-doc `SP500`, `sp500`, `S&P 500`, or `sp500_snapshot_volume` references outside this audit ledger's historical evidence.
+
+### 2026-06-24 - Goal resume finding: AUDIT-023 replay lacked app-engine day-tape backtest path
+Status: Fixed locally, not live until approved restart/replacement
+Evidence:
+- `README.md` still described `scripts/day_tape_fast_forward.py` as only an event-flow foundation and said the fake broker/profit simulator was a later layer.
+- The stable checkout had `python_app/alpaca_desktop/backtester.py` boundary ports, but no runnable day-tape backtest script that reported accepted trades, rejected candidates, rejection reasons, and winner/loser indicator comparisons.
+Impact:
+- The replay/backtester acceptance item could not be proven from a user-runnable artifact. The app had useful tape review tools, but not the requested strategy-replay evidence path.
+Required fix:
+- Add a day-tape backtest command that consumes recorded top-volume snapshots, feeds market bars into the same `TraderEngine` strategy state, and evaluates entries through the app-engine boundary rather than a parallel selector.
+- Keep replay sizing/capacity fixed at one replay account, `$1000` starting equity/cash, 20 max positions, 5% per slot, and 100% total exposure.
+Fix evidence:
+- Added `scripts/day_tape_backtest.py`.
+- The script uses top-volume snapshots from the tape as the replay universe, calls `TraderEngine.trading_symbols()` for the live-equivalent entry universe, feeds `market_bar` events into `StrategyState`, evaluates candidates through `EngineBacktesterBoundary.strategy.entry_candidate()`, and applies exits through the live `local_protection_exit_decision()` helper.
+- It reports `selection_engine: app_engine`, fixed sizing harness settings, accepted trades, closed trades, rejected candidate samples with hold reasons, and winner/loser averages for the exact entry indicator raw fields.
+- Updated README and `scripts/day_tape_fast_forward.py` to point to the new backtest command.
+Verification:
+- `python -m unittest tests.test_day_tape_backtest -v` passed.
+- A bounded read-only run against the real `tape-20260624.jsonl` completed without Alpaca API calls or app-state writes; the existing tape still reported old source `sp500_snapshot_volume` because it was recorded before AUDIT-022 is live.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-024 blocked stale runtime still attempted hidden backend start
+Status: Fixed locally, not live until approved restart/replacement
+Evidence:
+- `python_app/run.py::active_instance_url()` printed `Refusing to start on a random fallback port` when a stale backend did not stop, but returned an empty string.
+- `python_app/run.py::main()` treated an empty existing URL as permission to call `save_instance_url()` and then `uvicorn.run()` on the preferred port.
+Impact:
+- If the stale backend still occupied `127.0.0.1:8765`, normal VBS launch could start a hidden `pythonw` process that immediately failed to bind, while the operator only saw delayed launcher failure. That contradicts the no-duplicate/no-stale-runtime launcher contract.
+Required fix:
+- Represent stale-runtime stop failure as a blocked launch, not as "no existing backend"; exit nonzero before saving a replacement `instance.json` or trying to bind the port.
+Fix evidence:
+- Added `LaunchBlockedError` in `python_app/run.py`.
+- `active_instance_url()` now raises `LaunchBlockedError` when a non-reusable backend remains alive and cannot be stopped.
+- `main()` exits nonzero on `LaunchBlockedError` instead of attempting to start another backend.
+Verification:
+- `scripts/test_runtime_currentness.py` now includes `test_stale_backend_stop_failure_blocks_launch`.
+- Focused runtime-currentness tests passed: 8 tests.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-025 pre-live app-data backup was planned but not operator-runnable
+Status: Fixed locally, not executed against real app data
+Evidence:
+- The live deployment plan required backing up `%LOCALAPPDATA%\AlpacaPaperTrader\python-settings.json`, `instance.json`, and day-tape data before live restart/replacement.
+- The stable checkout did not have a dedicated command that performed that backup consistently without printing credential contents.
+Impact:
+- The live cutover step still depended on manual copying, increasing the chance of missing replay/day-tape/dashboard-cache state or accidentally exposing sensitive data in output.
+Required fix:
+- Add a local pre-live backup command with dry-run default and explicit `--execute` for approved cutovers.
+Fix evidence:
+- Added `scripts/pre_live_backup.py`.
+- Dry-run mode prints source/target paths plus file and directory counts/sizes only; it does not print settings contents, account IDs, or credentials.
+- Execute mode copies `python-settings.json`, `instance.json`, `dashboard-cache.json`, `replay`, and `day-tape` into `.runtime\pre-live-deploy-backups\<timestamp>`.
+- README now documents the dry-run and approved `--execute` flow.
+Verification:
+- `tests/test_pre_live_backup.py` covers dry-run/no-copy behavior and execute-copy behavior using synthetic app data.
+- Real app-data dry run completed without copying: planned backup was 8.7 KB settings, 231 B `instance.json`, 9.4 KB dashboard cache, 24 replay files / 55.6 MB, and 10 day-tape files / 12.8 GB.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-026 strategy refresh could trade from an old top-volume universe
+Status: Fixed locally, not live until approved restart/replacement
+Evidence:
+- `TraderManager.refresh_account()` called `shared_historical_bars_for()` and `TraderEngine.refresh()` without first refreshing the top-volume universe.
+- `TraderEngine.refresh()` builds `entry_symbols = self.trading_symbols()` from the current in-memory `top_volume_symbols`.
+- The background loop refreshed the dashboard top-volume data only when `_last_dashboard_refresh` exceeded `TOP_VOLUME_CACHE_SECONDS`; the strategy refresh loop could therefore keep evaluating an older candidate universe.
+Impact:
+- The app could be otherwise healthy and still enter from an old top-volume set, weakening the contract that new entries come from the current Alpaca top-25 volume universe.
+Required fix:
+- Before any connected account strategy refresh, refresh the shared Alpaca most-active universe through one source engine, sync it to all accounts, and only then build shared bars / entry symbols.
+- Keep scan cadence separate from strategy comparison knobs; this is operational data freshness, not a strategy parameter.
+Fix evidence:
+- Added `TraderManager.refresh_trading_universe_for()`.
+- `refresh_account()` now calls `refresh_trading_universe_for(engine)` before shared bars and `engine.refresh()`.
+- Reduced top-volume cache window to 60 seconds and force refresh cooldown to 30 seconds so the universe is kept current without per-account duplicate screener calls.
+Verification:
+- `MarketStreamBaselineTests.test_account_refresh_updates_top_volume_before_strategy_symbols` proves the source refresh happens before strategy refresh and syncs the top-volume symbols to the target account.
+- `MarketStreamBaselineTests.test_top_volume_cache_is_short_enough_for_live_trading_refresh` covers the freshness bound.
+- Focused market-stream/top-volume baseline tests passed: 7 tests.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-027 desktop shortcut verification was not reusable
+Status: Fixed locally, actual shortcut inspected without launching
+Evidence:
+- The goal contract requires launcher verification through the desktop shortcut/VBS path.
+- `scripts/test_runtime_currentness.py` covered VBS health-currentness behavior but did not cover the PowerShell shortcut creator or provide a reusable read-only check for the real `.lnk` file.
+- A read-only COM inspection of the current desktop shortcut found it points to `C:\Windows\System32\wscript.exe`, passes `"C:\Users\solo leveling\Documents\alpaca trading app\Launch Alpaca Paper Trader.vbs"` as arguments, and uses the repo folder as working directory.
+Impact:
+- The launch path could regress from the no-window VBS route back to a terminal-visible or wrong-folder route without a focused regression test.
+Required fix:
+- Add source-level coverage for the desktop shortcut creator and hidden VBS launch behavior.
+- Add an operator-runnable shortcut verifier that reads the actual `.lnk` metadata without launching the app.
+Fix evidence:
+- Added `scripts/verify_desktop_shortcut.py`.
+- Added regression coverage for `Create-DesktopShortcut.ps1`, hidden `pythonw --no-browser` VBS startup, Edge `--app=` mode, and verifier validation logic.
+- README now documents the shortcut verifier command.
+Verification:
+- Focused runtime-currentness tests passed: 11 tests.
+- `scripts/verify_desktop_shortcut.py --json` inspected the actual desktop shortcut without launching the app and returned `ok: true`.
+
+### 2026-06-25 - Goal continuation verification summary
+Status: Offline repair checks passed; live replacement still pending approval
+Evidence:
+- `scripts/run_regression_tests.py` passed 49 tests.
+- Python compile passed for `python_app` and `scripts`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts\verify_desktop_shortcut.py --json` returned `ok: true` for the actual desktop shortcut and confirmed the `wscript.exe` to VBS path, repo working directory, and icon.
+- `scripts\pre_live_backup.py` dry-run completed against real app data without copying or printing contents: settings, `instance.json`, dashboard cache, replay, and day-tape were all included in the planned backup.
+- A bounded `scripts\day_tape_backtest.py --days 1 --max-events 50000` run completed read-only with `selection_engine: app_engine`, fixed replay sizing harness, 230 evaluations, 6,900 rejected candidate checks, and zero parse errors.
+- Read-only live `/api/health` still reports the backend reachable at `http://127.0.0.1:8765` but `current=False`, `status=stale`, and PID `11068`.
+Impact:
+- The current disk code is offline-clean and the desktop shortcut metadata is correct, but the live desktop app still cannot satisfy the no-stale-runtime and current-backend acceptance items until an approved backup/restart/relaunch loads the current source.
+Verification still needed after approval:
+- Execute the pre-live backup.
+- Relaunch through the desktop shortcut/VBS path.
+- Confirm one active backend on `http://127.0.0.1:8765`, current `/api/health`, retained `instance.json`, all saved accounts loaded, Daily P/L values are real/not false zero, sizing modes are conflict-free, runtime diagnostics are clean or actionable, and day-tape continuity is preserved.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-028 post-relaunch contract verification was still manual
+Status: Fixed locally, live result currently fails until approved relaunch
+Evidence:
+- The acceptance contract requires proof across launcher, backend, account loading, Daily P/L, sizing, top-volume source, runtime diagnostics, and `instance.json`.
+- Before this pass, the repo had separate checks for shortcut metadata, regression tests, layout, and backup dry-run, but no single sanitized read-only command that could verify the live app after desktop relaunch without exposing account identifiers.
+Impact:
+- Live cutover could still end with scattered evidence and incomplete proof, especially around all three accounts, Daily P/L source math, sizing conflicts, and top-volume cache/source.
+Required fix:
+- Add a read-only live verifier that queries only local app endpoints, summarizes booleans/counts, compares Daily P/L to account equity/last-equity source fields, checks sizing-mode exclusivity, validates the desktop shortcut, checks `instance.json`, checks the preferred backend URL/currentness, and verifies the top-volume source/cache.
+- Keep output sanitized: no API keys, secret keys, account IDs, or account names.
+Fix evidence:
+- Added `scripts/verify_live_contract.py`.
+- Added `tests/test_live_contract_verifier.py`, including a regression that the report does not contain synthetic account IDs or account names.
+- Added `top_volume_source` to `dashboard_state()` with source `alpaca_most_actives_volume`, so post-relaunch verification can distinguish the fixed Alpaca screener path from an old/stale backend.
+- README now documents the post-relaunch verifier command.
+Verification:
+- Focused verifier tests passed.
+- Full `scripts/run_regression_tests.py` passed 51 tests.
+- `scripts/verify_live_contract.py` against the current running app failed as expected because live is still stale: `backend.current=False`, two repo launcher processes were found, `top_volume.source` is missing, and `top_volume.cache_seconds=600`.
+- The same live verifier confirmed 3 accounts were readable, top-volume rows existed, and account Daily P/L/sizing checks were inspectable without printing account identifiers.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-029 live cutover sequence needed one guarded command
+Status: Fixed locally, dry-run only; execute still requires approval
+Evidence:
+- The live verifier found two repo launcher processes: one `.venv\Scripts\pythonw.exe` process and one system Python 3.12 `pythonw.exe` process, both running this repo's `python_app\run.py --no-browser`. PID `11068` is the backend serving `/api/health`.
+- The live app remains stale until the old process set is deliberately replaced, but the safe sequence requires backup before stop/relaunch and post-launch verification.
+Impact:
+- Without a single guarded command, the live replacement could be done out of order, skip the backup, stop the wrong process, or relaunch without running the contract verifier.
+Required fix:
+- Add a dry-run-first coordinator that performs the approved sequence only when explicitly run with `--execute`: pre-live backup, validate desktop shortcut, stop only this repo's `python_app\run.py` launcher processes, launch through the desktop shortcut, then wait for the sanitized live verifier to pass.
+Fix evidence:
+- Added `scripts/live_cutover.py`.
+- Added `tests/test_live_cutover.py`, covering that dry-run does not stop or launch and that execute mode orders backup, stop, launch, and verifier calls.
+- README now documents the dry-run and `--execute` live cutover command.
+Verification:
+- `scripts/live_cutover.py` dry-run completed without stopping or launching anything. It printed the planned backup scope and the current repo launcher PIDs `12716` and `11068`.
+- Full `scripts/run_regression_tests.py` passed 53 tests.
+- Python compile, `node --check`, `git diff --check`, isolated smoke, and layout checks passed.
+Remaining approval gate:
+- Do not run `scripts/live_cutover.py --execute` until the user explicitly approves stopping/relaunching the live local backend after backup.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-030 backup/cutover preflight needed disk and process-scan guards
+Status: Fixed locally, dry-run only; execute still requires approval
+Evidence:
+- The real app-data backup plan is large because day-tape data is included: current dry-run reports 12.8 GB planned.
+- The previous backup command did not check destination free space before execute mode.
+- A live verifier run immediately after smoke checks briefly reported an extra repo launcher process, but a direct process inspection showed only the two long-running `--no-browser` processes. The process scanner needed to ignore transient `python_app\run.py --smoke` checks.
+Impact:
+- An approved live cutover could have stopped the backend after starting a backup that could not fit on disk.
+- A transient smoke/import check could falsely fail the single-backend verifier, making live verification noisy.
+Required fix:
+- Add destination disk-space reporting and an execute-mode abort before copying if the planned backup is larger than available free space.
+- Filter `--smoke` rows out of active backend process scanning while still counting real `python_app\run.py` launcher processes.
+Fix evidence:
+- `scripts/pre_live_backup.py` now prints planned backup total and available destination disk space, and refuses execute mode before copying when space is insufficient.
+- `scripts/verify_live_contract.py` now parses process rows and excludes `--smoke` checks.
+- Added regression coverage for insufficient backup disk space and smoke-process filtering.
+Verification:
+- Focused backup/cutover tests passed.
+- Real `scripts/pre_live_backup.py` dry-run reported 12.8 GB planned and 103.5 GB available.
+- Real `scripts/live_cutover.py` dry-run reported the same backup preflight and the two current long-running PIDs `12716` and `11068`.
+- Real `scripts/verify_live_contract.py` now reports the true two-process duplicate condition, not a transient smoke-process count.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-031 Daily P/L verification needed rendered UI proof
+Status: Fixed locally and verified against current live UI; live backend still stale
+Evidence:
+- The contract requires P/L verification to check actual displayed values against live/account source data.
+- Backend state and regression tests already covered Daily P/L source math, but there was no headless browser check proving the rendered metric cards matched `/api/state`.
+Impact:
+- A backend could return correct Daily P/L fields while the browser still displayed stale/default values, and the previous verifier set would not catch that user-visible failure.
+Required fix:
+- Add a rendered UI verifier that opens the app in a temporary headless Edge/Chrome profile, reads the actual DOM metric cards, and compares them against `/api/state` without printing account IDs, account names, API keys, or secrets.
+- Include the rendered UI verifier in the approved cutover execute path after the live API contract verifier passes.
+Fix evidence:
+- Added `scripts/verify_ui_display.py`.
+- Added `tests/test_ui_display_verifier.py`, including a regression that the report does not contain synthetic account IDs or names and that a rendered Daily P/L mismatch fails.
+- Updated `scripts/live_cutover.py` so execute mode runs the rendered UI verifier after `verify_live_contract.py`.
+- README now documents `scripts/verify_ui_display.py` and the cutover sequence now waits for both API and rendered UI verifiers.
+Verification:
+- `scripts/verify_ui_display.py` passed against the current live UI: it rendered 3 account cards, saw the runtime warning banner, and matched equity, Daily P/L, Daily P/L session detail, realized P/L, realized P/L session detail, buying power, cash, last refresh, and the active account-card Daily P/L to `/api/state`.
+- Full `scripts/run_regression_tests.py` passed 57 tests.
+- Python compile, `node --check`, `git diff --check`, isolated smoke, layout check, and cutover dry-run passed.
+Remaining live gate:
+- `scripts/verify_live_contract.py` still fails until approved live cutover because `/api/health` is stale, two repo launcher processes remain, and the running backend still exposes old top-volume source/cache behavior.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-032 acceptance status was still scattered across multiple commands
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The contract has many acceptance gates: desktop launcher, backend currentness, `instance.json`, all accounts, backend Daily P/L, rendered UI Daily P/L, sizing modes, top-volume universe, runtime diagnostics, and regressions.
+- Before this pass, evidence existed in separate commands, but there was no single sanitized status command that grouped those gates into clear pass/fail categories for the final cutover decision.
+Impact:
+- It was still possible to claim partial success from one verifier while missing another acceptance gate, especially the split between backend API evidence, rendered UI evidence, and regression evidence.
+Required fix:
+- Add a read-only aggregator that runs the sanitized live verifier and rendered UI verifier, optionally runs the regression harness, and reports category-level pass/fail status without printing credentials or account identifiers.
+Fix evidence:
+- Added `scripts/contract_status.py`.
+- Added `tests/test_contract_status.py` to pin the category mapping, including the expected current-live failures for stale backend currentness and old top-volume behavior.
+- README now documents the aggregate status command.
+Verification:
+- `scripts/run_regression_tests.py` passed 58 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/verify_ui_display.py` passed against the current live UI: 3 account cards rendered, the runtime warning banner was visible, and rendered values matched `/api/state`.
+- `scripts/live_cutover.py` dry-run completed without stopping or launching anything, confirmed a 12.8 GB backup plan with 103.5 GB free, validated the desktop shortcut, and found the two current repo launcher PIDs `12716` and `11068`.
+- `scripts/verify_live_contract.py` failed as expected before cutover: `backend.current=False`, two repo launcher processes remain, `top_volume.source` is missing, and `top_volume.cache_seconds=600`.
+- `scripts/contract_status.py --include-regression` failed as expected before cutover, with `backend_currentness` and `top_volume_universe` as the only failed categories; desktop launcher, `instance_json`, accounts, backend Daily P/L, rendered UI Daily P/L, sizing modes, runtime diagnostics, and regression harness all passed.
+Remaining live gate:
+- The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-064 Daily P/L used account-field subtraction instead of Alpaca portfolio history
+Status: Fixed locally; live restart and post-relaunch verification required
+Evidence:
+- A read-only comparison against Alpaca portfolio history for the three saved paper accounts showed the current app-subtraction values did not match the portfolio-history `profit_loss` source.
+- `python_app/alpaca_desktop/engine.py::TraderEngine.refresh()` still computed Daily P/L as `equity - last_equity`.
+- `scripts/verify_live_contract.py::check_daily_pl()` validated that same subtraction through `daily_pl_source_math`, so the verifier could pass while proving the wrong source.
+Impact:
+- The UI could show zero, stale, or wrong Daily P/L values even when Alpaca's account/session portfolio history showed a real gain or loss.
+- A tiny non-zero percent could round to `0.00%`, violating the contract that Daily P/L must not show zero percent unless the account is actually flat.
+Required fix:
+- Use `TradingClient.get_portfolio_history()` with the account market-clock session date as the Daily P/L source.
+- Mark Daily P/L unavailable when portfolio history is unavailable instead of falling back to account-field subtraction.
+- Expose a `daily_pl_source` contract field and make the live verifier fail when the source is not Alpaca portfolio history.
+Fix evidence:
+- `TraderEngine.refresh()` now populates Daily P/L from `portfolio_history_daily_pl_payload()`, which reads Alpaca portfolio-history `profit_loss`, `profit_loss_pct`, and `base_value`.
+- `standardized_account_metrics()` now rejects account-field-only Daily P/L payloads and returns unavailable Daily P/L unless `daily_pl_source` is `alpaca_portfolio_history`.
+- `signed_percent_value()` now preserves small non-zero percentages with extra decimal places so non-flat accounts do not display as `0.00%`.
+- `scripts/verify_live_contract.py` now checks `daily_pl_source` and `daily_pl_percent_source` instead of `equity - last_equity`.
+- `scripts/contract_status.py` now maps the Daily P/L category to those portfolio-history source checks.
+Verification:
+- Focused P/L and verifier tests passed: `python -m unittest tests.test_regression_baselines.ProfitLossContractBaselineTests tests.test_live_contract_verifier tests.test_contract_status -v`.
+Remaining live gate:
+- Restart the local backend with the guarded cutover path, then run live API and rendered UI verification against the restarted process.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-065 day-tape backtester was not integrated into the app UI
+Status: Fixed in `codex/alpaca-backtest-ui` worktree; stable cutover still pending
+Evidence:
+- The goal contract requires replay/backtest evidence before strategy changes go live.
+- `scripts/day_tape_backtest.py` could run the collected day tape through the app-engine strategy boundary, but the desktop app only exposed a passive Replay event table.
+- There was no in-app control to choose a tape window, run the backtest, and inspect accepted trades, rejected candidates, or source/evaluation checks.
+Impact:
+- Backtest evidence existed as a developer script rather than an operator workflow inside the GUI, so it was not easy to use while running the desktop app.
+- The app could still be described as missing part of the goal contract even though the engine-backed replay code existed outside the UI.
+Required fix:
+- Add a read-only app endpoint that runs the existing day-tape backtester against collected local tape with `selection_engine=app_engine`.
+- Add Replay-tab controls and result tables for the fixed sizing harness, top-volume source/evaluation checks, accepted trades, and rejected-candidate samples.
+- Keep the UI path read-only: no Alpaca API calls, no order submission, and no stable app-data writes from worktree tests.
+Fix evidence:
+- Added `POST /api/backtest/day-tape`, backed by `scripts/day_tape_backtest.py`.
+- Added Replay-tab controls for days, max events, latest-window selection, and a Run Backtest button.
+- Added summary cards and result tables for checks, accepted trades, and rejected samples.
+- Added focused endpoint and frontend surface tests.
+Verification:
+- Focused endpoint/frontend/backtester tests passed: `python -m unittest tests.test_backtest_ui_api tests.test_frontend_state_layout tests.test_day_tape_backtest -v`.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app/static/app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+Remaining live gate:
+- Run focused checks in the worktree, then prepare a guarded stable checkout cutover only after the first UI slice passes.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-061 max-position capacity was still part of candidate selection
+Status: Fixed and deployed live; full replay acceptance still pending market-open strategy scans
+Evidence:
+- `python_app/alpaca_desktop/engine.py::entry_candidate()` returned `Hold (max positions)` before computing and storing the candidate score when `open_position_count >= config.max_open_positions`.
+- The refresh loop already has a post-ranking max-position capacity check before calling `apply_strategy()`, and `apply_strategy()` also blocks order submission when max positions are full.
+Expected behavior:
+- Account size, buying power, max trade dollars, exposure, max open positions, and share price must not drive stock selection or ranking.
+- Capacity and sizing limits should stop entries only after the indicator-driven candidate ranking has been built.
+Impact:
+- When the account was already at its position limit, the engine could skip scoring otherwise valid top-volume candidates, weakening replay evidence and contradicting the contract's separation between stock selection and sizing/capacity.
+Required fix:
+- Remove the max-position block from `entry_candidate()` while preserving the existing post-ranking and order-path capacity gates.
+- Add focused regression coverage proving candidate scoring ignores sizing/capacity/share-price inputs and that `apply_strategy()` still blocks entries after ranking when capacity is full.
+Fix evidence:
+- Removed the pre-ranking max-position block from `TraderEngine.entry_candidate()`.
+- Kept the existing post-ranking refresh-loop capacity check and the `apply_strategy()` max-position order-path guard.
+- Added `StrategySelectionContractTests` proving candidate scoring ignores sizing/capacity/share-price inputs while `apply_strategy()` still blocks entries after ranking when max positions are full.
+- Added `strategy_selection_contract` to `scripts/contract_status.py` and the guarded cutover aggregate, with an acceptance item for stock-selection independence from sizing/capacity.
+Verification:
+- Focused tests passed: `python -m unittest tests.test_regression_baselines.StrategySelectionContractTests tests.test_contract_status tests.test_live_cutover -v`.
+- Focused strategy contract check passed with 19 tests covering top-volume universe, sizing/capacity separation, inverse ETF same-rule eligibility, held-position monitoring, and replay engine reuse.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- Full `scripts/run_regression_tests.py` passed 103 tests.
+- `scripts/contract_status.py --include-regression --include-backtest` showed `strategy_selection_contract: ok`; before relaunch it still failed `backend_currentness` because the live backend had not loaded this source edit, and `replay_backtester` because the market was closed and no Alpaca-source strategy-scan evaluations existed yet.
+- `scripts/live_cutover.py --execute --disable-auto-start-for-launch --timeout 120` backed up app data to `.runtime\pre-live-deploy-backups\20260625T040643Z`, stopped only the two repo launcher processes, relaunched from the desktop shortcut, and verified the current backend on `http://127.0.0.1:8765` with PID `11200` and one listener.
+- The post-launch aggregate shows `strategy_selection_contract: ok`, `backend_currentness: ok`, and all live/UI/local categories passing except `replay_backtester`.
+Remaining verification:
+- Full replay acceptance still requires real market-open `strategy_scan` evaluations using `alpaca_most_actives_volume`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-063 safe no-auto-start relaunch needed replay-capture proof
+Status: Fixed locally; full replay acceptance still pending market-open strategy scans
+Evidence:
+- The successful guarded relaunch used `--disable-auto-start-for-launch`, leaving all three saved accounts connected but `trading_enabled=False`.
+- The remaining full-acceptance gate requires market-open `strategy_scan` evaluations using `alpaca_most_actives_volume`.
+Expected behavior:
+- Suppressing saved paper-trading auto-start for a safe relaunch should not prevent future market-open day-tape snapshots from proving the top-volume replay universe.
+- The backtester should be able to consume market-open `strategy_scan` context even when the live app did not submit paper entries.
+Impact:
+- Without focused proof, the safe no-auto-start path could leave the app live and healthy but unable to collect the evidence needed to close the replay/backtester acceptance item.
+Required fix:
+- Add regression coverage proving `record_day_tape_scan()` writes Alpaca top-volume context on market-open scans even when `should_trade=False`.
+- Add replay coverage proving a disabled-trading `strategy_scan` still evaluates the embedded Alpaca top-volume universe through the app-engine backtester path.
+- Include the disabled-trading replay test in the named `strategy_selection_contract` aggregate category.
+Fix evidence:
+- Added `test_market_open_strategy_scan_records_context_when_trading_disabled` to `tests/test_regression_baselines.py`.
+- Added `test_disabled_trading_strategy_scan_still_proves_replay_universe` to `tests/test_day_tape_backtest.py`.
+- Added the disabled-trading replay test to `scripts/contract_status.py::run_strategy_contract_check()`.
+Verification:
+- Focused tests passed: `python -m unittest tests.test_regression_baselines.MarketStreamBaselineTests tests.test_day_tape_backtest tests.test_contract_status -v`.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+Remaining verification:
+- Full replay acceptance still requires real market-open `strategy_scan` evaluations using `alpaca_most_actives_volume`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-062 cutover had no safe process-only auto-start suppression
+Status: Fixed and deployed live; full replay acceptance still pending market-open strategy scans
+Evidence:
+- `scripts/live_cutover.py` correctly aborted execute mode when saved accounts had `auto_start_trading` enabled unless `--allow-auto-start` was supplied.
+- The backend already honors `ALPACA_TRADER_DISABLE_AUTO_START=1` in `python_app/alpaca_desktop/server.py::auto_connect_saved_accounts()`, but the cutover command could not pass that safer process-only override through the desktop relaunch path.
+Expected behavior:
+- A guarded live restart should be possible without editing saved credentials/settings and without approving saved paper-trading auto-start behavior.
+- If saved auto-start is enabled, the operator should be able to choose either explicit normal auto-start approval or a process-level launch override that leaves saved settings unchanged.
+Impact:
+- Loading current code into the live gateway was blocked by saved auto-start settings even though a safer no-settings-change runtime guard already existed.
+Required fix:
+- Add a cutover execute option that sets `ALPACA_TRADER_DISABLE_AUTO_START=1` only around desktop shortcut launch, restores the current process environment afterward, and documents the behavior.
+Fix evidence:
+- Added `--disable-auto-start-for-launch` to `scripts/live_cutover.py`.
+- The option sets `ALPACA_TRADER_DISABLE_AUTO_START=1` only around desktop shortcut launch and restores the current process environment afterward.
+- The cutover command now verifies the override after launch by inspecting sanitized account states and failing if any expected account returns with `trading_enabled=True`.
+- README documents the two execute choices: `--allow-auto-start` for explicit normal saved auto-start behavior, or `--disable-auto-start-for-launch` for a process-only no-settings-change override.
+Verification:
+- Focused cutover tests passed: `python -m unittest tests.test_live_cutover -v`.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/live_cutover.py --disable-auto-start-for-launch` dry-run passed backup space, shortcut, process, and saved auto-start preflight checks without stopping or launching anything.
+- `scripts/live_cutover.py --execute --disable-auto-start-for-launch --timeout 120` completed successfully: backup path `.runtime\pre-live-deploy-backups\20260625T040643Z`, backend current on PID `11200`, 3 accounts loaded, 25 top-volume rows, rendered UI verified, and post-launch auto-start override verified with `trading_enabled_accounts=none`.
+Remaining verification:
+- Full replay acceptance still requires real market-open `strategy_scan` evaluations using `alpaca_most_actives_volume`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-048 desktop restart could delete fresh instance file and overcount launcher wrappers
+Status: Fixed and verified live; fresh replay tape still pending for full acceptance
+Evidence:
+- After the approved guarded restart, `/api/health` reported the current repo backend on `http://127.0.0.1:8765`, but `C:\Users\solo leveling\AppData\Local\AlpacaPaperTrader\instance.json` was missing.
+- The VBS launcher called `DeleteInstanceIfUrl` when `/api/health` returned no text. During startup, that empty response can mean the backend is still warming up, not that the saved instance is stale.
+- The live verifier counted both the virtualenv `pythonw.exe` launcher process and its child system `pythonw.exe` backend process as duplicate repo launcher processes, even though only the child owned the listening `127.0.0.1:8765` socket.
+Expected behavior:
+- The launcher should keep waiting on an empty startup health response and preserve `instance.json` while the backend is coming up.
+- Duplicate-backend verification should fail on multiple listening backends, not on a single backend wrapped by the Windows virtualenv launcher.
+Files:
+- `Launch Alpaca Paper Trader.vbs`
+- `scripts/verify_live_contract.py`
+- `scripts/contract_status.py`
+- `scripts/test_runtime_currentness.py`
+- `tests/test_live_contract_verifier.py`
+- `tests/test_contract_status.py`
+Required verification:
+- Focused launcher/verifier tests must pass.
+- Regression harness and Python compile must pass.
+- A post-fix desktop-shortcut restart must retain `instance.json`, report one listening backend on `127.0.0.1:8765`, and keep `/api/health.pid` equal to the listener PID.
+Fix evidence:
+- `Launch Alpaca Paper Trader.vbs` now treats an empty startup health response as "keep waiting" and does not delete `instance.json` unless a responding backend proves stale.
+- `scripts/verify_live_contract.py` now separately collects the listening PID for the expected backend URL and uses that listener set for duplicate-backend verification.
+- `scripts/contract_status.py` now includes the launcher startup guard in the desktop-launcher category.
+- Focused tests passed: `python -m unittest scripts.test_runtime_currentness tests.test_live_contract_verifier tests.test_contract_status -v`.
+- Python compile passed for `python_app`, `scripts`, and `tests`; `node --check python_app\static\app.js` passed; `git diff --check` had only LF-to-CRLF warnings.
+- Full regression harness passed 80 tests.
+- Guarded live cutover completed through the desktop shortcut after app-data backup `C:\Users\solo leveling\Documents\alpaca trading app\.runtime\pre-live-deploy-backups\20260625T030902Z`.
+- Post-launch live verifier passed with health current, PID `10712`, one listener `[10712]`, three accounts loaded, top-volume rows `25`, and no failures.
+- Rendered UI verifier passed with three rendered account cards and no visible runtime warning.
+- Follow-up live verifier still passed after relaunch, and `C:\Users\solo leveling\AppData\Local\AlpacaPaperTrader\instance.json` remained present.
+Remaining verification:
+- Aggregate contract status now passes every live/local category except `replay_backtester`, because the latest bounded day tape still contains pre-cutover `sp500_snapshot_volume` source rows and zero `alpaca_most_actives_volume` replay evaluations. A fresh market-hours tape is still required for full replay acceptance.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-049 aggregate replay verifier read the start of large tape files
+Status: Fixed locally; full replay acceptance still pending market-open strategy scans
+Evidence:
+- `scripts/contract_status.py --include-regression --include-backtest` used `scripts/day_tape_backtest.py` with `max_events=50000`, but the backtester consumed the first 50,000 events in the selected tape file.
+- On a large same-day tape, post-cutover `alpaca_most_actives_volume` snapshots were near the end of the file, so the aggregate replay category could miss the current deployment evidence and report only older pre-cutover rows.
+Expected behavior:
+- Post-deployment aggregate replay verification should inspect a bounded latest-event window by default, while preserving a from-start mode for historical diagnostics.
+- The replay gate should remain strict: Alpaca-source top-volume snapshots are not enough to pass until a market-open `strategy_scan` evaluates candidates against that source.
+Files:
+- `scripts/day_tape_backtest.py`
+- `scripts/contract_status.py`
+- `tests/test_day_tape_backtest.py`
+- `tests/test_contract_status.py`
+Fix evidence:
+- `scripts/day_tape_backtest.py` now supports `latest_events=True` and `--latest-events`, reading the latest bounded event window in chronological order.
+- `scripts/contract_status.py` now uses latest-window replay by default for the replay/backtester category and exposes `--backtest-from-start` for older diagnostics.
+- The backtester summary now reports `top_volume_snapshots_by_source`, and the aggregate status reports both expected-source snapshot count and expected-source evaluation count.
+- Focused replay/status tests passed: `python -m unittest tests.test_day_tape_backtest tests.test_contract_status -v`.
+- Aggregate status now reports latest-window evidence with fresh `alpaca_most_actives_volume` snapshots captured, but still fails replay acceptance because no market-open `strategy_scan` has evaluated that source yet.
+Remaining verification:
+- Full replay acceptance still requires fresh market-hours strategy scans using `alpaca_most_actives_volume`, then `scripts\contract_status.py --include-regression --include-backtest` should pass the replay category.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-050 strategy scan tape omitted its top-volume universe context
+Status: Fixed and deployed live; full replay acceptance still pending market-open strategy scans
+Evidence:
+- `record_day_tape_scan()` writes market-open `strategy_scan` payloads with account/config/strategy rows, but not the current top-volume source, symbols, or rows.
+- `scripts/day_tape_backtest.py` carries the candidate universe forward from prior `top_volume_snapshot` events. A bounded latest-event replay can begin at a `strategy_scan` after the relevant snapshot, leaving the backtester without direct evidence of the universe that scan used.
+Expected behavior:
+- Each market-open `strategy_scan` should include sanitized top-volume source and current top-25 universe context so replay evidence is self-contained enough for bounded post-deployment checks.
+- The backtester should prefer scan-embedded top-volume context when present and still support older tapes that only have separate `top_volume_snapshot` rows.
+Files:
+- `python_app/alpaca_desktop/engine.py`
+- `scripts/day_tape_backtest.py`
+- `tests/test_day_tape_backtest.py`
+- `tests/test_regression_baselines.py`
+Required verification:
+- Unit tests must prove scan-embedded top-volume context is written without secrets and consumed by the backtester.
+- Aggregate status must still require actual Alpaca-source strategy evaluations before passing replay acceptance.
+Fix evidence:
+- `record_day_tape_scan()` now writes `symbol_source`, `top_volume_source`, `top_volume_updated_at`, `top_volume_symbols`, and sanitized `top_volume_rows` into market-open `strategy_scan` payloads.
+- `scripts/day_tape_backtest.py` now applies scan-embedded top-volume context before evaluating a `strategy_scan`, while keeping support for older tapes that only have separate `top_volume_snapshot` rows.
+- Backtest summaries now distinguish standalone top-volume snapshots from all top-volume contexts, including scan-embedded contexts.
+- `scripts/contract_status.py` now checks top-volume context availability and still requires actual evaluations from `alpaca_most_actives_volume` before the replay category can pass.
+- Replay source accounting now labels evaluations by the actual replay universe. The fixed harness forces top-volume replay for contract checks, and tests cover scan-embedded context passing without a standalone snapshot.
+- Focused recorder/replay/status tests passed: `python -m unittest tests.test_day_tape_backtest tests.test_contract_status tests.test_regression_baselines.MarketStreamBaselineTests -v`.
+- Focused replay/status tests passed after the stricter source-accounting patch: `python -m unittest tests.test_day_tape_backtest tests.test_contract_status -v`.
+- Python compile passed for `python_app`, `scripts`, and `tests`; full regression harness passed 86 tests; `git diff --check` had only LF-to-CRLF warnings.
+- Guarded live cutover completed through the desktop shortcut after app-data backup `C:\Users\solo leveling\Documents\alpaca trading app\.runtime\pre-live-deploy-backups\20260625T032051Z`.
+- Post-launch live verifier passed with health current, PID `16136`, one listener `[16136]`, three accounts loaded, top-volume rows `25`, and no failures.
+- Rendered UI verifier passed with three rendered account cards and no visible runtime warning.
+Remaining verification:
+- Aggregate contract status still fails only `replay_backtester` because current Alpaca market clocks are closed and the latest tape has fresh `alpaca_most_actives_volume` context but zero market-open strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-051 replay-pending status did not include live clock evidence
+Status: Fixed locally
+Evidence:
+- `scripts/contract_status.py --include-regression --include-backtest` correctly failed `replay_backtester` while waiting for market-open `strategy_scan` evaluations, but the failing category did not show the live account market-clock state that explains why no valid scan can be recorded yet.
+- `scripts/verify_live_contract.py` checked that each account exposed a market clock but only reported a generic detail string.
+Expected behavior:
+- The failing replay category should include sanitized live market-clock evidence so the remaining acceptance gate is auditable from one command.
+Files:
+- `scripts/verify_live_contract.py`
+- `scripts/contract_status.py`
+- `tests/test_live_contract_verifier.py`
+- `tests/test_contract_status.py`
+Fix evidence:
+- Market-clock verifier details now include `is_open`, `status`, and `session` without account identifiers or credentials.
+- When the replay/backtester category fails, aggregate status appends the three account market-clock details to the replay evidence.
+- Focused verifier/status tests passed: `python -m unittest tests.test_live_contract_verifier tests.test_contract_status -v`.
+- Aggregate status now shows `account_1.market_clock`, `account_2.market_clock`, and `account_3.market_clock` as closed directly under the failing `replay_backtester` category.
+Remaining verification:
+- Full replay acceptance still requires a real market-open `strategy_scan` evaluated against `alpaca_most_actives_volume`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-052 aggregate status omitted rendered stale-warning check
+Status: Fixed locally
+Evidence:
+- `scripts/verify_ui_display.py` emits checks for rendered runtime-warning state, including `ui.stale_runtime_warning_hidden` when `/api/health.current=True`.
+- `scripts/contract_status.py` only used rendered UI checks for Daily P/L fields and did not include the runtime-warning checks in any aggregate category.
+Expected behavior:
+- The aggregate contract status should explicitly include the rendered runtime-warning state because the acceptance contract requires normal launch not to show stale runtime warnings.
+Files:
+- `scripts/contract_status.py`
+- `tests/test_contract_status.py`
+- `README.md`
+Required verification:
+- Aggregate status tests must prove a current backend with a stale runtime warning visible fails a dedicated rendered runtime-warning category.
+- Full regression must pass after the category mapping change.
+Fix evidence:
+- `scripts/contract_status.py` now includes a `runtime_warning_rendered` category using `ui.runtime_warning_visible` plus the appropriate stale-runtime warning visibility check from `scripts/verify_ui_display.py`.
+- `tests/test_contract_status.py` now proves a current backend with a stale runtime warning visible fails that aggregate category.
+- Focused status tests passed: `python -m unittest tests.test_contract_status -v`.
+- Full regression harness passed 90 tests; Python compile passed; `git diff --check` had only LF-to-CRLF warnings.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-053 aggregate status did not map categories to current acceptance bullets
+Status: Fixed locally
+Evidence:
+- `scripts/contract_status.py` reported technical categories but did not directly map them to the objective file's current acceptance standard bullets.
+- That made final completion auditing depend on a manual mapping from categories to acceptance items.
+Expected behavior:
+- The aggregate status should include a sanitized acceptance summary that maps the current acceptance standard to existing evidence categories without weakening any underlying gate.
+Files:
+- `scripts/contract_status.py`
+- `tests/test_contract_status.py`
+Fix evidence:
+- `scripts/contract_status.py` now builds an `acceptance` section with items for shortcut launch, no visible terminal/self-contained launcher behavior, expected backend URL, stale-warning absence, single active backend, retained `instance.json`, account loading/surfaces, Daily P/L correctness, sizing-mode conflicts, Alpaca top-25 universe, backtester strategy alignment, and regression checks.
+- The top-level command `ok` still reflects requested categories; the new `summary.acceptance_ok` and `acceptance` list show whether the full current acceptance standard is proven.
+- `tests/test_contract_status.py` now covers acceptance mapping, including missing regression/backtest evidence when those checks are not requested.
+- A live `scripts\contract_status.py --include-regression --include-backtest` run now shows all acceptance items passing except `backtester_uses_same_strategy_logic`, which is still waiting on real market-open `alpaca_most_actives_volume` strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-054 replay-pending clock evidence omitted next open/close
+Status: Fixed locally
+Evidence:
+- `scripts/contract_status.py --include-regression --include-backtest` reported the three account market clocks as closed under the failing `replay_backtester` category, but did not include the next Alpaca open/close time already exposed by `/api/state`.
+- The remaining acceptance blocker depends on a real market-open `strategy_scan`, so the status output should show when the next eligible market window begins.
+Expected behavior:
+- The sanitized market-clock detail should include `is_open`, `status`, `session`, `next_open`, and `next_close` without account identifiers, credentials, or raw settings.
+Files:
+- `scripts/verify_live_contract.py`
+- `tests/test_live_contract_verifier.py`
+- `tests/test_contract_status.py`
+Fix evidence:
+- `scripts/verify_live_contract.py` now includes `next_open` and `next_close` in per-account market-clock check details when the backend exposes them.
+- `tests/test_live_contract_verifier.py` covers the added market-clock detail fields.
+- `tests/test_contract_status.py` covers that a replay-pending aggregate includes next-open evidence in the replay failure category.
+Verification:
+- Focused verifier/status tests passed: `python -m unittest tests.test_live_contract_verifier tests.test_contract_status -v` ran 20 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- Live `scripts/verify_live_contract.py` passed with one listener, three accounts loaded, top-volume rows `25`, and no failures.
+- `scripts/contract_status.py --include-regression --include-backtest` still fails only `replay_backtester`; the failure now includes all three closed account clocks with `next_open=Jun 25, 08:30 AM Central Daylight Time` and `next_close=Jun 25, 03:00 PM Central Daylight Time`.
+Remaining verification:
+- Full replay acceptance still requires a real market-open `strategy_scan` evaluated against `alpaca_most_actives_volume`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-055 aggregate status omitted layout contract evidence
+Status: Fixed locally
+Evidence:
+- The objective requires no whole-page horizontal overflow at normal desktop widths and says layout verification must use rendered/browser behavior where practical.
+- `scripts/check_frontend_layout.py` already produced viewport evidence for 1024px, 1100px, and the launcher default width, but `scripts/contract_status.py` did not run it or include a layout category.
+- `scripts/live_cutover.py --execute` also built its final aggregate without the layout gate.
+Expected behavior:
+- The all-up contract status and guarded cutover aggregate should include layout evidence, including no whole-page horizontal overflow and local table scrolling.
+Files:
+- `scripts/contract_status.py`
+- `scripts/live_cutover.py`
+- `tests/test_contract_status.py`
+- `tests/test_live_cutover.py`
+- `README.md`
+Fix evidence:
+- `scripts/contract_status.py` now runs `scripts/check_frontend_layout.py` by default and adds a `layout_contract` category plus `layout_no_horizontal_overflow` acceptance item.
+- `scripts/live_cutover.py --execute` now includes `run_layout_check()` in its final aggregate.
+- `tests/test_contract_status.py` covers the layout evidence summary and missing-layout acceptance failure.
+- `tests/test_live_cutover.py` covers that execute mode passes layout evidence into the final aggregate.
+- README now states that full acceptance and execute-mode aggregate status include layout evidence.
+Verification:
+- Focused status/cutover/frontend-layout tests passed: `python -m unittest tests.test_contract_status tests.test_live_cutover tests.test_frontend_state_layout -v` ran 21 tests.
+- Standalone `scripts/check_frontend_layout.py` passed with `whole_page_horizontal_overflow=false` and `tables_scroll_locally=true` at 1024px, 1100px, and 1280px.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `layout_contract: ok` and `layout_no_horizontal_overflow: ok`.
+Remaining verification:
+- Full aggregate status still fails only `replay_backtester`, pending real market-open `alpaca_most_actives_volume` strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-056 paper-only safety was not an explicit acceptance item
+Status: Fixed locally
+Evidence:
+- The objective has a core safety boundary that the app is paper trading only.
+- `scripts/verify_live_contract.py` already emitted `backend.paper_only`, and `scripts/contract_status.py` included it inside `backend_currentness`, but the acceptance list did not show a dedicated paper-only safety item.
+- A final status could therefore bury the paper-only proof inside a broader backend bucket instead of making the safety boundary auditable on its own.
+Expected behavior:
+- The all-up contract status and guarded cutover aggregate should explicitly show paper-only broker safety as an acceptance item.
+Files:
+- `scripts/contract_status.py`
+- `tests/test_contract_status.py`
+Fix evidence:
+- `scripts/contract_status.py` now adds a `paper_trading_safety` category from `backend.paper_only`.
+- The acceptance list now includes `paper_trading_only`.
+- `tests/test_contract_status.py` covers both the passing acceptance mapping and the failure path when the health paper-only contract is missing.
+Verification:
+- Focused status tests passed: `python -m unittest tests.test_contract_status -v` ran 11 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `paper_trading_safety: ok` and `paper_trading_only: ok`.
+Remaining verification:
+- Full aggregate status still fails only `replay_backtester`, pending real market-open `alpaca_most_actives_volume` strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-057 aggregate status omitted app-data preservation evidence
+Status: Fixed locally
+Evidence:
+- The objective requires saved credentials, settings, logs, day tape, replay data, and dashboard cache to be preserved.
+- `scripts/pre_live_backup.py` and `scripts/live_cutover.py` already implemented the guarded backup-before-stop path, but `scripts/contract_status.py` did not include a preservation category or acceptance item.
+- The all-up status could therefore show live/UI/layout/regression/replay status while omitting whether a safe backup plan covers the local app data needed before any restart.
+Expected behavior:
+- The aggregate contract status and guarded cutover final aggregate should include sanitized app-data preservation evidence without printing credential contents, account IDs, or setting payloads.
+Files:
+- `scripts/contract_status.py`
+- `scripts/live_cutover.py`
+- `tests/test_contract_status.py`
+- `tests/test_live_cutover.py`
+- `README.md`
+Fix evidence:
+- `scripts/contract_status.py` now adds `run_app_data_preservation_check()`, an `app_data_preservation` category, and `saved_app_data_preserved` acceptance item.
+- The preservation check verifies that the backup plan covers `python-settings.json`, `instance.json`, `dashboard-cache.json`, `replay`, and `day-tape`, and that destination disk space is sufficient.
+- `scripts/live_cutover.py --execute` now passes preservation evidence into its final aggregate.
+- `tests/test_contract_status.py` covers complete and missing preservation plans.
+- `tests/test_live_cutover.py` covers that execute mode passes preservation evidence into the final aggregate.
+- README now states that full acceptance includes app-data preservation.
+Verification:
+- Focused status/cutover/backup tests passed: `python -m unittest tests.test_contract_status tests.test_live_cutover tests.test_pre_live_backup -v` ran 21 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `app_data_preservation: ok` and `saved_app_data_preserved: ok`.
+Remaining verification:
+- Full aggregate status still fails only `replay_backtester`, pending real market-open `alpaca_most_actives_volume` strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-058 aggregate status omitted market-stream health evidence
+Status: Fixed locally
+Evidence:
+- The objective requires live market data through Alpaca, a shared market stream with needed symbols, actionable stream errors, and no benign shutdown noise as runtime warnings.
+- `scripts/verify_live_contract.py` only checked that account dashboard payloads included a `market_stream` object as part of the broad dashboard-surface check.
+- `scripts/contract_status.py` did not have a dedicated market-data stream category or acceptance item.
+Expected behavior:
+- The live verifier and aggregate status should explicitly prove that the market-stream health surface exists, has no current error, and covers the dashboard top-volume symbols with bar subscriptions.
+Files:
+- `scripts/verify_live_contract.py`
+- `scripts/contract_status.py`
+- `tests/test_live_contract_verifier.py`
+- `tests/test_contract_status.py`
+- `README.md`
+Fix evidence:
+- `scripts/verify_live_contract.py` now emits sanitized `market_stream.surface`, `market_stream.status`, `market_stream.error`, `market_stream.dashboard_symbols`, and `market_stream.bar_symbols` checks without printing account identifiers or names.
+- `scripts/contract_status.py` now adds a `market_data_stream` category and `market_data_stream_healthy` acceptance item.
+- `tests/test_live_contract_verifier.py` covers stream error and subscription-count failures.
+- `tests/test_contract_status.py` covers the aggregate category failure path.
+- README now states that full acceptance includes market-data stream health.
+Verification:
+- Focused verifier/status tests passed: `python -m unittest tests.test_live_contract_verifier tests.test_contract_status -v` ran 26 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- Live `scripts/verify_live_contract.py` passed with one backend listener, three accounts loaded, and no failures.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `market_data_stream: ok` and `market_data_stream_healthy: ok`.
+Remaining verification:
+- Full aggregate status still fails only `replay_backtester`, pending real market-open `alpaca_most_actives_volume` strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-059 aggregate status omitted audit/build-note evidence
+Status: Fixed locally
+Evidence:
+- The objective requires discovered defects to be logged, build notes to be retrievable for weekly rollup, and audit/build notes not to expose credentials or account IDs.
+- The audit file existed and was actively maintained, but `scripts/contract_status.py` did not include an audit/build-note category or acceptance item.
+- The final aggregate could therefore prove live/UI/layout/preservation/stream/regression/replay status while omitting the audit-log requirement.
+Expected behavior:
+- The all-up contract status and guarded cutover aggregate should include a sanitized audit-log proof that the audit file exists, contains structured AUDIT entries, includes verification language, and does not match obvious credential/account-id token patterns.
+Files:
+- `scripts/contract_status.py`
+- `scripts/live_cutover.py`
+- `tests/test_contract_status.py`
+- `tests/test_live_cutover.py`
+- `README.md`
+Fix evidence:
+- `scripts/contract_status.py` now adds `run_audit_log_check()`, an `audit_logging` category, and `audit_build_notes_retrievable` acceptance item.
+- The audit check verifies structured audit terms and scans for Alpaca-key-like tokens, 32-hex tokens, and JSON-style secret assignments without printing any matched values.
+- `scripts/live_cutover.py --execute` now passes audit evidence into its final aggregate.
+- `tests/test_contract_status.py` covers both a structured sanitized audit file and a sensitive-token failure.
+- `tests/test_live_cutover.py` covers that execute mode passes audit evidence into the final aggregate.
+- README now states that full acceptance includes audit/build-note evidence.
+Verification:
+- Focused status/cutover tests passed: `python -m unittest tests.test_contract_status tests.test_live_cutover -v` ran 21 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `audit_logging: ok` and `audit_build_notes_retrievable: ok`.
+Remaining verification:
+- Full aggregate status still fails only `replay_backtester`, pending real market-open `alpaca_most_actives_volume` strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-060 aggregate status omitted frontend state-coordination evidence
+Status: Fixed locally
+Evidence:
+- The objective requires account switching to cancel or ignore stale async responses and settings auto-save not to write stale account data into the wrong account.
+- `tests/test_frontend_state_layout.py::FrontendStateCoordinationTests` covered account-scoped request guards, stale response guards, latest-only health rendering, account-switch invalidation, and guarded auto-save behavior.
+- `scripts/contract_status.py` only surfaced this through the broad regression harness rather than a dedicated acceptance category.
+Expected behavior:
+- The all-up contract status and guarded cutover aggregate should include a named frontend state-coordination proof for account switching and settings auto-save safety.
+Files:
+- `scripts/contract_status.py`
+- `scripts/live_cutover.py`
+- `tests/test_contract_status.py`
+- `tests/test_live_cutover.py`
+- `README.md`
+Fix evidence:
+- `scripts/contract_status.py` now adds `run_frontend_state_coordination_check()`, a `frontend_state_coordination` category, and `account_switching_async_safe` acceptance item.
+- The focused check runs `tests.test_frontend_state_layout.FrontendStateCoordinationTests`.
+- `scripts/live_cutover.py --execute` now includes frontend state-coordination evidence in its final aggregate.
+- `tests/test_contract_status.py` covers pass/fail behavior and missing-acceptance behavior.
+- `tests/test_live_cutover.py` covers that execute mode passes frontend state evidence into the final aggregate.
+- README now states that full acceptance includes account-switching/autosave guards.
+Verification:
+- Focused status/cutover/frontend-state tests passed: `python -m unittest tests.test_contract_status tests.test_live_cutover tests.test_frontend_state_layout -v` ran 29 tests.
+- Standalone focused frontend state check passed: `python -m unittest tests.test_frontend_state_layout.FrontendStateCoordinationTests -v` ran 4 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `frontend_state_coordination: ok` and `account_switching_async_safe: ok`.
+Remaining verification:
+- Full aggregate status still fails only `replay_backtester`, pending real market-open `alpaca_most_actives_volume` strategy-scan evaluations.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-043 held-position bars were subscribed but not ingested for strategy management
+Status: Fixed locally; final live pass still requires approved cutover
+Observed behavior:
+- `TraderEngine.scan_symbols()` correctly included the current entry universe, held position symbols, and market proxy symbols.
+- `TraderManager.market_data_symbols()` could subscribe the shared market stream to held positions outside the top-volume universe.
+- `TraderEngine.ingest_market_bar()` only called `strategy_state.add_bar()` for current top-volume symbols or manual config symbols, so a held position that fell out of top 25 could receive stream bars but not update the strategy snapshot used by exit/management logic.
+Expected behavior:
+- New entries must remain limited to the current Alpaca top-25 volume universe unless explicitly overridden.
+- Held positions must continue receiving strategy-state bars for monitoring and exits even after they leave the top-25 entry universe.
+- Market proxy symbols included by `scan_symbols()` should also update their strategy history when bars arrive.
+Code pointer:
+- `python_app/alpaca_desktop/engine.py::TraderEngine.ingest_market_bar()`.
+Impact:
+- The app could satisfy the subscription side of the held-position requirement while still managing exits from stale strategy snapshots for symbols no longer in top volume.
+Fix evidence:
+- `TraderEngine.ingest_market_bar()` now checks the full `scan_symbols()` set before updating strategy history, preserving top-25-only entry selection while ingesting bars for held positions and market proxies.
+- Added regression coverage that a held `AAPL` position outside `top_volume_symbols` updates its snapshot when a market bar arrives.
+- Added regression coverage that `SPY` market-proxy bars update strategy history in top-volume mode.
+Verification:
+- Focused market-stream baseline tests passed: `python -m unittest tests.test_regression_baselines.MarketStreamBaselineTests -v`.
+- Full regression passed: `python scripts/run_regression_tests.py` ran 75 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- JavaScript syntax check passed: `node --check python_app\static\app.js`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-044 Daily P/L session date used workstation date instead of Alpaca market clock date
+Status: Fixed locally; final live pass still requires approved cutover
+Observed behavior:
+- The contract requires each account's own Alpaca market clock/session date to define "today" for Daily P/L.
+- `TraderEngine.refresh()` set `daily_pl_session_date` from `datetime.now().astimezone().date()`.
+- `TraderEngine.daily_realized_pl_summary()` also filtered realized sells against the workstation's local date.
+- `TraderEngine.format_market_clock()` exposed open/closed status and next open/close, but not the clock timestamp's session date.
+Expected behavior:
+- Daily P/L and realized Daily P/L should carry the account's Alpaca clock-derived session date when a market clock is available.
+- Prior-day activity should be excluded relative to the account market-clock session date, not merely the workstation date.
+Code pointer:
+- `python_app/alpaca_desktop/engine.py::TraderEngine.refresh()`.
+- `python_app/alpaca_desktop/engine.py::TraderEngine.format_market_clock()`.
+- `python_app/alpaca_desktop/engine.py::TraderEngine.daily_realized_pl_summary()`.
+Impact:
+- Near date boundaries, the app could label or filter Daily P/L using the local machine date instead of the account's Alpaca market-clock date, weakening the P/L acceptance proof.
+Fix evidence:
+- `format_market_clock()` now includes `session_date` derived from the Alpaca clock timestamp when available.
+- `refresh()` now uses `market_clock["session_date"]` for `daily_pl_session_date`.
+- `daily_realized_pl_summary()` now accepts the session date and filters sells against that date.
+- `standardized_account_metrics()` now uses the engine's market-clock `session_date` as the fallback when account P/L fields do not already include one.
+- Added regression coverage for clock session-date payload, standardized P/L fallback, and realized-P/L filtering by supplied session date.
+Verification:
+- Focused P/L and market-stream tests passed: `python -m unittest tests.test_regression_baselines.ProfitLossContractBaselineTests tests.test_regression_baselines.MarketStreamBaselineTests -v`.
+- Full regression passed: `python scripts/run_regression_tests.py` ran 75 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- JavaScript syntax check passed: `node --check python_app\static\app.js`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-045 unavailable P/L fallback rendered as fake zero
+Status: Fixed locally; final live pass still requires approved cutover
+Observed behavior:
+- The contract says missing or unavailable P/L must display as unavailable/loading, not fake zero.
+- `TraderEngine.standardized_account_metrics()` defaulted missing Daily P/L fields to numeric zero values.
+- The UI Daily P/L helper defaulted missing amount and percent to `$0.00 (0.00%)`.
+Expected behavior:
+- When no account/equity/P&L source fields are present, the backend should expose an unavailable state instead of manufacturing zero P/L.
+- Connected accounts must still expose real raw/display/source fields and fail verification if those fields are missing.
+Code pointer:
+- `python_app/alpaca_desktop/engine.py::TraderEngine.standardized_account_metrics()`.
+- `python_app/static/app.js::dailyPlDisplay()`.
+- `python_app/static/app.js::renderRealizedPlMetric()`.
+Impact:
+- A disconnected or not-yet-loaded account could look flat for the day even though no source data had been loaded.
+Fix evidence:
+- `standardized_account_metrics()` now returns `Unavailable` displays and blank raw fields when no P/L source data exists.
+- The UI metric helpers now render `Unavailable` without appending a fake percent and without assigning positive/negative styling to blank raw values.
+- Existing connected-account verifier checks still require nonblank raw/display fields and source math, so unavailable data cannot pass live acceptance for connected accounts.
+- Updated the empty-account regression to assert unavailable displays and blank raw P/L fields.
+Verification:
+- Focused P/L tests passed: `python -m unittest tests.test_regression_baselines.ProfitLossContractBaselineTests -v`.
+- JavaScript syntax check passed: `node --check python_app\static\app.js`.
+- Full regression passed: `python scripts/run_regression_tests.py` ran 75 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/contract_status.py --include-regression --include-backtest` still fails before cutover only on stale/duplicate backend, old live top-volume universe, and missing fresh `alpaca_most_actives_volume` replay-tape evaluations; `daily_pl_backend`, `daily_pl_rendered_ui`, `sizing_modes`, account surfaces, launcher, runtime diagnostics, and regression harness pass.
+- `scripts/live_cutover.py` dry-run passed without stopping or launching anything, confirmed the backup plan, validated the desktop shortcut, and found the two current repo launcher PIDs `12716` and `11068`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-046 cutover execute could silently preserve saved auto-start trading
+Status: Fixed locally; final live pass still requires approved cutover
+Observed behavior:
+- A sanitized read-only settings check showed 3 saved accounts and 3 saved `auto_start_trading=true` settings.
+- `scripts/live_cutover.py --execute` launched the normal desktop shortcut after backup and process stop without separately surfacing or confirming saved auto-start behavior.
+- The project safety rules require explicit approval before changing or relying on auto-start behavior during trading-app work.
+Expected behavior:
+- Dry-run should show the saved auto-start count before any live action.
+- Execute mode should not proceed past backup into stop/relaunch when saved accounts would auto-start trading unless the user explicitly approved that behavior.
+Code pointer:
+- `scripts/live_cutover.py::run_cutover()`.
+Impact:
+- An operator could approve a backend restart thinking it only refreshes code, while the normal launch path immediately resumes paper trading for all saved auto-start accounts.
+Fix evidence:
+- `scripts/live_cutover.py` now reads only sanitized settings counts and prints an auto-start preflight.
+- Execute mode aborts before process stop/relaunch when `auto_start_trading` is present unless `--allow-auto-start` is supplied.
+- Execute mode also aborts before process stop/relaunch if saved settings cannot be read and auto-start behavior is unknown.
+- README and OPERATING now document the `--allow-auto-start` approval boundary.
+- Added regression coverage for the saved-auto-start abort, unknown-settings abort, and explicit allow paths.
+Verification:
+- Focused cutover tests passed: `python -m unittest tests.test_live_cutover -v`.
+- Full regression passed: `python scripts/run_regression_tests.py` ran 77 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- JavaScript syntax check passed: `node --check python_app\static\app.js`.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/live_cutover.py` dry-run now reports `auto-start trading enabled: 3` and stops short of any process changes.
+- `scripts/contract_status.py --include-regression --include-backtest` still fails before cutover on stale/duplicate backend, old live top-volume universe, and missing fresh `alpaca_most_actives_volume` replay-tape evaluations; `regression_harness` is ok.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-047 live verifier did not prove P/L dates matched account market clock
+Status: Fixed locally; final live pass requires approved cutover and post-relaunch verification
+Observed behavior:
+- AUDIT-044 fixed the backend to carry `market_clock.session_date` into Daily P/L and realized P/L.
+- `scripts/verify_live_contract.py` still only checked Daily P/L field presence and source math, not whether `daily_pl_session_date` or `realized_pl_session_date` matched the selected account's market clock session date.
+- `scripts/contract_status.py` therefore could report `daily_pl_backend: ok` without proving the contract requirement that each account's own Alpaca market clock defines "today."
+Expected behavior:
+- The live verifier should fail if P/L session dates are missing or disagree with the account market-clock session date.
+- The aggregate `daily_pl_backend` category should include that proof for all three accounts.
+Code pointer:
+- `scripts/verify_live_contract.py::check_daily_pl()`.
+- `scripts/contract_status.py::build_categories()`.
+Impact:
+- A post-cutover acceptance report could miss a date-boundary P/L bug even if value math was correct for a mismatched session label.
+Fix evidence:
+- `verify_live_contract.py` now emits `account_N.daily_pl_session_date` and `account_N.realized_pl_session_date` checks that require equality with `selected.market_clock.session_date`.
+- `contract_status.py` now includes those checks in `daily_pl_backend`.
+- Added live-verifier regression coverage for a deliberate market-clock/P&L session-date mismatch.
+Verification:
+- Focused verifier/status tests passed: `python -m unittest tests.test_live_contract_verifier tests.test_contract_status -v`.
+- Full regression passed: `python scripts/run_regression_tests.py` ran 78 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- JavaScript syntax check passed: `node --check python_app\static\app.js`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-038 normal top-volume mode still appended hardcoded inverse ETFs
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The contract requires the live entry universe to come from the current Alpaca top-25 volume source, with no hardcoded live candidate lists unless there is an explicit override.
+- `python_app/alpaca_desktop/engine.py::TraderEngine.active_inverse_symbols()` still appended `SQQQ`, `SPXU`, `SDS`, `SH`, and `TZA` whenever `inverse_etf_mode="allow"` and top-volume mode was enabled.
+- `TraderEngine.trading_symbols()` also allowed `inverse_only` mode to carry the Alpaca top-volume base list plus the inverse set, so the mode was not actually inverse-only.
+- `scripts/verify_live_contract.py` accepted `trading_symbol_count >= 25`, so a 30-symbol top-volume entry universe could pass even though it included five non-Alpaca-top-25 additions.
+Impact:
+- New entries could come from a hardcoded inverse ETF list in normal top-volume mode instead of only from the Alpaca top-25 volume universe.
+- Post-cutover verification could miss that violation because the account-level top-volume check only proved a lower bound.
+Required fix:
+- Keep normal `allow` mode on the Alpaca-returned top-25 only; inverse ETFs remain eligible only if Alpaca returns them in that set.
+- Make `exclude` explicitly block inverse ETF entries and make `inverse_only` use only the bounded inverse set as an explicit override.
+- Tighten live verification so normal top-volume accounts must report exactly the dashboard top-25 symbols, not a larger merged set.
+Fix evidence:
+- `TraderEngine.active_inverse_symbols()` now returns the bounded inverse set only for `inverse_only`.
+- `TraderEngine.trading_symbols()` no longer includes the top-volume base list when `inverse_etf_mode="inverse_only"`.
+- `inverse_etf_hold_reason()` now blocks inverse ETF entries when `inverse_etf_mode="exclude"`.
+- Account `symbol_source` now reports `inverse_only` for that explicit override.
+- The Accounts UI labels now read `Exclude inverse ETFs`, `Allow Alpaca top-25`, and `Inverse set only`.
+- README and `OPERATING.md` now describe inverse ETF behavior as Alpaca-top-25-only in normal mode, with inverse-only as an explicit override.
+- `scripts/verify_live_contract.py` now compares per-account `trading_symbols` to the dashboard top-volume symbols and fails normal top-volume mode if there are extras or missing symbols.
+Verification:
+- Focused inverse/verifier tests passed: `python -m unittest tests.test_regression_baselines.MarketStreamBaselineTests.test_inverse_etf_eligibility_has_no_downturn_gate tests.test_live_contract_verifier -v`.
+- Full `scripts/run_regression_tests.py` passed 65 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- Live `scripts/verify_live_contract.py` now detects the current stale backend's old 30-symbol top-volume universe with five extras for each account; remaining failures are `backend.current`, `backend.single_process`, those account top-volume extras, `top_volume.source`, and `top_volume.cache_seconds`.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports the stricter `top_volume_universe` failures while regression harness and replay backtester still pass.
+Remaining live gate:
+- The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass against a current backend.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-039 rendered UI verifier sampled stale API state before page refresh
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- `scripts/verify_ui_display.py` fetched `/api/state` before launching the headless browser, then compared the rendered DOM against that pre-browser payload.
+- Loading the app page can trigger a state refresh, so fields such as `last_refresh` can legitimately advance before the DOM snapshot is taken.
+- A read-only run of `scripts/verify_ui_display.py` failed only on `ui.lastRefresh` while all Daily P/L, card count, and runtime-warning checks matched.
+Impact:
+- The rendered UI verifier could falsely fail a current UI because it compared the DOM to an older source snapshot, adding noise to the post-cutover acceptance gate.
+Required fix:
+- During the DOM wait loop, re-sample `/api/state` and compare the rendered metric cards and `lastRefresh` against the current API payload used for that iteration.
+Fix evidence:
+- `collect_rendered_payload()` now keeps the initial account-count target but refreshes `/api/state` on each DOM sample and returns the state payload that matches the rendered `dailyPl` and `lastRefresh`.
+Verification:
+- `scripts/verify_ui_display.py` now passes against the current stale backend, with the stale runtime warning visible as expected.
+- Focused UI verifier tests passed: `python -m unittest tests.test_ui_display_verifier -v`.
+- Python compile passed for `scripts\verify_ui_display.py` and `tests\test_ui_display_verifier.py`.
+Remaining live gate:
+- The rendered UI verifier still needs to pass after the approved live cutover with `health.current=True` and no stale-runtime warning.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-042 paper-only broker contract was not exposed to live verification
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The contract requires paper trading only and says the app must never start live trading.
+- `TraderEngine.connect()` constructed Alpaca `TradingClient(..., paper=True)`, but `/api/health` did not expose any non-sensitive paper-only contract flag.
+- `scripts/verify_live_contract.py` therefore could not prove after cutover that the running backend advertises paper-only broker mode.
+Impact:
+- A post-cutover live contract report could pass backend currentness, account loading, P/L, sizing, and top-volume checks without explicitly proving the paper-only safety contract.
+Required fix:
+- Expose a non-secret paper-only broker flag in health.
+- Require the live verifier and aggregate status to fail if that paper-only contract is missing.
+- Add regression coverage that the connect path still constructs the Alpaca trading client with `paper=True`.
+Fix evidence:
+- `/api/health` now includes `paper_trading_only: true` and `broker_mode: "paper"`.
+- `scripts/verify_live_contract.py` now adds `backend.paper_only`.
+- `scripts/contract_status.py` includes `backend.paper_only` in `backend_currentness`.
+- `tests.test_regression_baselines.ServerContractTests` verifies both the health payload and `TraderEngine.connect()` constructing the trading client with `paper=True` using fake clients.
+- `tests.test_live_contract_verifier.LiveContractVerifierTests.test_missing_paper_only_health_contract_fails` covers the live verifier failure path.
+Verification:
+- Focused paper/verifier/status tests passed: `python -m unittest tests.test_regression_baselines.ServerContractTests tests.test_live_contract_verifier tests.test_contract_status -v`.
+- Python compile passed for the touched health/verifier/status/test files.
+Remaining live gate:
+- The current running backend is stale, so `backend.paper_only` will remain failed until approved cutover loads the updated health endpoint.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-040 replay aggregate passed old top-volume source evidence
+Status: Fixed locally; final live pass still requires approved cutover and fresh expected-source replay evidence
+Evidence:
+- The acceptance contract requires the backtester to replay the same top-25-by-volume candidate universe logic used by the fixed live app.
+- `scripts/contract_status.py --include-regression --include-backtest` was passing the `replay_backtester` category as long as day tape had any top-volume snapshots, evaluations, rejections, zero parse errors, and the fixed sizing harness.
+- A real read-only `scripts/day_tape_backtest.py --days 1 --max-events 50000 --json` run showed `top_volume_sources=["sp500_snapshot_volume"]`, so the passing replay category was based on pre-fix source data.
+Impact:
+- The aggregate status could claim replay/backtester evidence passed even though the selected tape did not contain any evaluations using the required `alpaca_most_actives_volume` source.
+Required fix:
+- Track which top-volume source is active for each replay evaluation.
+- Require the aggregate replay category to include at least one evaluation under `alpaca_most_actives_volume`.
+Fix evidence:
+- `scripts/day_tape_backtest.py` now records `expected_top_volume_source`, `evaluations_by_top_volume_source`, and each accepted trade's `top_volume_source`.
+- `scripts/contract_status.py` now fails `replay_backtester` unless `alpaca_most_actives_volume` appears in the tape sources and has at least one strategy evaluation.
+- The human day-tape backtest output now prints the expected-source evaluation count.
+- README now states that older `sp500_snapshot_volume` tape remains diagnostic only and does not satisfy the post-fix source contract.
+- Added focused tests for source attribution in `tests/test_day_tape_backtest.py` and the legacy-source aggregate failure in `tests/test_contract_status.py`.
+Verification:
+- Focused replay tests passed: `python -m unittest tests.test_day_tape_backtest tests.test_contract_status -v`.
+- Python compile passed for the touched replay/status files.
+- `scripts/contract_status.py --include-regression --include-backtest` now fails `replay_backtester` on the current real tape with `top_volume_sources=sp500_snapshot_volume` and `alpaca_most_actives_volume_evaluations=0`, which is the expected pre-cutover result.
+Remaining live gate:
+- The aggregate status is expected to remain failed until the approved cutover runs the current app and a market-hours tape records at least one `alpaca_most_actives_volume` strategy evaluation.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-041 cutover success and full replay acceptance needed separate outcomes
+Status: Fixed locally; final full acceptance still requires approved cutover and fresh expected-source replay evidence
+Evidence:
+- AUDIT-040 made the full aggregate correctly fail when the only available tape contains old `sp500_snapshot_volume` replay evaluations.
+- `scripts/live_cutover.py --execute` runs that aggregate immediately after backup, relaunch, live verifier, UI verifier, regression, and backtest.
+- If the command is run outside market hours or before fresh post-fix tape exists, the live app can be successfully deployed and verified while the full aggregate remains failed only on `replay_backtester`.
+Impact:
+- A successful backup/stop/shortcut-launch/live-verification operation could exit as a generic failure solely because fresh expected-source day tape is not available yet, encouraging unnecessary repeated restarts.
+Required fix:
+- Keep full contract acceptance strict, but make the cutover command report deployment success separately when the only remaining category is fresh replay tape evidence.
+Fix evidence:
+- `scripts/live_cutover.py` now keeps the aggregate report as `ok: False` when `replay_backtester` is pending, but returns cutover success with a clear message if every live deployment gate passed and only fresh replay tape is missing.
+- README now documents that cutover can complete while full acceptance remains pending until market-hours tape records `alpaca_most_actives_volume`.
+- Added `tests.test_live_cutover.LiveCutoverTests.test_execute_reports_success_when_only_fresh_replay_tape_is_pending`.
+Verification:
+- Focused cutover/status tests passed: `python -m unittest tests.test_live_cutover tests.test_contract_status -v`.
+- Full `scripts/run_regression_tests.py` passed 67 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+Verification still needed:
+- Re-run read-only `scripts/live_cutover.py` dry-run and full `contract_status.py --include-regression --include-backtest`.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-037 desktop launcher aggregate under-checked no-window/app-mode launcher contract
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The acceptance contract requires desktop launch from shortcut, self-contained app opening, and no visible terminal windows.
+- `scripts/test_runtime_currentness.py` covered VBS source behavior for hidden `pythonw --no-browser` launch and Edge `--app=` mode, but `scripts/contract_status.py` only represented this as `desktop_launcher: shortcut.path`.
+- `scripts/verify_live_contract.py` did not emit separate live/status checks for VBS health-currentness, hidden backend launch, hidden smoke check, or Edge app-mode behavior.
+Impact:
+- A final aggregate status could show `desktop_launcher: ok` from a valid `.lnk` even if the VBS script stopped honoring the no-window/self-contained app launch contract.
+Required fix:
+- Add sanitized launcher-source checks to the live verifier and include them in the `desktop_launcher` aggregate category.
+Fix evidence:
+- `scripts/verify_live_contract.py` now inspects `Launch Alpaca Paper Trader.vbs` and emits separate checks for VBS presence, `/api/health` currentness validation, hidden backend launch with `--no-browser`, hidden startup smoke check, and Edge `--app=` mode.
+- `scripts/contract_status.py` now requires those launcher checks in the `desktop_launcher` category, alongside the desktop shortcut metadata check.
+- Added regression coverage proving missing hidden-backend or Edge app-mode launcher checks fail the live verifier and that the aggregate category includes the launcher checks.
+Verification:
+- Focused tests passed: `python -m unittest tests.test_live_contract_verifier tests.test_contract_status -v`.
+- Live `scripts/verify_live_contract.py` passed the new launcher checks against the current checkout; remaining failures were only `backend.current`, `backend.single_process`, `top_volume.source`, and `top_volume.cache_seconds`.
+- Full `scripts/run_regression_tests.py` passed 64 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `desktop_launcher: ok` from shortcut plus explicit VBS no-window/app-mode/currentness checks; it still fails as expected before cutover with only `backend_currentness` and `top_volume_universe` failing.
+- `scripts/live_cutover.py` dry-run passed without stopping or launching anything, confirmed the backup plan, validated the desktop shortcut, and found the two current repo launcher PIDs `12716` and `11068`.
+Remaining live gate:
+- The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-036 live cutover aggregate omitted regression harness
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The acceptance standard explicitly includes "Regression checks pass."
+- `scripts/contract_status.py --include-regression --include-backtest` can include regression evidence, but `scripts/live_cutover.py --execute` built its final aggregate with `regression_result=None` and printed `regression_included: False`.
+- The guarded live cutover command is the final backup/stop/shortcut-launch/verify path, so its final status should include the regression gate.
+Impact:
+- An approved cutover could report a final aggregate pass from live/UI/backtest checks while omitting the required regression-harness evidence from the same final proof.
+Required fix:
+- Run the isolated regression harness in execute-mode final aggregation, pass that result into `contract_status.build_categories()`, and mark `regression_included=True` in the cutover summary.
+Fix evidence:
+- `scripts/live_cutover.py --execute` now runs `contract_status.run_regression()` before the final aggregate.
+- The execute-mode final aggregate now passes the regression result into `contract_status.build_categories()` and prints `regression_included: True`.
+- README now states that the approved execute path includes the isolated regression harness and bounded read-only day-tape backtest.
+- `tests/test_live_cutover.py` now proves execute mode calls the regression harness and passes both regression and backtest results into the final aggregate.
+Verification:
+- Focused tests passed: `python -m unittest tests.test_live_cutover tests.test_contract_status -v`.
+- Full `scripts/run_regression_tests.py` passed 63 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/contract_status.py --include-regression --include-backtest` still reports `regression_harness: ok` and `replay_backtester: ok`; it fails as expected before cutover with only `backend_currentness` and `top_volume_universe` failing.
+- `scripts/live_cutover.py` dry-run passed without stopping or launching anything, confirmed the backup plan, validated the desktop shortcut, and found the two current repo launcher PIDs `12716` and `11068`.
+Remaining live gate:
+- The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-035 live verifier under-checked per-account state surfaces
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The contract requires each account to show its own positions, orders, dashboard, logs, market clock, trading state, and P/L, with connected/trading-enabled/market-clock state accurate per account.
+- `scripts/verify_live_contract.py` checked account count, connected state, market-clock presence, Daily P/L math, sizing mode, and top-volume universe, but did not fail if `trading_enabled` was missing/not boolean or if per-account positions, orders, logs, replay, or dashboard payloads were absent.
+- `scripts/contract_status.py` summarized `accounts_loaded` but did not include a per-account state-surface category.
+Impact:
+- A post-cutover status could pass account count and P/L checks while still missing one of the account-specific UI/API surfaces required by the contract.
+Required fix:
+- Add sanitized per-account checks for `trading_enabled` boolean, market-clock shape, positions list, orders list, logs list, replay payload, and dashboard payload.
+- Add an aggregate status category so these account-surface checks are visible in `contract_status.py` and the guarded cutover summary.
+Fix evidence:
+- `scripts/verify_live_contract.py` now fetches `/api/dashboard?account_id=...` for every account in addition to per-account `/api/state`.
+- The live verifier now checks each account's `trading_enabled` boolean, market-clock `is_open/status` shape, positions/orders/protection/trade-history/order-intents/strategy/logs lists, replay path/events payload, and account-specific dashboard surface.
+- `scripts/contract_status.py` now includes an `account_state_surfaces` category that groups those per-account state checks in the aggregate status and guarded cutover summary.
+- Added regression coverage for missing per-account surfaces and for the aggregate category mapping.
+Verification:
+- Focused verifier tests passed: `python -m unittest tests.test_live_contract_verifier tests.test_contract_status -v`.
+- Live `scripts/verify_live_contract.py` passed the new account-surface checks against the current running app; remaining failures were only `backend.current`, `backend.single_process`, `top_volume.source`, and `top_volume.cache_seconds`.
+- Full `scripts/run_regression_tests.py` passed 63 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/contract_status.py --include-regression --include-backtest` now reports `account_state_surfaces: ok`; it still fails as expected before cutover with only `backend_currentness` and `top_volume_universe` failing.
+- `scripts/live_cutover.py` dry-run passed without stopping or launching anything, confirmed the backup plan, validated the desktop shortcut, and found the two current repo launcher PIDs `12716` and `11068`.
+Remaining live gate:
+- The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-033 aggregate status omitted replay/backtester evidence
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The acceptance contract requires strategy verification to use replay/backtester evidence, and the current acceptance standard includes "Backtester uses the same strategy logic."
+- `scripts/contract_status.py` aggregated live API, rendered UI, sizing, top-volume, runtime diagnostics, and optional regressions, but did not include a category for a bounded day-tape backtest run.
+- `scripts/live_cutover.py` printed an aggregate post-launch status from live and UI reports only, so a post-relaunch pass could still omit the replay/backtester gate.
+Impact:
+- The final status command could report all visible live categories as passing while the strategy replay acceptance evidence remained separate and easy to miss.
+Required fix:
+- Add an optional bounded read-only day-tape backtest check to `scripts/contract_status.py`, with evidence that it uses `selection_engine=app_engine`, the fixed replay sizing harness, recorded top-volume snapshots, evaluations, rejected-candidate reporting, and zero parse errors.
+- Include the bounded backtest category in the guarded cutover execute aggregate without making any Alpaca API calls or app-data writes.
+Fix evidence:
+- `scripts/contract_status.py` now supports `--include-backtest`, `--backtest-days`, and `--backtest-max-events`.
+- The backtest status category runs `scripts/day_tape_backtest.py` in-process against the latest local day tape, defaults to a bounded 50,000-event read-only pass, and checks `selection_engine=app_engine`, the fixed `$1000`/20-slot/5% replay sizing harness, top-volume snapshots, evaluations, rejected-candidate reporting, zero parse errors, and winner/loser indicator report fields.
+- `scripts/live_cutover.py --execute` now includes the bounded backtest result in its final aggregate contract status after backup, shortcut launch, live API verification, and rendered UI verification.
+- README now documents `scripts/contract_status.py --include-regression --include-backtest` and notes that cutover execute includes the bounded replay category.
+- Added regression coverage for the backtest status pass/fail contract and the cutover execute call into the backtest check.
+Verification:
+- Focused tests passed: `python -m unittest tests.test_contract_status tests.test_live_cutover -v`.
+- Full `scripts/run_regression_tests.py` passed 60 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/day_tape_backtest.py --days 1 --max-events 50000` completed read-only with `selection_engine: app_engine`, 230 evaluations, 6,900 rejected candidates, zero parse errors, and the fixed replay sizing harness. The latest available tape is still pre-cutover and reports recorded source `sp500_snapshot_volume`; live Alpaca screener source remains verified separately by the live top-volume category after cutover.
+- `scripts/contract_status.py --include-regression --include-backtest` failed as expected before cutover with only `backend_currentness` and `top_volume_universe` failing; `replay_backtester`, desktop launcher, `instance_json`, accounts, backend Daily P/L, rendered UI Daily P/L, sizing modes, runtime diagnostics, and regression harness all passed.
+- `scripts/live_cutover.py` dry-run passed without stopping or launching anything, confirmed the backup plan, validated the desktop shortcut, and found the two current repo launcher PIDs `12716` and `11068`.
+Remaining live gate:
+- The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass. A fresh post-cutover market-hours tape will be needed before the day-tape backtest itself can show recorded `alpaca_most_actives_volume` source rows.
+
+### 2026-06-25 - Goal continuation finding: AUDIT-034 rendered UI verifier did not prove stale-warning absence after current launch
+Status: Fixed locally; final live pass still requires approved cutover
+Evidence:
+- The acceptance contract requires normal launch not to show stale runtime warnings.
+- `scripts/verify_ui_display.py` only checked that `runtimeWarningVisible` was a boolean, so it could pass even if a stale-runtime banner remained visible after `/api/health` reported `current=True`.
+- `python_app/static/index.html` used a static `Stale runtime warning` banner title even though `renderRuntimeHealth()` can also show settings or runtime diagnostics for a current backend.
+Impact:
+- A post-cutover UI could falsely show a stale-runtime warning or mislabeled current-runtime diagnostic while the rendered UI verifier still passed.
+Required fix:
+- Make the runtime warning title dynamic: stale backend, settings warning, runtime warning, or health-unavailable.
+- Teach `scripts/verify_ui_display.py` to fetch `/api/health` and assert that a stale-runtime warning is visible only when health is stale, and hidden/not stale when health is current.
+Fix evidence:
+- `python_app/static/index.html` now gives the runtime warning title its own `#runtimeHealthTitle` element instead of hardcoding every warning as `Stale runtime warning`.
+- `python_app/static/app.js` now sets the warning title to `Stale runtime warning`, `Settings warning`, `Runtime warning`, or `Runtime health unavailable` based on the actual health state.
+- `scripts/verify_ui_display.py` now fetches `/api/health`, captures the rendered warning title from the DOM, and requires stale-warning visibility to match health currentness: stale health must show a stale warning; current health must not.
+- `tests/test_ui_display_verifier.py` now covers the current-backend stale-warning failure case and the stale-backend visible-warning pass case.
+Verification:
+- Focused rendered UI verifier tests passed: `python -m unittest tests.test_ui_display_verifier -v`.
+- Live `scripts/verify_ui_display.py` passed against the current stale backend because `/api/health` reported `current=False` and the rendered UI showed `Stale runtime warning`.
+- Full `scripts/run_regression_tests.py` passed 62 tests.
+- Python compile passed for `python_app`, `scripts`, and `tests`.
+- `node --check python_app\static\app.js` passed.
+- `git diff --check` passed with only Git's LF-to-CRLF normalization warnings.
+- `powershell -ExecutionPolicy Bypass -File .\.codex\setup-worktree.ps1 -SmokeOnly` passed.
+- `scripts/check_frontend_layout.py` reported no whole-page horizontal overflow at 1024px, 1100px, or 1280px.
+- `scripts/contract_status.py --include-regression --include-backtest` failed as expected before cutover with only `backend_currentness` and `top_volume_universe` failing; rendered UI Daily P/L, warning-state verification, regression harness, and replay backtester all passed.
+- `scripts/live_cutover.py` dry-run passed without stopping or launching anything, confirmed the backup plan, validated the desktop shortcut, and found the two current repo launcher PIDs `12716` and `11068`.
+Remaining live gate:
+- The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.

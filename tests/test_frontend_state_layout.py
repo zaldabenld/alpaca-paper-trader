@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_JS = REPO_ROOT / "python_app" / "static" / "app.js"
+INDEX_HTML = REPO_ROOT / "python_app" / "static" / "index.html"
 STYLES_CSS = REPO_ROOT / "python_app" / "static" / "styles.css"
 
 
@@ -74,6 +75,36 @@ class FrontendLayoutTests(unittest.TestCase):
         self.assertRegex(source, r"\.tabs\s*{[^}]*min-width: 0;", re.DOTALL)
         self.assertRegex(source, r"\.tab-panel\s*{[^}]*overflow: auto;", re.DOTALL)
         self.assertRegex(source, r"\.dashboard-table\s*{[^}]*overflow: auto;", re.DOTALL)
+
+    def test_top_level_backtest_view_exposes_day_tape_backtest_runner(self) -> None:
+        html = read_static(INDEX_HTML)
+        script = read_static(APP_JS)
+        styles = read_static(STYLES_CSS)
+
+        self.assertIn('data-view="backtestView"', html)
+        self.assertIn('id="backtestView"', html)
+        self.assertIn('id="backtestDays"', html)
+        self.assertIn('id="backtestMaxEvents"', html)
+        self.assertIn('id="backtestLatestEvents"', html)
+        self.assertIn('id="runBacktestButton"', html)
+        self.assertIn('id="backtestMinEntryScore"', html)
+        self.assertIn('id="backtestWeightMomentum"', html)
+        self.assertIn('id="backtestStartingEquity"', html)
+        self.assertIn('id="backtestTradeSizeMode"', html)
+        self.assertIn('id="backtestCheckRows"', html)
+        self.assertIn('id="backtestAcceptedRows"', html)
+        self.assertIn('id="backtestRejectedRows"', html)
+        self.assertNotIn('id="realizedPercentToggle"', html)
+        self.assertIn("strategy_overrides:", script)
+        self.assertIn("sizing_overrides:", script)
+        self.assertIn('backtestNumber("backtestMinEntryScore"', script)
+        self.assertIn('backtestString("backtestTradeSizeMode"', script)
+        self.assertIn('postJson("/api/backtest/day-tape"', script)
+        self.assertIn("function renderBacktestReport", script)
+        self.assertIn("backtestCheckRows:", script)
+        self.assertIn(".backtest-controls", styles)
+        self.assertIn(".backtest-parameter-grid", styles)
+        self.assertIn(".backtest-detail", styles)
 
 
 if __name__ == "__main__":

@@ -134,7 +134,7 @@ def fast_forward(files: list[Path], speed: float, max_sleep: float, max_events: 
     print(f"  parse errors:         {parse_errors:,}")
     print()
     print(f"Unique symbols seen: {len(symbols):,}")
-    print("Mode: event-flow fast-forward. The fake broker/profit simulator is the next layer.")
+    print("Mode: event-flow fast-forward. Use scripts/day_tape_backtest.py for app-engine replay decisions.")
     return 0
 
 

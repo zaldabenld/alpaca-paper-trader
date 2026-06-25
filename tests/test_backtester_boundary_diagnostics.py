@@ -146,6 +146,34 @@ class RuntimeDiagnosticsFallbackTests(unittest.TestCase):
         self.assertEqual(diagnostics["entries"][-1]["area"], "background_loop")
         self.assertIn("log unavailable", diagnostics["entries"][-1]["detail"])
 
+    def test_already_stopped_market_stream_stop_is_not_a_runtime_warning(self) -> None:
+        class AlreadyStoppedStream:
+            def stop(self) -> None:
+                raise AttributeError("'NoneType' object has no attribute 'is_running'")
+
+        handle = engine_module.SharedMarketStreamHandle("key", "secret", "iex", "account", "Account", TraderManager())
+        handle.stream = AlreadyStoppedStream()  # type: ignore[assignment]
+
+        handle.stop()
+
+        diagnostics = runtime_diagnostics_snapshot()
+        self.assertEqual(diagnostics["count"], 0)
+
+    def test_real_market_stream_stop_failure_records_diagnostic(self) -> None:
+        class FailingStream:
+            def stop(self) -> None:
+                raise RuntimeError("socket stuck")
+
+        handle = engine_module.SharedMarketStreamHandle("key", "secret", "iex", "account", "Account", TraderManager())
+        handle.stream = FailingStream()  # type: ignore[assignment]
+
+        handle.stop()
+
+        diagnostics = runtime_diagnostics_snapshot()
+        self.assertEqual(diagnostics["count"], 1)
+        self.assertEqual(diagnostics["entries"][-1]["area"], "market_stream")
+        self.assertIn("socket stuck", diagnostics["entries"][-1]["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

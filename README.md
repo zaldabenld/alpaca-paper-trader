@@ -45,7 +45,57 @@ You can also run `Launch Alpaca Paper Trader.cmd` directly from this folder. If 
 
 The desktop shortcut uses a no-window launcher and opens the already-running app if one exists, which helps avoid accidental duplicate websocket sessions.
 
+To verify the existing desktop shortcut/VBS path without launching the app:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_desktop_shortcut.py
+```
+
+After an approved relaunch, run the sanitized live contract verifier:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_live_contract.py
+```
+
+It checks the desktop shortcut, current backend health, `instance.json`, account count, Daily P/L portfolio-history source fields, sizing-mode conflicts, top-volume source/cache, and runtime diagnostics without printing account IDs, account names, API keys, or secrets.
+
+To verify rendered UI metric cards against `/api/state` without printing account identifiers:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_ui_display.py
+```
+
+To summarize the current contract status by acceptance category:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\contract_status.py
+```
+
+For the full acceptance summary, including paper-only safety, market-data stream health, app-data preservation, audit/build-note evidence, account-switching/autosave guards, strategy selection/ranking invariants, layout evidence, regressions, and a bounded read-only day-tape backtest:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\contract_status.py --include-regression --include-backtest
+```
+
+The aggregate backtest uses the latest bounded tape window by default so post-restart evidence is not hidden behind older same-day events. Use `--backtest-from-start` only for historical diagnostics.
+
+For an approved live cutover, preview the coordinated backup/stop/shortcut-launch/verify sequence:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\live_cutover.py
+```
+
+After approval, run the same command with `--execute`. Execute mode now checks saved `auto_start_trading` settings before stopping anything; if any saved account would auto-start paper trading, it aborts unless `--allow-auto-start` is supplied after that behavior is explicitly approved or `--disable-auto-start-for-launch` is used to set `ALPACA_TRADER_DISABLE_AUTO_START=1` only for this relaunch without changing saved account settings. The execute path backs up app data first, stops only this repo's `python_app\run.py` launcher processes, starts the desktop shortcut, then waits for `verify_live_contract.py` and `verify_ui_display.py` to pass. Its final aggregate status also includes layout evidence, focused strategy-selection contract tests, the isolated regression harness, and a bounded read-only `day_tape_backtest.py` replay category. If the live app, layout, strategy contract, and regression checks pass but the only remaining aggregate failure is missing fresh `alpaca_most_actives_volume` tape, the cutover reports deployment success while leaving full acceptance pending until a market-hours tape records the new source.
+
 `Launch Legacy PowerShell Trader.cmd` is retained only as an unsupported legacy reference launcher.
+
+Before an approved live restart or deployment, preview the local app-data backup:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\pre_live_backup.py
+```
+
+After approval, run the same command with `--execute`. It copies the encrypted settings file, `instance.json`, dashboard cache, replay logs, and day-tape directory into `.runtime\pre-live-deploy-backups\<timestamp>` without printing credential contents.
 
 ## First Use
 
@@ -61,11 +111,11 @@ If **Store encrypted for auto-connect** is checked, credentials are stored with 
 
 Use **Connect this account on launch** to control auto-connect per saved account. Existing saved accounts default to connecting on launch unless you turn that off.
 
-The **Dashboard** is the landing page. Once any account is connected, it shows Alpaca market status, the cached top-25 S&P 500 stocks by daily volume, a ticker lookup panel, and a trade-halt monitor for the subscribed dashboard symbols. The top-volume table can be sorted by clicking its column headers.
+The **Dashboard** is the landing page. Once any account is connected, it shows Alpaca market status, the cached Alpaca top-25 most-active stocks by volume, a ticker lookup panel, and a trade-halt monitor for the subscribed dashboard symbols. The top-volume table can be sorted by clicking its column headers.
 
-The top-volume list is ranked from S&P 500 stock snapshots and cached for 10 minutes to avoid unnecessary REST calls. After the list is seeded, the app subscribes to the source dashboard symbols for trades and to a capped union of every connected market-stream account's scan and held-position symbols for bars and trading statuses. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
+The top-volume list is pulled from Alpaca's most-actives screener and enriched with Alpaca snapshots, then refreshed on a short one-minute operational cache before account strategy scans. After the list is seeded, the app subscribes to the source dashboard symbols for trades and to a capped union of every connected market-stream account's scan and held-position symbols for bars and trading statuses. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
 
-By default, each account trades the dashboard top-25 S&P 500 volume symbols. In **Allow top-volume set** mode, the app also scans a bounded inverse ETF watchlist (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`) as normal candidates; those symbols must pass the same direction, VWAP, volume, score, and tradeability checks as any other symbol. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade S&P 500 top 25** is unchecked.
+By default, each account trades exactly the dashboard Alpaca top-25 volume symbols. In **Allow Alpaca top-25** mode, inverse ETFs are eligible only when Alpaca returns them in that current top-volume set, and they must pass the same direction, VWAP, volume, score, and tradeability checks as any other symbol. **Exclude inverse ETFs** blocks inverse ETF entries, and **Inverse set only** is the explicit override that scans the bounded inverse ETF set (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`). The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade Alpaca top 25 volume** is unchecked.
 
 ## Operating Rules
 
@@ -115,7 +165,7 @@ The included strategy is intentionally conservative and transparent:
 - It sorts the eligible pool by score and buys the best candidates until max slots or block budget are full.
 - It skips symbols already owned or already pending entry.
 - It blocks same-symbol churn by requiring a higher score after an exit before that symbol can be re-entered.
-- It has an inverse ETF mode so the bounded inverse set can be excluded from automatic top-volume scanning, allowed as normal top-volume candidates, or used by an inverse-only profile. There is no separate SPY/QQQ downturn gate; inverse ETFs pass or fail through the normal entry-quality checks.
+- It has an inverse ETF mode so Alpaca-returned inverse ETFs can trade through the normal top-volume path, inverse ETF entries can be excluded, or an explicit inverse-only profile can use the bounded inverse set. There is no separate SPY/QQQ downturn gate; inverse ETFs pass or fail through the normal entry-quality checks.
 - It uses market orders against the Alpaca paper endpoint.
 - It keeps entries fractional and manages exits with fractional DAY stop/limit orders using the configured take-profit and stop-loss percentages.
 - It classifies open orders as pending entries, strategy exits, protective exits, or manual/unknown orders so protective stop/limit orders do not count as new entries.
@@ -125,7 +175,7 @@ The included strategy is intentionally conservative and transparent:
 - It sizes entries as one block using max trade dollars, max trade percent of equity, total exposure percent divided by max open positions, and buying power. It does not spend leftover scraps as tiny cleanup trades.
 - Built-in profiles can be edited; once settings differ from the selected profile, the UI marks them as **Custom** and lets you save them as a reusable custom profile.
 
-The **Replay** tab shows recent debug events and the JSONL replay file path under your Windows local app data folder. The replay log records market bars, trading-status events, stream/backfill events, and strategy order intents without writing API keys or secrets.
+The **Replay** tab shows recent debug events and the JSONL replay file path under your Windows local app data folder. The replay log records market bars, trading-status events, stream/backfill events, and strategy order intents without writing API keys or secrets. It also includes a **Run Backtest** control for the local day tape; that path runs the same app-engine day-tape backtest used by `scripts/day_tape_backtest.py`, shows source/evaluation checks, accepted trades, and rejected-candidate samples, and does not submit orders or call Alpaca.
 
 ## Backtest Day Tape
 
@@ -161,11 +211,15 @@ To fast-forward a week of tape without touching Alpaca:
 .\.venv\Scripts\python.exe scripts\day_tape_fast_forward.py --days 7
 ```
 
-That fast-forward pass is the event-flow foundation. A fake broker/profit simulator can be layered on top of it once the tape has enough real market days.
+That fast-forward pass is the event-flow foundation. To run an offline app-engine backtest against the recorded top-volume universe and live strategy helpers:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\day_tape_backtest.py --days 1
+```
+
+The backtest uses the recorded top-volume snapshots as the candidate universe, feeds recorded bars into the same `TraderEngine` strategy state, evaluates entries through the app-engine boundary, and reports accepted trades, rejected candidates, rejection reasons, and winner/loser indicator averages. It uses a fixed replay sizing harness: `$1000` equity/cash, 20 max positions, 5% per slot, and 100% total exposure. Add `--latest-events --max-events 50000` to inspect the latest bounded window of a large same-day tape. The full contract status requires replay evaluations from tape snapshots labeled `alpaca_most_actives_volume`; older `sp500_snapshot_volume` tape remains useful for diagnostics but does not satisfy the post-fix source contract.
 
 Expected storage depends on market activity, how many symbols are streaming, and how many market-hours scan snapshots are recorded. The old replay logs are small, but a full day tape with trades and market-hours scan snapshots can be much larger. Recent local tapes have been roughly 1.5-2.6 GB per full trading day before closed-market scan suppression, so the 14-day default can still require tens of GB on active days. Run the summary command above after each new market day and lower `ALPACA_TRADER_DAY_TAPE_RETENTION_DAYS` if disk usage matters more than keeping a longer replay window.
-
-The volume fields are also the foundation for a later automatic symbol source that can replace the manual ticker list with the top daily volume names.
 
 No strategy guarantees profit. Paper test it before trusting any automation.
 

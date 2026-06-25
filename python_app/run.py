@@ -14,6 +14,7 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import uvicorn
 
@@ -35,30 +36,25 @@ INSTANCE_PATH = APP_DATA_DIR / "instance.json"
 DEFAULT_PORT = 8765
 
 
+class LaunchBlockedError(Exception):
+    """Raised when starting would create an unsafe duplicate or stale runtime."""
+
+
 def find_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return int(sock.getsockname()[1])
 
 
-def port_is_free(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
-    return True
-
-
-def preferred_port(host: str) -> int:
+def configured_port() -> int:
     raw_port = os.environ.get("ALPACA_TRADER_PORT", str(DEFAULT_PORT))
     try:
         port = int(raw_port)
     except ValueError:
-        port = DEFAULT_PORT
-    if port > 0 and port_is_free(host, port):
-        return port
-    return find_port(host)
+        return DEFAULT_PORT
+    if port <= 0:
+        return DEFAULT_PORT
+    return port
 
 
 def load_instance() -> dict[str, Any]:
@@ -115,6 +111,18 @@ def health_matches_current_source(health: dict[str, Any]) -> bool:
     return same_source_path(str(health.get("source_path") or ""), SOURCE_ROOT)
 
 
+def url_matches_launch_bind(url: str, host: str, port: int) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "http":
+        return False
+    if (parsed.hostname or "").lower() != host.lower():
+        return False
+    return int(parsed.port or 80) == int(port)
+
+
 def describe_health(health: dict[str, Any], raw: dict[str, Any]) -> str:
     pid = health.get("pid") or raw.get("pid") or "unknown"
     status = health.get("status") or "missing health"
@@ -145,7 +153,7 @@ def stop_instance(raw: dict[str, Any], url: str) -> bool:
     return not url_is_alive(url, timeout=0.3)
 
 
-def active_instance_url(restart_stale: bool = True) -> str:
+def active_instance_url(host: str, port: int, restart_stale: bool = True) -> str:
     try:
         raw = load_instance()
         url = instance_url(raw)
@@ -155,17 +163,21 @@ def active_instance_url(restart_stale: bool = True) -> str:
             return ""
         health = fetch_health(url)
         if health_matches_current_source(health):
-            return url
-
-        stale_detail = describe_health(health, raw)
-        safe_print(f"Existing Alpaca Paper Trader backend is stale or from a different source; {stale_detail}.")
-        if restart_stale:
-            if stop_instance(raw, url):
-                return ""
+            if url_matches_launch_bind(url, host, port):
+                return url
+            stale_detail = describe_health(health, raw)
             safe_print(
-                "Stale backend did not stop cleanly. Starting a separate current instance instead of reusing it."
+                f"Existing Alpaca Paper Trader backend is current but bound to {url} "
+                f"instead of http://{host}:{port}; {stale_detail}."
             )
-        return ""
+        else:
+            stale_detail = describe_health(health, raw)
+            safe_print(f"Existing Alpaca Paper Trader backend is stale or from a different source; {stale_detail}.")
+        if restart_stale and stop_instance(raw, url):
+            return ""
+        message = "Existing Alpaca Paper Trader backend is not reusable and did not stop cleanly."
+        safe_print(f"{message} Refusing to start another backend.")
+        raise LaunchBlockedError(message)
     except (OSError, RuntimeError, ValueError):
         return ""
 
@@ -218,19 +230,25 @@ def main() -> None:
         safe_print("Alpaca Paper Trader Python app imports OK.")
         return
 
-    existing_url = active_instance_url(restart_stale=not args.no_restart_stale)
+    if args.port is None:
+        port = configured_port()
+    elif args.port == 0:
+        port = find_port(args.host)
+    else:
+        port = args.port
+
+    existing_url = ""
+    if args.port != 0:
+        try:
+            existing_url = active_instance_url(args.host, port, restart_stale=not args.no_restart_stale)
+        except LaunchBlockedError:
+            raise SystemExit(1)
     if existing_url:
         if not args.no_browser:
             webbrowser.open(existing_url)
         safe_print(f"Alpaca Paper Trader already running at {existing_url}")
         return
 
-    if args.port is None:
-        port = preferred_port(args.host)
-    elif args.port == 0:
-        port = find_port(args.host)
-    else:
-        port = args.port
     url = f"http://{args.host}:{port}"
     save_instance_url(url)
     app.state.runtime_url = url

@@ -5,27 +5,29 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any
 
 from alpaca.common.enums import Sort
-from alpaca.data.enums import Adjustment, DataFeed
+from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.live import StockDataStream
 from alpaca.data.requests import (
+    MostActivesRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
     StockLatestTradeRequest,
-    StockTradesRequest,
     StockSnapshotRequest,
+    StockTradesRequest,
 )
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
+    GetPortfolioHistoryRequest,
     GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
@@ -67,13 +69,14 @@ from .runtime_diagnostics import (
     runtime_diagnostics_snapshot,
 )
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
-from .sp500 import SP500_SYMBOLS
 
 
 DASHBOARD_TOP_LIMIT = 25
-SP500_SNAPSHOT_BATCH_SIZE = 100
-TOP_VOLUME_CACHE_SECONDS = 10 * 60
-TOP_VOLUME_FORCE_COOLDOWN_SECONDS = 2 * 60
+STOCK_SNAPSHOT_BATCH_SIZE = 100
+TOP_VOLUME_CACHE_SECONDS = 60
+PORTFOLIO_HISTORY_CACHE_SECONDS = 15
+TOP_VOLUME_FORCE_COOLDOWN_SECONDS = 30
+TOP_VOLUME_SOURCE = "alpaca_most_actives_volume"
 LOOKUP_CACHE_SECONDS = 60
 BUILT_IN_PROFILE_KEYS = ("conservative", "neutral", "aggressive")
 REPLAY_EVENT_LIMIT = 400
@@ -434,6 +437,19 @@ PROFILE_STRATEGY_KEYS = {
     "cooldown_minutes",
     "entry_open_guard_minutes",
     "entry_close_guard_minutes",
+    "score_weight_rsi",
+    "score_weight_relative_volume",
+    "score_weight_momentum",
+    "score_weight_recent_momentum",
+    "score_weight_long_momentum",
+    "score_weight_session_change",
+    "score_weight_vwap",
+    "score_weight_smi",
+    "score_weight_volatility",
+    "score_weight_liquidity_bonus",
+    "score_weight_flow",
+    "score_weight_pullback_penalty",
+    "score_weight_overbought_penalty",
 }
 
 
@@ -493,6 +509,19 @@ class AppConfig(BaseModel):
     cooldown_minutes: int = 0
     entry_open_guard_minutes: int = 15
     entry_close_guard_minutes: int = 15
+    score_weight_rsi: Decimal = Decimal("12")
+    score_weight_relative_volume: Decimal = Decimal("12")
+    score_weight_momentum: Decimal = Decimal("20")
+    score_weight_recent_momentum: Decimal = Decimal("8")
+    score_weight_long_momentum: Decimal = Decimal("15")
+    score_weight_session_change: Decimal = Decimal("12")
+    score_weight_vwap: Decimal = Decimal("8")
+    score_weight_smi: Decimal = Decimal("8")
+    score_weight_volatility: Decimal = Decimal("3")
+    score_weight_liquidity_bonus: Decimal = Decimal("2.5")
+    score_weight_flow: Decimal = Decimal("5")
+    score_weight_pullback_penalty: Decimal = Decimal("12")
+    score_weight_overbought_penalty: Decimal = Decimal("6")
 
     @field_validator("profile")
     @classmethod
@@ -561,6 +590,19 @@ class AppConfig(BaseModel):
         "profit_trail_start_percent",
         "profit_trail_drop_percent",
         "stop_loss_percent",
+        "score_weight_rsi",
+        "score_weight_relative_volume",
+        "score_weight_momentum",
+        "score_weight_recent_momentum",
+        "score_weight_long_momentum",
+        "score_weight_session_change",
+        "score_weight_vwap",
+        "score_weight_smi",
+        "score_weight_volatility",
+        "score_weight_liquidity_bonus",
+        "score_weight_flow",
+        "score_weight_pullback_penalty",
+        "score_weight_overbought_penalty",
     )
     @classmethod
     def validate_nonnegative_decimal(cls, value: Decimal) -> Decimal:
@@ -880,7 +922,10 @@ def percent_from_ratio(value: Any) -> str:
 def signed_percent_value(value: Decimal | None) -> str:
     if value is None:
         return "-"
-    return f"{value:+.2f}%" if value != 0 else "0.00%"
+    if value == 0:
+        return "0.00%"
+    places = 4 if abs(value) < Decimal("0.01") else 2
+    return f"{value:+.{places}f}%"
 
 
 def metric_decimal(value: Any) -> Decimal:
@@ -888,6 +933,24 @@ def metric_decimal(value: Any) -> Decimal:
         cleaned = value.replace("$", "").replace(",", "").replace("%", "").strip()
         return decimal_value(cleaned)
     return decimal_value(value)
+
+
+def optional_metric_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return metric_decimal(value)
+
+
+def latest_metric_decimal(values: Any) -> Decimal | None:
+    if not isinstance(values, list):
+        return None
+    for value in reversed(values):
+        parsed = optional_metric_decimal(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def stream_data_feed(feed: str) -> DataFeed:
@@ -1015,6 +1078,11 @@ def is_connection_limit_error(message: str) -> bool:
     return "connection limit exceeded" in str(message or "").lower()
 
 
+def is_already_stopped_stream_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return "nonetype" in message and "is_running" in message
+
+
 def credential_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -1118,8 +1186,8 @@ def fetch_stock_snapshots_chunked(
 ) -> dict[str, Any]:
     snapshots: dict[str, Any] = {}
     clean_symbols_list = sorted(set(clean_symbols(symbols)))
-    for index in range(0, len(clean_symbols_list), SP500_SNAPSHOT_BATCH_SIZE):
-        batch = clean_symbols_list[index : index + SP500_SNAPSHOT_BATCH_SIZE]
+    for index in range(0, len(clean_symbols_list), STOCK_SNAPSHOT_BATCH_SIZE):
+        batch = clean_symbols_list[index : index + STOCK_SNAPSHOT_BATCH_SIZE]
         if not batch:
             continue
         try:
@@ -1158,6 +1226,33 @@ def fetch_stock_snapshots_chunked(
             for symbol, snapshot in response.items():
                 snapshots[str(symbol).upper()] = snapshot
     return snapshots
+
+
+def fetch_most_active_symbols(screener_client: ScreenerClient, limit: int = DASHBOARD_TOP_LIMIT) -> list[dict[str, Any]]:
+    response = screener_client.get_most_actives(
+        MostActivesRequest(top=int(limit), by=MostActivesBy.VOLUME)
+    )
+    raw_rows = getattr(response, "most_actives", None)
+    if raw_rows is None and isinstance(response, dict):
+        raw_rows = response.get("most_actives") or response.get("mostActives") or []
+
+    rows: list[dict[str, Any]] = []
+    for item in raw_rows or []:
+        raw = model_dict(item)
+        symbol = str(raw.get("symbol") or "").strip().upper()
+        volume_raw = whole_number_value(raw.get("volume"))
+        if not symbol or volume_raw <= 0:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "daily_volume_raw": volume_raw,
+                "trade_count_raw": whole_number_value(raw.get("trade_count")),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def merged_symbols(*groups: Any) -> list[str]:
@@ -1258,6 +1353,7 @@ class TraderEngine:
         self.protective_order_reject_holds: dict[tuple[str, str], datetime] = {}
         self.last_scan_log_at = 0.0
         self.dashboard_cache_last_save = 0.0
+        self.daily_pl_history_cache: tuple[float, str, dict[str, Any]] | None = None
         self.last_refresh = ""
         self.last_error = ""
         self.settings_load_error = ""
@@ -1276,6 +1372,7 @@ class TraderEngine:
             self.remember = settings.remember
             self.auto_connect = settings.auto_connect
             self.auto_start_trading = settings.auto_start_trading
+            self.daily_pl_history_cache = None
             if self.settings_load_error:
                 self.last_error = self.settings_load_error
                 self.status = "Settings load error"
@@ -1302,6 +1399,7 @@ class TraderEngine:
             self.remember = payload.remember
             self.auto_connect = payload.auto_connect
             self.auto_start_trading = payload.auto_start_trading
+            self.daily_pl_history_cache = None
 
     def payload_credentials(self, payload: AccountPayload) -> tuple[str, str]:
         with self.lock:
@@ -1314,20 +1412,19 @@ class TraderEngine:
 
     def trading_symbols(self) -> list[str]:
         with self.lock:
-            if self.config.use_top_volume_symbols and self.top_volume_symbols:
+            config = self.config
+            if config.inverse_etf_mode == "inverse_only":
+                base_symbols = []
+            elif config.use_top_volume_symbols and self.top_volume_symbols:
                 base_symbols = list(self.top_volume_symbols[:DASHBOARD_TOP_LIMIT])
             else:
-                base_symbols = list(self.config.symbols)
+                base_symbols = list(config.symbols)
         return merged_symbols(base_symbols, self.active_inverse_symbols())
 
     def active_inverse_symbols(self) -> list[str]:
         with self.lock:
-            config = self.config
-            use_top_volume = config.use_top_volume_symbols
-            mode = config.inverse_etf_mode
+            mode = self.config.inverse_etf_mode
         if mode == "inverse_only":
-            return list(TOP_VOLUME_INVERSE_ETF_SYMBOLS)
-        if use_top_volume and mode == "allow":
             return list(TOP_VOLUME_INVERSE_ETF_SYMBOLS)
         return []
 
@@ -1528,6 +1625,7 @@ class TraderEngine:
             self.market_clock = self.default_market_clock()
             self.top_volume_error = "Connect an account to populate the dashboard."
             self.halted_symbols = {}
+            self.daily_pl_history_cache = None
 
     def start_trading(self) -> None:
         with self.lock:
@@ -1663,6 +1761,90 @@ class TraderEngine:
         if self.screener_client is None:
             raise RuntimeError("Not connected to Alpaca.")
         return self.screener_client
+
+    def unavailable_daily_pl_payload(self, session_date: str, error: str = "") -> dict[str, Any]:
+        return {
+            "daily_pl": "Unavailable",
+            "daily_pl_raw": "",
+            "daily_pl_display": "Unavailable",
+            "daily_pl_pct_raw": "",
+            "daily_pl_pct_display": "Unavailable",
+            "daily_pl_account_basis_raw": "",
+            "daily_pl_account_basis_display": "Unavailable",
+            "daily_pl_session_date": session_date,
+            "daily_pl_source": "unavailable",
+            "daily_pl_source_error": error,
+        }
+
+    def portfolio_history_request(self, session_date: str) -> GetPortfolioHistoryRequest:
+        request_fields: dict[str, Any] = {
+            "period": "1D",
+            "timeframe": "1Min",
+            "pnl_reset": "per_day",
+            "extended_hours": True,
+        }
+        try:
+            request_fields["date_end"] = date.fromisoformat(session_date)
+        except (TypeError, ValueError):
+            pass
+        return GetPortfolioHistoryRequest(**request_fields)
+
+    def portfolio_history_daily_pl_payload(self, client: TradingClient, session_date: str) -> dict[str, Any]:
+        with self.lock:
+            cached = self.daily_pl_history_cache
+        now = time.monotonic()
+        if (
+            cached is not None
+            and cached[1] == session_date
+            and now - cached[0] <= PORTFOLIO_HISTORY_CACHE_SECONDS
+        ):
+            return dict(cached[2])
+
+        try:
+            history = client.get_portfolio_history(self.portfolio_history_request(session_date))
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            record_runtime_diagnostic(
+                "account_refresh",
+                "Alpaca portfolio history Daily P/L failed",
+                AccountRefreshError(message),
+                source="engine",
+            )
+            return self.unavailable_daily_pl_payload(session_date, f"Alpaca portfolio history unavailable: {message[:180]}")
+
+        history_dict = model_dict(history)
+        daily_pl = latest_metric_decimal(history_dict.get("profit_loss"))
+        pct_ratio = latest_metric_decimal(history_dict.get("profit_loss_pct"))
+        basis = optional_metric_decimal(history_dict.get("base_value"))
+        latest_equity = latest_metric_decimal(history_dict.get("equity"))
+        if basis is None and latest_equity is not None and daily_pl is not None:
+            basis = latest_equity - daily_pl
+
+        if daily_pl is None or basis is None or basis <= 0:
+            payload = self.unavailable_daily_pl_payload(session_date, "Alpaca portfolio history did not return usable P/L.")
+            with self.lock:
+                self.daily_pl_history_cache = (now, session_date, dict(payload))
+            return payload
+
+        daily_pct = pct_ratio * Decimal("100") if pct_ratio is not None else Decimal("0")
+        if daily_pct == 0 and daily_pl != 0:
+            daily_pct = daily_pl / basis * Decimal("100")
+
+        payload = {
+            "daily_pl": money(daily_pl),
+            "daily_pl_raw": str(daily_pl.quantize(Decimal("0.000001"))),
+            "daily_pl_display": money(daily_pl),
+            "daily_pl_pct_raw": str(daily_pct.quantize(Decimal("0.000001"))),
+            "daily_pl_pct_display": signed_percent_value(daily_pct),
+            "daily_pl_account_basis_raw": str(basis.quantize(Decimal("0.000001"))),
+            "daily_pl_account_basis_display": money(basis),
+            "daily_pl_session_date": session_date,
+            "daily_pl_source": "alpaca_portfolio_history",
+            "daily_pl_source_error": "",
+        }
+        with self.lock:
+            self.daily_pl_history_cache = (now, session_date, dict(payload))
+        return payload
 
     def refresh(self, run_strategy: bool | None = None, shared_bars: dict[str, list[Any]] | None = None) -> None:
         if not self.refresh_lock.acquire(blocking=False):
@@ -1852,24 +2034,16 @@ class TraderEngine:
 
             equity = decimal_value(account_dict.get("equity"))
             last_equity = decimal_value(account_dict.get("last_equity"))
-            daily_pl = equity - last_equity
-            daily_pl_basis = last_equity if last_equity > 0 else equity
-            daily_pl_pct = (daily_pl / daily_pl_basis * Decimal("100")) if daily_pl_basis > 0 else Decimal("0")
-            session_date = datetime.now().astimezone().date().isoformat()
+            session_date = str(market_clock.get("session_date") or datetime.now().astimezone().date().isoformat())
+            daily_pl_payload = self.portfolio_history_daily_pl_payload(client, session_date)
             trade_history_rows = self.trade_history_rows(closed_order_dicts)
-            realized_account_basis = last_equity if last_equity > 0 else equity
-            realized_pl = self.daily_realized_pl_summary(trade_history_rows, realized_account_basis)
+            realized_account_basis = decimal_value(daily_pl_payload.get("daily_pl_account_basis_raw"))
+            if realized_account_basis <= 0:
+                realized_account_basis = last_equity if last_equity > 0 else equity
+            realized_pl = self.daily_realized_pl_summary(trade_history_rows, realized_account_basis, session_date)
 
             with self.lock:
-                self.account = account_dict | {
-                    "daily_pl": money(daily_pl),
-                    "daily_pl_raw": str(daily_pl.quantize(Decimal("0.000001"))),
-                    "daily_pl_display": money(daily_pl),
-                    "daily_pl_pct_raw": str(daily_pl_pct.quantize(Decimal("0.000001"))),
-                    "daily_pl_pct_display": signed_percent_value(daily_pl_pct),
-                    "daily_pl_account_basis_raw": str(daily_pl_basis.quantize(Decimal("0.000001"))),
-                    "daily_pl_account_basis_display": money(daily_pl_basis),
-                    "daily_pl_session_date": session_date,
+                self.account = account_dict | daily_pl_payload | {
                     "realized_pl": str(realized_pl["value"]),
                     "realized_pl_raw": str(realized_pl["value"]),
                     "realized_pl_display": money(realized_pl["value"]),
@@ -1935,35 +2109,21 @@ class TraderEngine:
                 return
             feed = self.config.feed
             data_client = self.data_client
+            screener_client = self.screener_client
             existing_rows = {row.get("symbol"): row for row in self.top_volume_rows}
             cached_rows = load_dashboard_cache_rows()
             latest_statuses = dict(self.latest_trading_statuses)
             halted_symbols = dict(self.halted_symbols)
 
-        if data_client is None:
+        if data_client is None or screener_client is None:
             with self.lock:
                 self.top_volume_error = "Connect an account to populate the dashboard."
             return
 
         try:
-            snapshots = fetch_stock_snapshots_chunked(data_client, list(SP500_SYMBOLS), feed)
-            ranked: list[dict[str, Any]] = []
-            for symbol, snapshot in snapshots.items():
-                daily_bar = model_dict(getattr(snapshot, "daily_bar", None))
-                latest_trade = model_dict(getattr(snapshot, "latest_trade", None))
-                daily_volume_raw = whole_number_value(daily_bar.get("volume"))
-                if daily_volume_raw <= 0:
-                    continue
-                ranked.append(
-                    {
-                        "symbol": symbol,
-                        "daily_volume_raw": daily_volume_raw,
-                        "trade_count_raw": whole_number_value(daily_bar.get("trade_count")),
-                        "last_price_raw": latest_trade.get("price") or daily_bar.get("close"),
-                    }
-                )
-
-            ranked.sort(key=lambda item: (-decimal_value(item.get("daily_volume_raw")), str(item.get("symbol"))))
+            ranked = fetch_most_active_symbols(screener_client, DASHBOARD_TOP_LIMIT)
+            snapshot_symbols = [str(item.get("symbol") or "").strip().upper() for item in ranked]
+            snapshots = fetch_stock_snapshots_chunked(data_client, snapshot_symbols, feed)
             updated_at = datetime.now().strftime("%b %d, %I:%M:%S %p")
 
             rows: list[dict[str, Any]] = []
@@ -1978,7 +2138,10 @@ class TraderEngine:
                 halted = symbol in halted_symbols
                 daily_volume_raw = whole_number_value(item.get("daily_volume_raw"))
                 trade_count_raw = whole_number_value(item.get("trade_count_raw"))
-                last_price_raw = item.get("last_price_raw") or previous.get("last_price_raw", 0)
+                snapshot = snapshots.get(symbol)
+                daily_bar = model_dict(getattr(snapshot, "daily_bar", None))
+                latest_trade = model_dict(getattr(snapshot, "latest_trade", None))
+                last_price_raw = latest_trade.get("price") or daily_bar.get("close") or previous.get("last_price_raw", 0)
                 rows.append(
                     {
                         "rank": index,
@@ -2012,7 +2175,7 @@ class TraderEngine:
                 )
 
             if not rows:
-                raise RuntimeError("No S&P 500 snapshot volume data returned.")
+                raise RuntimeError("No Alpaca most-active volume data returned.")
 
             with self.lock:
                 old_symbols = list(self.top_volume_symbols)
@@ -2025,7 +2188,7 @@ class TraderEngine:
             append_day_tape_event(
                 "top_volume_snapshot",
                 {
-                    "source": "sp500_snapshot_volume",
+                    "source": TOP_VOLUME_SOURCE,
                     "feed": feed,
                     "force": force,
                     "updated_at": updated_at,
@@ -2042,7 +2205,7 @@ class TraderEngine:
                 self.top_volume_error = str(exc)
             append_day_tape_event(
                 "top_volume_error",
-                {"source": "sp500_snapshot_volume", "feed": feed, "error": str(exc)},
+                {"source": TOP_VOLUME_SOURCE, "feed": feed, "error": str(exc)},
             )
             self.log("error", f"Top-volume dashboard refresh failed: {exc}")
 
@@ -2073,6 +2236,11 @@ class TraderEngine:
         try:
             if not bool(market_clock.get("is_open")):
                 return
+            with self.lock:
+                symbol_source = self.trading_symbol_source()
+                top_volume_symbols = list(self.top_volume_symbols[:DASHBOARD_TOP_LIMIT])
+                top_volume_rows = compact_top_volume_rows(self.top_volume_rows)
+                top_volume_updated_at = self.top_volume_updated
             append_day_tape_event(
                 "strategy_scan",
                 {
@@ -2082,6 +2250,11 @@ class TraderEngine:
                     "entry_guard_detail": entry_guard_detail,
                     "market_clock": clean_day_tape_value(market_clock),
                     "config": self.config.model_dump(mode="json"),
+                    "symbol_source": symbol_source,
+                    "top_volume_source": TOP_VOLUME_SOURCE if top_volume_symbols else "",
+                    "top_volume_updated_at": top_volume_updated_at,
+                    "top_volume_symbols": top_volume_symbols,
+                    "top_volume_rows": top_volume_rows,
                     "account": compact_account_snapshot(account),
                     "positions": compact_positions(positions),
                     "open_orders": compact_orders(open_orders),
@@ -2116,21 +2289,16 @@ class TraderEngine:
         if not symbol:
             return
         if not daily:
-            with self.lock:
-                trading_symbols = (
-                    self.top_volume_symbols[:DASHBOARD_TOP_LIMIT]
-                    if self.config.use_top_volume_symbols and self.top_volume_symbols
-                    else self.config.symbols
+            scan_symbols = set(self.scan_symbols())
+            if symbol in scan_symbols:
+                self.strategy_state.add_bar(
+                    symbol,
+                    raw.get("close"),
+                    raw.get("timestamp"),
+                    raw.get("volume"),
+                    raw.get("high"),
+                    raw.get("low"),
                 )
-                if symbol in trading_symbols:
-                    self.strategy_state.add_bar(
-                        symbol,
-                        raw.get("close"),
-                        raw.get("timestamp"),
-                        raw.get("volume"),
-                        raw.get("high"),
-                        raw.get("low"),
-                    )
         self.update_dashboard_bar(bar, daily=daily)
 
     def update_dashboard_bar(self, bar: Any, daily: bool = False) -> None:
@@ -2417,6 +2585,7 @@ class TraderEngine:
                 "profile": self.config.profile,
                 "market_clock": self.market_clock,
                 "top_volume": list(self.top_volume_rows),
+                "top_volume_source": TOP_VOLUME_SOURCE,
                 "top_volume_updated": self.top_volume_updated,
                 "top_volume_error": self.top_volume_error,
                 "top_volume_cache_seconds": TOP_VOLUME_CACHE_SECONDS,
@@ -2430,7 +2599,21 @@ class TraderEngine:
             "detail": "Connect an account to read Alpaca market hours.",
             "next_open": "",
             "next_close": "",
+            "session_date": "",
         }
+
+    def market_clock_session_date(self, clock: Any) -> str:
+        timestamp = getattr(clock, "timestamp", None)
+        now_local = timestamp.astimezone() if hasattr(timestamp, "astimezone") else datetime.now().astimezone()
+        if bool(getattr(clock, "is_open", False)):
+            return now_local.date().isoformat()
+        next_open = getattr(clock, "next_open", None)
+        if hasattr(next_open, "astimezone") and now_local < next_open.astimezone():
+            candidate = next_open.astimezone().date() - timedelta(days=1)
+            while candidate.weekday() >= 5:
+                candidate -= timedelta(days=1)
+            return candidate.isoformat()
+        return now_local.date().isoformat()
 
     def format_market_clock(self, clock: Any) -> dict[str, Any]:
         is_open = bool(getattr(clock, "is_open", False))
@@ -2445,6 +2628,7 @@ class TraderEngine:
             "detail": detail,
             "next_open": self.format_clock_time(next_open),
             "next_close": self.format_clock_time(next_close),
+            "session_date": self.market_clock_session_date(clock),
         }
 
     def format_clock_time(self, value: Any) -> str:
@@ -2554,6 +2738,8 @@ class TraderEngine:
     def inverse_etf_hold_reason(self, symbol: str, config: AppConfig) -> str:
         clean_symbol = symbol.strip().upper()
         is_inverse = clean_symbol in INVERSE_ETF_SYMBOLS
+        if config.inverse_etf_mode == "exclude" and is_inverse:
+            return "Hold (inverse ETF excluded)"
         if config.inverse_etf_mode == "inverse_only" and not is_inverse:
             return "Hold (inverse-only profile)"
         return ""
@@ -2666,10 +2852,6 @@ class TraderEngine:
         if quality_hold:
             self.strategy_state.last_action[symbol] = quality_hold
             return None
-        if config.max_open_positions > 0 and open_position_count >= config.max_open_positions:
-            self.strategy_state.last_action[symbol] = "Hold (max positions)"
-            return None
-
         flow_ratio = self.order_flow_ratio(symbol)
         score = self.entry_score(snapshot, config, flow_ratio)
         self.set_entry_score(symbol, score)
@@ -2691,35 +2873,35 @@ class TraderEngine:
             ideal_rsi = config.buy_rsi_min + (rsi_range * Decimal("0.55"))
             rsi_half_range = max(rsi_range / Decimal("2"), Decimal("1"))
             rsi_fit = Decimal("1") - (abs(snapshot.rsi - ideal_rsi) / rsi_half_range)
-            score += clamp_decimal(rsi_fit) * Decimal("12")
+            score += clamp_decimal(rsi_fit) * config.score_weight_rsi
         if snapshot.relative_volume is not None:
-            score += clamp_decimal(snapshot.relative_volume / Decimal("2.5")) * Decimal("12")
+            score += clamp_decimal(snapshot.relative_volume / Decimal("2.5")) * config.score_weight_relative_volume
         if snapshot.momentum_percent is not None:
             momentum_fit = (snapshot.momentum_percent - config.min_momentum_percent) / Decimal("1.5")
-            score += clamp_decimal(momentum_fit) * Decimal("20")
+            score += clamp_decimal(momentum_fit) * config.score_weight_momentum
         recent_momentum = getattr(snapshot, "recent_momentum_percent", None)
         if recent_momentum is not None:
-            score += clamp_decimal((recent_momentum - limits["min_recent_momentum"]) / Decimal("1")) * Decimal("8")
+            score += clamp_decimal((recent_momentum - limits["min_recent_momentum"]) / Decimal("1")) * config.score_weight_recent_momentum
         if getattr(snapshot, "long_momentum_percent", None) is not None:
-            score += clamp_decimal(snapshot.long_momentum_percent / Decimal("4")) * Decimal("15")
+            score += clamp_decimal(snapshot.long_momentum_percent / Decimal("4")) * config.score_weight_long_momentum
         if getattr(snapshot, "session_change_percent", None) is not None:
-            score += clamp_decimal(snapshot.session_change_percent / Decimal("5")) * Decimal("12")
+            score += clamp_decimal(snapshot.session_change_percent / Decimal("5")) * config.score_weight_session_change
         if getattr(snapshot, "vwap_distance_percent", None) is not None:
-            vwap_score = clamp_decimal(snapshot.vwap_distance_percent / Decimal("1.5")) * Decimal("8")
+            vwap_score = clamp_decimal(snapshot.vwap_distance_percent / Decimal("1.5")) * config.score_weight_vwap
             if snapshot.vwap_distance_percent > Decimal("2"):
                 excess_range = max(limits["max_vwap_extension"] - Decimal("2"), Decimal("1"))
                 vwap_score -= clamp_decimal((snapshot.vwap_distance_percent - Decimal("2")) / excess_range) * Decimal("10")
             score += max(Decimal("0"), vwap_score)
         if snapshot.smi is not None:
             smi_range = max(Decimal("80") - config.min_smi, Decimal("1"))
-            score += clamp_decimal((snapshot.smi - config.min_smi) / smi_range) * Decimal("8")
+            score += clamp_decimal((snapshot.smi - config.min_smi) / smi_range) * config.score_weight_smi
         volatility = getattr(snapshot, "atr_percent", None) or getattr(snapshot, "volatility_percent", None)
         if volatility is not None:
-            score += clamp_decimal(volatility / Decimal("2")) * Decimal("3")
+            score += clamp_decimal(volatility / Decimal("2")) * config.score_weight_volatility
         if flow_ratio is None:
-            score += Decimal("2.5")
+            score += config.score_weight_liquidity_bonus
         else:
-            score += clamp_decimal(flow_ratio) * Decimal("5")
+            score += clamp_decimal(flow_ratio) * config.score_weight_flow
 
         penalty = Decimal("0")
         session_change = getattr(snapshot, "session_change_percent", None)
@@ -2728,12 +2910,12 @@ class TraderEngine:
             penalty += clamp_decimal((session_change - Decimal("4")) / excess_range) * Decimal("8")
         session_pullback = getattr(snapshot, "session_pullback_percent", None)
         if session_pullback is not None:
-            penalty += clamp_decimal(session_pullback / limits["max_session_pullback"]) * Decimal("12")
+            penalty += clamp_decimal(session_pullback / limits["max_session_pullback"]) * config.score_weight_pullback_penalty
         recent_pullback = getattr(snapshot, "recent_pullback_percent", None)
         if recent_pullback is not None:
-            penalty += clamp_decimal(recent_pullback / limits["max_recent_pullback"]) * Decimal("8")
+            penalty += clamp_decimal(recent_pullback / limits["max_recent_pullback"]) * config.score_weight_pullback_penalty
         if snapshot.smi is not None and snapshot.smi > Decimal("85"):
-            penalty += clamp_decimal((snapshot.smi - Decimal("85")) / Decimal("15")) * Decimal("6")
+            penalty += clamp_decimal((snapshot.smi - Decimal("85")) / Decimal("15")) * config.score_weight_overbought_penalty
 
         return max(Decimal("0"), score - penalty).quantize(Decimal("0.1"))
 
@@ -3940,8 +4122,16 @@ class TraderEngine:
         rows.sort(key=lambda row: row.get("sort_time", ""), reverse=True)
         return rows[:100]
 
-    def daily_realized_pl_summary(self, rows: list[dict[str, Any]], account_basis: Decimal) -> dict[str, Any]:
-        today = datetime.now().astimezone().date()
+    def daily_realized_pl_summary(
+        self,
+        rows: list[dict[str, Any]],
+        account_basis: Decimal,
+        session_date: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            today = datetime.fromisoformat(str(session_date)).date() if session_date else datetime.now().astimezone().date()
+        except ValueError:
+            today = datetime.now().astimezone().date()
         realized_pl = Decimal("0")
         trade_cost_basis = Decimal("0")
         for row in rows:
@@ -4323,6 +4513,31 @@ class TraderEngine:
 
     def standardized_account_metrics(self) -> dict[str, Any]:
         account = dict(self.account)
+        session_date = str(
+            account.get("daily_pl_session_date")
+            or self.market_clock.get("session_date")
+            or datetime.now().astimezone().date().isoformat()
+        )
+        daily_pl_source = str(account.get("daily_pl_source") or "").strip()
+        has_pl_source = (
+            daily_pl_source == "alpaca_portfolio_history"
+            and str(account.get("daily_pl_raw") or "").strip() != ""
+            and str(account.get("daily_pl_pct_raw") or "").strip() != ""
+        )
+        if not has_pl_source:
+            account.update(self.unavailable_daily_pl_payload(session_date, str(account.get("daily_pl_source_error") or "")))
+            account.update(
+                {
+                    "realized_pl": account.get("realized_pl_display") or "Unavailable",
+                    "realized_pl_raw": str(account.get("realized_pl_raw") or ""),
+                    "realized_pl_display": account.get("realized_pl_display") or "Unavailable",
+                    "realized_pl_pct": account.get("realized_pl_pct_display") or "Unavailable",
+                    "realized_pl_pct_raw": str(account.get("realized_pl_pct_raw") or ""),
+                    "realized_pl_pct_display": account.get("realized_pl_pct_display") or "Unavailable",
+                    "realized_pl_session_date": account.get("realized_pl_session_date") or session_date,
+                }
+            )
+            return account
         daily_raw = metric_decimal(account.get("daily_pl_raw", account.get("daily_pl", "0")))
         daily_basis = metric_decimal(
             account.get(
@@ -4333,7 +4548,6 @@ class TraderEngine:
         daily_pct = metric_decimal(account.get("daily_pl_pct_raw", account.get("daily_pl_pct", "0")))
         if daily_pct == 0 and daily_raw != 0 and daily_basis > 0:
             daily_pct = daily_raw / daily_basis * Decimal("100")
-        session_date = str(account.get("daily_pl_session_date") or datetime.now().astimezone().date().isoformat())
         account.update(
             {
                 "daily_pl": account.get("daily_pl_display") or money(daily_raw),
@@ -4375,10 +4589,18 @@ class TraderEngine:
                 "config": self.config.model_dump(mode="json"),
             }
 
+    def trading_symbol_source(self) -> str:
+        with self.lock:
+            if self.config.inverse_etf_mode == "inverse_only":
+                return "inverse_only"
+            if self.config.use_top_volume_symbols and self.top_volume_symbols:
+                return "top_volume"
+            return "manual"
+
     def summary(self) -> dict[str, Any]:
         with self.lock:
             trading_symbols = self.trading_symbols()
-            symbol_source = "top_volume" if self.config.use_top_volume_symbols and self.top_volume_symbols else "manual"
+            symbol_source = self.trading_symbol_source()
             account = self.standardized_account_metrics()
             return {
                 "account_id": self.account_id,
@@ -4402,6 +4624,8 @@ class TraderEngine:
                 "daily_pl_account_basis_raw": account.get("daily_pl_account_basis_raw", "0"),
                 "daily_pl_account_basis_display": account.get("daily_pl_account_basis_display", "$0.00"),
                 "daily_pl_session_date": account.get("daily_pl_session_date", ""),
+                "daily_pl_source": account.get("daily_pl_source", ""),
+                "daily_pl_source_error": account.get("daily_pl_source_error", ""),
                 "realized_pl": account.get("realized_pl_display", "$0.00"),
                 "realized_pl_raw": account.get("realized_pl_raw", "0"),
                 "realized_pl_display": account.get("realized_pl_display", "$0.00"),
@@ -4417,7 +4641,7 @@ class TraderEngine:
     def state(self) -> dict[str, Any]:
         with self.lock:
             trading_symbols = self.trading_symbols()
-            symbol_source = "top_volume" if self.config.use_top_volume_symbols and self.top_volume_symbols else "manual"
+            symbol_source = self.trading_symbol_source()
             return {
                 "account_id": self.account_id,
                 "name": self.name,
@@ -4676,8 +4900,18 @@ class TraderManager:
 
     def refresh_account(self, account_id: str | None = None, run_strategy: bool | None = None) -> None:
         engine = self.get(account_id)
+        self.refresh_trading_universe_for(engine)
         shared_bars = self.shared_historical_bars_for(engine)
         engine.refresh(run_strategy=run_strategy, shared_bars=shared_bars)
+
+    def refresh_trading_universe_for(self, target: TraderEngine) -> None:
+        if not target.connected or not target.config.use_top_volume_symbols:
+            return
+        source = self.shared_market_source() or target
+        if not source.connected:
+            return
+        source.refresh_top_volume(force=False, restart_stream=False)
+        self.sync_top_volume_from(source)
 
     def shared_historical_bars_for(self, target: TraderEngine) -> dict[str, list[Any]] | None:
         if not target.connected:
@@ -5561,12 +5795,13 @@ class SharedMarketStreamHandle:
                     try:
                         self.stream.stop()
                     except Exception as exc:
-                        record_runtime_diagnostic(
-                            "market_stream",
-                            "Market stream stop failed during reconnect cleanup",
-                            StreamControlError(str(exc) or exc.__class__.__name__),
-                            source="engine",
-                        )
+                        if not is_already_stopped_stream_error(exc):
+                            record_runtime_diagnostic(
+                                "market_stream",
+                                "Market stream stop failed during reconnect cleanup",
+                                StreamControlError(str(exc) or exc.__class__.__name__),
+                                source="engine",
+                            )
                     self.stream = None
 
             if self.stop_event.wait(reconnect_delay):
@@ -5579,9 +5814,10 @@ class SharedMarketStreamHandle:
             if self.stream is not None:
                 self.stream.stop()
         except Exception as exc:
-            record_runtime_diagnostic(
-                "market_stream",
-                "Market stream stop failed",
-                StreamControlError(str(exc) or exc.__class__.__name__),
-                source="engine",
-            )
+            if not is_already_stopped_stream_error(exc):
+                record_runtime_diagnostic(
+                    "market_stream",
+                    "Market stream stop failed",
+                    StreamControlError(str(exc) or exc.__class__.__name__),
+                    source="engine",
+                )

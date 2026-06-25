@@ -1,5 +1,15 @@
 # Operating Notes
 
+## Change Control
+
+- Fix one user-visible issue at a time unless the user explicitly approves a broader scope.
+- Use a Codex worktree for every bug fix, strategy change, replay/backtester change, websocket change, or risky refactor before touching the stable checkout.
+- Define the acceptance proof before editing, including the authoritative source for the user-visible symptom.
+- Acceptance proof must compare the app behavior to the authoritative source, not only to app-derived fields or cached UI state.
+- Do not expand into adjacent contract, strategy, replay, launcher, or UI work without explicit approval.
+- Do not restart or cut over the live backend until the focused fix passes in isolation and the restart path preserves the intended trading state.
+- If the current task is blocked in one area, keep working on other approved parts of the same goal that are not blocked.
+
 ## Fractional-First Requirement
 
 This app is designed for small Alpaca paper accounts where whole-share sizing is often not feasible. Fractional trading is a core product requirement, not an optional convenience.
@@ -25,6 +35,7 @@ Use **Purge Selected** when strategy changes require a clean run:
 - Do not disable trading on restart unless the user explicitly asks to pause/stop trading or a change is dangerous to run immediately.
 - When restarting the local app during active paper testing, preserve the previous trading state and restart selected accounts that were running before the restart.
 - Do not launch with the auto-start override during normal trade-data collection.
+- `scripts/live_cutover.py --execute` must not proceed past backup when saved accounts have `auto_start_trading` enabled unless the user explicitly approves `--allow-auto-start`.
 
 ## Entry Sizing and Duplicate Prevention
 
@@ -43,6 +54,6 @@ Use **Purge Selected** when strategy changes require a clean run:
 - High trade volume must never override direction. A short-window bounce in an all-day loser is not a valid entry unless the broader session trend and VWAP relationship have also turned positive.
 - Same-symbol re-entry is score based: after any strategy/protective exit is submitted or filled, that symbol must return with the configured score boost before it can be bought again. This is intended to stop same-day churn without adding blind PDT/cooldown logic.
 - Filled exits, including broker/protective stop fills and take-profit/winner exits, also create the re-entry score boost.
-- Inverse ETFs are controlled by the profile's inverse ETF mode: exclude the automatic top-volume inverse set, allow that bounded set as normal candidates, or use inverse-only. Do not add a separate SPY/QQQ downturn blocker; inverse ETFs must pass the same direction, VWAP, volume, score, and tradeability checks as other candidates.
+- Inverse ETFs are controlled by the profile's inverse ETF mode: allow inverse ETFs only when Alpaca returns them in the current top-25 volume universe, exclude inverse ETF entries, or explicitly use the bounded inverse-only set. Do not add a separate SPY/QQQ downturn blocker; inverse ETFs must pass the same direction, VWAP, volume, score, and tradeability checks as other candidates.
 - PDT guards, day-entry locks, day-exit locks, daily-loss stops, and risk-per-trade sizing must not be added back into the entry path for this version.
 - Existing long positions are skipped by the entry path and handled only by the exit manager.
