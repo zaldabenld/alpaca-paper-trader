@@ -174,6 +174,19 @@ def sanitized_strategy_overrides(overrides: dict[str, Any] | None = None) -> dic
     return {key: value for key, value in raw.items() if key in BACKTEST_STRATEGY_KEYS}
 
 
+def json_object_arg(raw_value: str, flag_name: str) -> dict[str, Any]:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{flag_name} must be a JSON object: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SystemExit(f"{flag_name} must be a JSON object.")
+    return value
+
+
 def parse_tape_event(path_name: str, line_number: int, raw_line: str) -> dict[str, Any]:
     line = raw_line.strip()
     if not line:
@@ -210,12 +223,14 @@ def tail_file_lines(path: Path, limit: int) -> list[str]:
     return [line.decode("utf-8", errors="replace") for line in lines[-limit:]]
 
 
-def iter_latest_tape_events(files: Iterable[Path], max_events: int) -> Iterable[dict[str, Any]]:
+def iter_latest_tape_events(files: Iterable[Path], max_events: int, warmup_events: int = 0) -> Iterable[dict[str, Any]]:
     if max_events <= 0:
         yield from iter_tape_events(files, max_events=0)
         return
     selected: list[tuple[Path, list[str]]] = []
-    remaining = max_events
+    warmup_events = max(0, int(warmup_events or 0))
+    requested = max_events + warmup_events
+    remaining = requested
     for path in reversed(list(files)):
         lines = tail_file_lines(path, remaining)
         if lines:
@@ -223,21 +238,36 @@ def iter_latest_tape_events(files: Iterable[Path], max_events: int) -> Iterable[
             remaining -= len(lines)
         if remaining <= 0:
             break
-    emitted = 0
+    parsed: list[dict[str, Any]] = []
     for path, lines in reversed(selected):
         for line_number, raw_line in enumerate(lines, start=1):
             event = parse_tape_event(path.name, line_number, raw_line)
             if not event:
                 continue
+            parsed.append(event)
+    warmup_cutoff = max(0, len(parsed) - max_events)
+    emitted = 0
+    for index, event in enumerate(parsed):
+        if index < warmup_cutoff:
+            event = dict(event)
+            event["_backtest_warmup"] = True
             yield event
-            emitted += 1
-            if emitted >= max_events:
-                return
+            continue
+        yield event
+        emitted += 1
+        if emitted >= max_events:
+            return
 
 
-def iter_tape_events(files: Iterable[Path], max_events: int = 0, *, latest_events: bool = False) -> Iterable[dict[str, Any]]:
+def iter_tape_events(
+    files: Iterable[Path],
+    max_events: int = 0,
+    *,
+    latest_events: bool = False,
+    warmup_events: int = 0,
+) -> Iterable[dict[str, Any]]:
     if latest_events:
-        yield from iter_latest_tape_events(files, max_events=max_events)
+        yield from iter_latest_tape_events(files, max_events=max_events, warmup_events=warmup_events)
         return
     emitted = 0
     for path in files:
@@ -378,6 +408,7 @@ class DayTapeBacktester:
         self.evaluations_by_top_volume_source: dict[str, int] = {}
         self.top_volume_snapshots_by_source: dict[str, int] = {}
         self.top_volume_contexts_by_source: dict[str, int] = {}
+        self.warmup_events = 0
 
     def apply_top_volume(self, payload: dict[str, Any], *, snapshot_event: bool = True) -> None:
         rows = [dict(row) for row in payload.get("rows") or [] if isinstance(row, dict)]
@@ -555,6 +586,9 @@ class DayTapeBacktester:
     def handle_event(self, event: dict[str, Any]) -> None:
         kind = str(event.get("kind") or "")
         payload = event_payload(event)
+        warmup = bool(event.get("_backtest_warmup"))
+        if warmup:
+            self.warmup_events += 1
         if kind == "parse_error":
             self.parse_errors += 1
         elif kind == "top_volume_snapshot":
@@ -564,7 +598,8 @@ class DayTapeBacktester:
         elif kind == "strategy_scan":
             self.update_config(payload)
             self.apply_strategy_scan_top_volume(payload)
-            self.evaluate_entries(str(event.get("time") or ""))
+            if not warmup:
+                self.evaluate_entries(str(event.get("time") or ""))
 
     def summary(self) -> dict[str, Any]:
         winners = [trade for trade in self.closed_trades if trade.get("winner")]
@@ -585,6 +620,7 @@ class DayTapeBacktester:
                 "open_positions": len(self.positions),
                 "rejected_candidates": len(self.rejected_candidates),
                 "parse_errors": self.parse_errors,
+                "warmup_events": self.warmup_events,
             },
             "top_volume_sources": sorted(self.top_volume_sources),
             "expected_top_volume_source": TOP_VOLUME_SOURCE,
@@ -604,11 +640,17 @@ def run_backtest(
     max_events: int = 0,
     *,
     latest_events: bool = False,
+    warmup_events: int = 0,
     strategy_overrides: dict[str, Any] | None = None,
     sizing_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     backtester = DayTapeBacktester(strategy_overrides=strategy_overrides, sizing_overrides=sizing_overrides)
-    for event in iter_tape_events(files, max_events=max_events, latest_events=latest_events):
+    for event in iter_tape_events(
+        files,
+        max_events=max_events,
+        latest_events=latest_events,
+        warmup_events=warmup_events,
+    ):
         backtester.handle_event(event)
     return backtester.summary()
 
@@ -636,6 +678,7 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(f"  open positions: {counts['open_positions']:,}")
     print(f"  rejected candidates: {counts['rejected_candidates']:,}")
     print(f"  parse errors: {counts['parse_errors']:,}")
+    print(f"  warmup events: {counts.get('warmup_events', 0):,}")
     print()
     print("Replay sizing harness")
     for key, value in summary["sizing_harness"].items():
@@ -675,6 +718,9 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=1, help="Most-recent tape files to replay when --path is a directory.")
     parser.add_argument("--max-events", type=int, default=0, help="Stop after this many tape events. 0 means no limit.")
     parser.add_argument("--latest-events", action="store_true", help="Use the latest bounded event window instead of the start of the selected file set.")
+    parser.add_argument("--warmup-events", type=int, default=0, help="When using --latest-events, process this many earlier events as indicator warm-up without entry evaluations.")
+    parser.add_argument("--strategy-overrides-json", default="", help="JSON object of strategy parameter overrides.")
+    parser.add_argument("--sizing-overrides-json", default="", help="JSON object of sizing harness overrides for labeled diagnostics.")
     parser.add_argument("--json", action="store_true", help="Print the full JSON summary.")
     args = parser.parse_args()
 
@@ -682,7 +728,14 @@ def main() -> int:
     if not files:
         print(f"No day-tape files found in {args.path}")
         return 0
-    summary = run_backtest(files, max(0, args.max_events), latest_events=bool(args.latest_events))
+    summary = run_backtest(
+        files,
+        max(0, args.max_events),
+        latest_events=bool(args.latest_events),
+        warmup_events=max(0, args.warmup_events),
+        strategy_overrides=json_object_arg(args.strategy_overrides_json, "--strategy-overrides-json"),
+        sizing_overrides=json_object_arg(args.sizing_overrides_json, "--sizing-overrides-json"),
+    )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:

@@ -114,6 +114,7 @@ const els = {
   replayStatus: document.querySelector("#replayStatus"),
   backtestDays: document.querySelector("#backtestDays"),
   backtestMaxEvents: document.querySelector("#backtestMaxEvents"),
+  backtestWarmupEvents: document.querySelector("#backtestWarmupEvents"),
   backtestLatestEvents: document.querySelector("#backtestLatestEvents"),
   runBacktestButton: document.querySelector("#runBacktestButton"),
   backtestRunStatus: document.querySelector("#backtestRunStatus"),
@@ -2056,7 +2057,8 @@ function backtestString(id, fallback) {
 function readBacktestPayload() {
   return {
     days: boundedIntegerInput(els.backtestDays, 1, 1, 30),
-    max_events: boundedIntegerInput(els.backtestMaxEvents, 20000, 0, 500000),
+    max_events: boundedIntegerInput(els.backtestMaxEvents, 5000, 0, 500000),
+    warmup_events: boundedIntegerInput(els.backtestWarmupEvents, 10000, 0, 500000),
     latest_events: Boolean(els.backtestLatestEvents?.checked),
     strategy_overrides: {
       min_entry_score: backtestNumber("backtestMinEntryScore", 44),
@@ -2144,7 +2146,8 @@ function renderBacktestReport(report = {}) {
   els.backtestSource.textContent = `${expectedSource}: ${formatCount(sourceEvaluations)}`;
   els.backtestStatus.textContent = statusText;
   els.backtestStatus.className = report.ok ? "positive" : "negative";
-  els.backtestRunStatus.textContent = report.pending || `Files: ${(report.files || []).join(", ") || "none"}`;
+  const warmupCount = formatCount(counts.warmup_events);
+  els.backtestRunStatus.textContent = report.pending || `Files: ${(report.files || []).join(", ") || "none"}; warm-up ${warmupCount}`;
 
   const checkRows = (report.checks || []).map((item) => ({
     name: item.name || "",

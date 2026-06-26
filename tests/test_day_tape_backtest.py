@@ -149,6 +149,55 @@ class DayTapeBacktestTests(unittest.TestCase):
         self.assertEqual(summary["top_volume_contexts_by_source"], {"alpaca_most_actives_volume": 1})
         self.assertEqual(summary["evaluations_by_top_volume_source"], {"alpaca_most_actives_volume": 1})
 
+    def test_latest_event_window_uses_warmup_without_counting_entry_evaluations(self) -> None:
+        backtest = load_backtest_module()
+        events = [
+            {
+                "kind": "top_volume_snapshot",
+                "time": "2026-06-24T20:29:00Z",
+                "payload": {"source": "alpaca_most_actives_volume", "symbols": ["AAA"], "rows": [{"symbol": "AAA"}]},
+            },
+            {
+                "kind": "strategy_scan",
+                "time": "2026-06-24T20:30:00Z",
+                "payload": {
+                    "config": {"use_top_volume_symbols": True, "inverse_etf_mode": "exclude"},
+                    "top_volume_source": "alpaca_most_actives_volume",
+                    "top_volume_symbols": ["AAA"],
+                    "top_volume_rows": [{"symbol": "AAA"}],
+                },
+            },
+            {
+                "kind": "strategy_scan",
+                "time": "2026-06-24T20:31:00Z",
+                "payload": {
+                    "config": {"use_top_volume_symbols": True, "inverse_etf_mode": "exclude"},
+                    "top_volume_source": "alpaca_most_actives_volume",
+                    "top_volume_symbols": ["AAA"],
+                    "top_volume_rows": [{"symbol": "AAA"}],
+                },
+            },
+        ]
+        seen: list[str] = []
+
+        def fake_entry_candidate(self, symbol, *_args):
+            seen.append(symbol)
+            self.strategy_state.last_action[symbol] = "Hold (synthetic)"
+            return None
+
+        with (
+            tempfile.TemporaryDirectory() as raw_dir,
+            patch.object(backtest.TraderEngine, "entry_candidate", fake_entry_candidate),
+        ):
+            tape = write_tape(raw_dir, events)
+            summary = backtest.run_backtest([tape], max_events=1, latest_events=True, warmup_events=2)
+
+        self.assertEqual(seen, ["AAA"])
+        self.assertEqual(summary["counts"]["warmup_events"], 2)
+        self.assertEqual(summary["counts"]["evaluations"], 1)
+        self.assertEqual(summary["top_volume_contexts_by_source"], {"alpaca_most_actives_volume": 3})
+        self.assertEqual(summary["evaluations_by_top_volume_source"], {"alpaca_most_actives_volume": 1})
+
     def test_strategy_scan_embedded_top_volume_context_is_replayable(self) -> None:
         backtest = load_backtest_module()
         events = [

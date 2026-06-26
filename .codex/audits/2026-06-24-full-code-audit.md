@@ -1406,6 +1406,32 @@ Verification:
 Remaining live gate:
 - The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
 
+### 2026-06-26 - Goal continuation finding: AUDIT-036 latest-window backtests started cold and produced misleading Waiting rejects
+Status: Fixed in worktree `codex/alpaca-higher-frequency-strategy`; live cutover not applied
+Evidence:
+- Running `scripts/day_tape_backtest.py --latest-events` against the current 2026-06-26 tape selected only the tail event window.
+- Because the replay engine had no earlier bars for indicator warm-up, the rejected-candidate sample was dominated by `Hold (Waiting)` and warming states even though the live day tape contained populated strategy-scan indicator rows.
+- This made the Backtest tab unsuitable for diagnosing the current live "not buying" symptom and could hide whether strategy parameter changes actually increased entries.
+Impact:
+- The UI exposed strategy controls, but the default latest-window replay could evaluate a cold state rather than the warmed live decision state.
+- Strategy comparisons from that path could falsely report zero accepted trades for parameter sets that might pass once indicators were warmed.
+Required fix:
+- Add explicit latest-window warm-up events to the day-tape backtester.
+- Process warm-up top-volume and market-bar events to seed strategy state, but do not count warm-up strategy scans as entry evaluations.
+- Expose the warm-up control and count in the Backtest tab.
+Fix evidence:
+- `scripts/day_tape_backtest.py` now supports `warmup_events`, marks warm-up tail events, skips entry evaluation during warm-up scans, reports warm-up event counts, and accepts JSON strategy/sizing overrides from the CLI.
+- `/api/backtest/day-tape` forwards `warmup_events` to the backtester and defaults the interactive latest-window path to a bounded 5,000-event window plus 10,000 warm-up events.
+- The Backtest tab now has a visible `Warm-up events` input and reports the warm-up count after a run.
+- `scripts/day_tape_strategy_compare.py` was added to compare named app-engine strategy override candidates against the same day tape without changing live settings.
+Verification:
+- Focused regression tests passed: `python -m unittest tests.test_day_tape_backtest tests.test_backtest_ui_api tests.test_frontend_state_layout -v`.
+- Python compile passed for `scripts/day_tape_backtest.py`, `scripts/day_tape_strategy_compare.py`, and `python_app/alpaca_desktop/server.py`.
+- `node --check python_app/static/app.js` passed.
+- Read-only profile comparison on `tape-20260626.jsonl` over the first 80,000 events showed current H2 accepted 1 losing trade, while the moderate-frequency candidate accepted 4 trades but still had only the same closed loser and 3 open positions; this is not sufficient proof for live strategy deployment.
+Remaining gate:
+- A revised higher-frequency live profile still needs completed replay evidence proving better results than current H2 before it should be cut over.
+
 ### 2026-06-25 - Goal continuation finding: AUDIT-064 Daily P/L used account-field subtraction instead of Alpaca portfolio history
 Status: Fixed locally; live restart and post-relaunch verification required
 Evidence:

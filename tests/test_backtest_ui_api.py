@@ -30,6 +30,7 @@ class FakeBacktestModule:
         max_events: int,
         *,
         latest_events: bool = False,
+        warmup_events: int = 0,
         strategy_overrides: dict[str, object] | None = None,
         sizing_overrides: dict[str, object] | None = None,
     ) -> dict[str, object]:
@@ -38,6 +39,7 @@ class FakeBacktestModule:
                 "files": [item.name for item in files],
                 "max_events": max_events,
                 "latest_events": latest_events,
+                "warmup_events": warmup_events,
                 "strategy_overrides": dict(strategy_overrides or {}),
                 "sizing_overrides": dict(sizing_overrides or {}),
             }
@@ -62,6 +64,7 @@ class FakeBacktestModule:
                 "open_positions": 1,
                 "rejected_candidates": 4,
                 "parse_errors": 0,
+                "warmup_events": warmup_events,
             },
             "top_volume_sources": ["alpaca_most_actives_volume"],
             "expected_top_volume_source": "alpaca_most_actives_volume",
@@ -82,6 +85,7 @@ class BacktestUiApiTests(unittest.TestCase):
             days=1,
             max_events=50000,
             latest_events=True,
+            warmup_events=25000,
             strategy_overrides={"min_entry_score": 50, "score_weight_momentum": 25},
             sizing_overrides={"starting_equity": 5000, "trade_size_mode": "percent", "trade_percent": 4},
         )
@@ -92,9 +96,11 @@ class BacktestUiApiTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual(report["files"], ["tape-20260625.jsonl"])
         self.assertEqual(report["parameters"]["max_events"], 50000)
+        self.assertEqual(report["parameters"]["warmup_events"], 25000)
         self.assertEqual(report["parameters"]["strategy_overrides"]["min_entry_score"], 50)
         self.assertEqual(fake.calls[-1]["strategy_overrides"]["score_weight_momentum"], 25)
         self.assertEqual(fake.calls[-1]["sizing_overrides"]["starting_equity"], 5000)
+        self.assertEqual(fake.calls[-1]["warmup_events"], 25000)
         self.assertEqual(report["summary"]["selection_engine"], "app_engine")
         checks = {item["name"]: item for item in report["checks"]}
         self.assertTrue(checks["selection_engine"]["ok"])

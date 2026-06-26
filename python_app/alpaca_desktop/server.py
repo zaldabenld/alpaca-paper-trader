@@ -81,8 +81,9 @@ class AccountActionPayload(BaseModel):
 
 class DayTapeBacktestPayload(BaseModel):
     days: int = Field(default=1, ge=1, le=30)
-    max_events: int = Field(default=20000, ge=0, le=500000)
+    max_events: int = Field(default=5000, ge=0, le=500000)
     latest_events: bool = True
+    warmup_events: int = Field(default=10000, ge=0, le=500000)
     strategy_overrides: dict[str, Any] = Field(default_factory=dict)
     sizing_overrides: dict[str, Any] = Field(default_factory=dict)
 
@@ -420,6 +421,7 @@ def day_tape_backtest_report(payload: DayTapeBacktestPayload) -> dict[str, Any]:
         "days": payload.days,
         "max_events": payload.max_events,
         "latest_events": payload.latest_events,
+        "warmup_events": payload.warmup_events,
         "strategy_overrides": payload.strategy_overrides,
         "sizing_overrides": payload.sizing_overrides,
     }
@@ -444,6 +446,7 @@ def day_tape_backtest_report(payload: DayTapeBacktestPayload) -> dict[str, Any]:
         files,
         payload.max_events,
         latest_events=payload.latest_events,
+        warmup_events=payload.warmup_events if payload.latest_events else 0,
         strategy_overrides=payload.strategy_overrides,
         sizing_overrides=payload.sizing_overrides,
     )
