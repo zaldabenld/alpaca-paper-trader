@@ -102,9 +102,19 @@ class RuntimeDiagnostics:
             "error_count": len(errors),
         }
 
-    def clear(self) -> None:
+    def clear(self, *, area: str | None = None, source: str | None = None) -> None:
         with self._lock:
+            if area is None and source is None:
+                self._entries.clear()
+                return
+            kept = [
+                entry
+                for entry in self._entries
+                if (area is not None and entry.get("area") != area)
+                or (source is not None and entry.get("source") != source)
+            ]
             self._entries.clear()
+            self._entries.extend(kept)
 
 
 runtime_diagnostics = RuntimeDiagnostics()
@@ -123,3 +133,7 @@ def record_runtime_diagnostic(
 
 def runtime_diagnostics_snapshot(limit: int = 50) -> dict[str, Any]:
     return runtime_diagnostics.snapshot(limit=limit)
+
+
+def clear_runtime_diagnostics(*, area: str | None = None, source: str | None = None) -> None:
+    runtime_diagnostics.clear(area=area, source=source)

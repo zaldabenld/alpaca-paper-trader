@@ -171,6 +171,13 @@ async def background_refresh_loop() -> None:
                     record_background_error(None, f"Dashboard refresh failed: {exc}")
             if _auto_connect_complete and now - _last_stream_watch >= 10:
                 _last_stream_watch = now
+                stream_allowed = manager.market_stream_should_run()
+                if not stream_allowed:
+                    try:
+                        await asyncio.to_thread(manager.ensure_market_data_stream)
+                    except Exception as exc:
+                        record_background_error(None, f"Market stream closed-market stop failed: {exc}")
+                    continue
                 stream = manager.market_stream_state()
                 status = str(stream.get("status") or "").lower()
                 age = stream.get("last_message_age_seconds")

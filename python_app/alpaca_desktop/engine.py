@@ -65,6 +65,7 @@ from .runtime_diagnostics import (
     OrderExecutionError,
     ReplayPersistenceError,
     StreamControlError,
+    clear_runtime_diagnostics,
     record_runtime_diagnostic,
     runtime_diagnostics_snapshot,
 )
@@ -2178,6 +2179,7 @@ class TraderEngine:
                 closed_orders=closed_order_dicts,
                 strategy_rows=rows,
             )
+            clear_runtime_diagnostics(area="account_refresh", source="engine")
         except Exception as exc:
             self.record_runtime_exception(
                 "account_refresh",
@@ -5191,6 +5193,18 @@ class TraderManager:
     def connected_engines(self) -> list[TraderEngine]:
         return [engine for engine in self.list_engines() if engine.connected]
 
+    def market_stream_should_run(self) -> bool:
+        for engine in self.connected_engines():
+            if not engine.config.use_market_stream:
+                continue
+            if not engine.config.market_hours_only:
+                return True
+            with engine.lock:
+                market_clock = dict(engine.market_clock)
+            if bool(market_clock.get("is_open")):
+                return True
+        return False
+
     def shared_market_source(self) -> TraderEngine | None:
         with self.lock:
             active_source_id = self.market_stream.source_account_id if self.market_stream is not None else ""
@@ -5244,6 +5258,20 @@ class TraderManager:
             with self.lock:
                 self.stop_shared_market_stream_locked()
                 self.market_stream_health = self.default_market_stream_health()
+            return
+
+        if not self.market_stream_should_run():
+            with self.lock:
+                self.stop_shared_market_stream_locked()
+                self.update_market_stream_health(
+                    status="Market closed",
+                    connected=False,
+                    feed=source.config.feed,
+                    dashboard_symbols=0,
+                    bar_symbols=0,
+                    last_error="",
+                )
+            clear_runtime_diagnostics(area="market_stream", source="engine")
             return
 
         with self.lock:
