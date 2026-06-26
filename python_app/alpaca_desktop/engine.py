@@ -2843,12 +2843,12 @@ class TraderEngine:
             return f"Hold (trend {snapshot.bias})"
         if snapshot.momentum_percent is None:
             return "Hold (momentum warming)"
-        if snapshot.momentum_percent < config.min_momentum_percent:
-            return f"Hold (momentum {snapshot.momentum_percent:+.2f}% < {config.min_momentum_percent}%)"
+        if snapshot.momentum_percent < Decimal("0"):
+            return f"Hold (momentum {snapshot.momentum_percent:+.2f}%)"
         recent_momentum = getattr(snapshot, "recent_momentum_percent", None)
         if recent_momentum is None:
             return "Hold (recent momentum warming)"
-        if recent_momentum < limits["min_recent_momentum"]:
+        if recent_momentum < Decimal("0"):
             return f"Hold (recent momentum {recent_momentum:+.2f}%)"
         late_floor = limits["late_momentum_floor"]
         if late_floor > 0 and snapshot.rsi >= config.buy_rsi_max - Decimal("3") and snapshot.momentum_percent < late_floor:
@@ -2857,7 +2857,7 @@ class TraderEngine:
             return f"Hold (late SMI {snapshot.smi:.1f}, momentum {snapshot.momentum_percent:+.2f}%)"
         if getattr(snapshot, "long_momentum_percent", None) is None:
             return "Hold (long momentum warming)"
-        if below_entry_floor(snapshot.long_momentum_percent, limits["min_long_momentum"]):
+        if snapshot.long_momentum_percent < Decimal("0"):
             return f"Hold (long momentum {snapshot.long_momentum_percent:+.2f}%)"
         if getattr(snapshot, "session_change_percent", None) is None:
             return "Hold (session trend warming)"

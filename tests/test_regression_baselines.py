@@ -388,7 +388,9 @@ class StrategySelectionContractTests(unittest.TestCase):
     def test_direction_session_momentum_and_vwap_remain_hard_entry_gates(self) -> None:
         scenarios = [
             ("bearish", {"bias": "Bearish"}, "Hold (trend Bearish)"),
-            ("weak_momentum", {"momentum_percent": Decimal("0.01")}, "Hold (momentum +0.01% < 0.05%)"),
+            ("negative_momentum", {"momentum_percent": Decimal("-0.01")}, "Hold (momentum -0.01%)"),
+            ("negative_recent_momentum", {"recent_momentum_percent": Decimal("-0.01")}, "Hold (recent momentum -0.01%)"),
+            ("negative_long_momentum", {"long_momentum_percent": Decimal("-0.01")}, "Hold (long momentum -0.01%)"),
             ("weak_session", {"session_change_percent": Decimal("0.01")}, "Hold (session trend +0.01%)"),
             ("below_vwap", {"vwap_distance_percent": Decimal("-0.10")}, "Hold (below VWAP -0.10%)"),
         ]
@@ -414,6 +416,32 @@ class StrategySelectionContractTests(unittest.TestCase):
 
                 self.assertIsNone(candidate)
                 self.assertEqual(engine.strategy_state.last_action["AAA"], expected_action)
+
+    def test_positive_momentum_below_configured_floor_can_score_as_candidate(self) -> None:
+        engine = TraderEngine("selection-soft-momentum")
+        engine.config = self.candidate_config(
+            min_momentum_percent="0.15",
+            min_recent_momentum_percent="0.08",
+            min_long_momentum_percent="0.12",
+        )
+        snapshot = entry_ready_snapshot()
+        snapshot.momentum_percent = Decimal("0.10")
+        snapshot.recent_momentum_percent = Decimal("0.07")
+        snapshot.long_momentum_percent = Decimal("0.05")
+
+        with patch.object(engine, "snapshot", return_value=snapshot):
+            candidate = engine.entry_candidate(
+                "AAA",
+                0,
+                {"equity": "1000", "buying_power": "1000"},
+                None,
+                open_position_count=0,
+                open_orders=[],
+                entries_allowed=True,
+            )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(engine.strategy_state.last_action["AAA"], f"Candidate score {candidate['score']:.1f}")
 
 
 class ProfitLossContractBaselineTests(unittest.TestCase):
