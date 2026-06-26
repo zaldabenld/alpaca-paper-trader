@@ -1406,7 +1406,7 @@ Verification:
 Remaining live gate:
 - The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
 
-### 2026-06-26 - Goal continuation finding: AUDIT-037 live strategy used strict H2 gates instead of documented riskbox paper-test candidate
+### 2026-06-26 - Goal continuation finding: AUDIT-038 live strategy used strict H2 gates instead of documented riskbox paper-test candidate
 Status: Fixed in worktree; live cutover still requires verification and restart
 Evidence:
 - The live day tape for 2026-06-26 showed exactly three buy intents in the latest three-hour window, all for `IBIT`, one per connected account.
