@@ -258,7 +258,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "buy_rsi_min": "42",
         "buy_rsi_max": "65",
         "sell_rsi": "70",
-        "min_entry_score": "30",
+        "min_entry_score": "20",
         "momentum_period": 6,
         "min_momentum_percent": "0.15",
         "min_recent_momentum_percent": "0.08",
@@ -314,7 +314,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "buy_rsi_min": "42",
         "buy_rsi_max": "65",
         "sell_rsi": "72",
-        "min_entry_score": "30",
+        "min_entry_score": "20",
         "momentum_period": 6,
         "min_momentum_percent": "0.15",
         "min_recent_momentum_percent": "0.08",
@@ -370,7 +370,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "buy_rsi_min": "42",
         "buy_rsi_max": "65",
         "sell_rsi": "72",
-        "min_entry_score": "30",
+        "min_entry_score": "20",
         "momentum_period": 6,
         "min_momentum_percent": "0.15",
         "min_recent_momentum_percent": "0.08",
@@ -487,7 +487,7 @@ class AppConfig(BaseModel):
     buy_rsi_min: Decimal = Decimal("42")
     buy_rsi_max: Decimal = Decimal("65")
     sell_rsi: Decimal = Decimal("72")
-    min_entry_score: Decimal = Decimal("30")
+    min_entry_score: Decimal = Decimal("20")
     momentum_period: int = 6
     min_momentum_percent: Decimal = Decimal("0.15")
     min_recent_momentum_percent: Decimal = Decimal("0.08")
@@ -817,7 +817,7 @@ RETUNED_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
     "long_period": 21,
     "buy_rsi_min": Decimal("42"),
     "buy_rsi_max": Decimal("65"),
-    "min_entry_score": Decimal("30"),
+    "min_entry_score": Decimal("20"),
     "momentum_period": 6,
     "min_momentum_percent": Decimal("0.15"),
     "min_recent_momentum_percent": Decimal("0.08"),
@@ -903,7 +903,7 @@ STRICT_H2_SIGNAL_DEFAULTS: dict[str, Decimal] = {
 RISKBOX_SIGNAL_DEFAULTS: dict[str, Decimal] = {
     "buy_rsi_min": Decimal("42"),
     "buy_rsi_max": Decimal("65"),
-    "min_entry_score": Decimal("30"),
+    "min_entry_score": Decimal("20"),
     "min_momentum_percent": Decimal("0.15"),
     "min_recent_momentum_percent": Decimal("0.08"),
     "min_long_momentum_percent": Decimal("0.12"),
@@ -918,6 +918,10 @@ RISKBOX_SIGNAL_DEFAULTS: dict[str, Decimal] = {
     "reentry_score_boost": Decimal("10"),
     "take_profit_percent": Decimal("2.5"),
     "stop_loss_percent": Decimal("1.25"),
+}
+
+PREVIOUS_RISKBOX_SIGNAL_DEFAULTS: dict[str, Decimal] = RISKBOX_SIGNAL_DEFAULTS | {
+    "min_entry_score": Decimal("30"),
 }
 
 
@@ -986,7 +990,10 @@ def retune_riskbox_strategy_config(config: AppConfig) -> AppConfig:
     has_strict_h2_signals = all(
         config_value_matches(getattr(config, key), value) for key, value in STRICT_H2_SIGNAL_DEFAULTS.items()
     )
-    if not has_strict_h2_signals:
+    has_previous_riskbox_signals = all(
+        config_value_matches(getattr(config, key), value) for key, value in PREVIOUS_RISKBOX_SIGNAL_DEFAULTS.items()
+    )
+    if not (has_strict_h2_signals or has_previous_riskbox_signals):
         return config
     try:
         return AppConfig(**(config.model_dump(mode="json") | RISKBOX_SIGNAL_DEFAULTS))
@@ -2828,7 +2835,7 @@ class TraderEngine:
             return halt_reason
         if snapshot.rsi is None:
             return "Hold (RSI warming)"
-        if not (config.buy_rsi_min <= snapshot.rsi <= config.buy_rsi_max):
+        if snapshot.rsi < config.buy_rsi_min:
             return f"Hold (RSI {snapshot.rsi:.1f})"
         if snapshot.bias == "Waiting":
             return "Hold (trend warming)"
@@ -2864,20 +2871,10 @@ class TraderEngine:
             return f"Hold (below VWAP {snapshot.vwap_distance_percent:+.2f}%)"
         if snapshot.vwap_distance_percent > limits["max_vwap_extension"]:
             return f"Hold (extended above VWAP {snapshot.vwap_distance_percent:+.2f}%)"
-        session_pullback = getattr(snapshot, "session_pullback_percent", None)
-        if session_pullback is not None and session_pullback > limits["max_session_pullback"]:
-            return f"Hold (session pullback {session_pullback:.2f}%)"
-        recent_pullback = getattr(snapshot, "recent_pullback_percent", None)
-        if recent_pullback is not None and recent_pullback > limits["max_recent_pullback"]:
-            return f"Hold (recent pullback {recent_pullback:.2f}%)"
         if snapshot.smi is None:
             return "Hold (SMI warming)"
-        if snapshot.smi < config.min_smi:
-            return f"Hold (SMI {snapshot.smi:.1f} < {config.min_smi})"
         if snapshot.relative_volume is None:
             return "Hold (volume warming)"
-        if not snapshot.volume_ok:
-            return f"Hold (volume {snapshot.relative_volume:.2f}x < {config.volume_multiplier}x)"
         flow_reason = self.order_flow_hold_reason(symbol, config)
         if flow_reason:
             return flow_reason

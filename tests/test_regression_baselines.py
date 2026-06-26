@@ -79,7 +79,7 @@ class ConfigAndSizingBaselineTests(unittest.TestCase):
 
         self.assertEqual(config.buy_rsi_min, Decimal("42"))
         self.assertEqual(config.buy_rsi_max, Decimal("65"))
-        self.assertEqual(config.min_entry_score, Decimal("30"))
+        self.assertEqual(config.min_entry_score, Decimal("20"))
         self.assertEqual(config.min_momentum_percent, Decimal("0.15"))
         self.assertEqual(config.min_recent_momentum_percent, Decimal("0.08"))
         self.assertEqual(config.min_long_momentum_percent, Decimal("0.12"))
@@ -119,7 +119,7 @@ class ConfigAndSizingBaselineTests(unittest.TestCase):
         retuned = engine_module.retune_strategy_config(config)
 
         self.assertEqual(retuned.buy_rsi_max, Decimal("65"))
-        self.assertEqual(retuned.min_entry_score, Decimal("30"))
+        self.assertEqual(retuned.min_entry_score, Decimal("20"))
         self.assertEqual(retuned.min_session_change_percent, Decimal("0.05"))
         self.assertEqual(retuned.volume_multiplier, Decimal("1.0"))
         self.assertEqual(retuned.reentry_score_boost, Decimal("10"))
@@ -128,6 +128,33 @@ class ConfigAndSizingBaselineTests(unittest.TestCase):
         self.assertEqual(retuned.max_trade_percent, Decimal("10"))
         self.assertEqual(retuned.max_open_positions, 16)
         self.assertEqual(retuned.max_total_exposure_percent, Decimal("75"))
+
+    def test_saved_riskbox_strategy_retunes_to_live_entry_floor(self) -> None:
+        config = AppConfig(
+            profile="aggressive",
+            symbols=["SPY"],
+            buy_rsi_min="42",
+            buy_rsi_max="65",
+            min_entry_score="30",
+            min_momentum_percent="0.15",
+            min_recent_momentum_percent="0.08",
+            min_long_momentum_percent="0.12",
+            min_session_change_percent="0.05",
+            min_vwap_distance_percent="0.05",
+            max_vwap_distance_percent="2.25",
+            max_session_pullback_percent="0.75",
+            max_recent_pullback_percent="0.50",
+            late_momentum_floor_percent="0",
+            min_smi="40",
+            volume_multiplier="1.0",
+            reentry_score_boost="10",
+            take_profit_percent="2.5",
+            stop_loss_percent="1.25",
+        )
+
+        retuned = engine_module.retune_strategy_config(config)
+
+        self.assertEqual(retuned.min_entry_score, Decimal("20"))
 
     def test_config_uses_explicit_trade_size_mode_and_migrates_legacy_single_cap(self) -> None:
         default_percent = AppConfig(profile="neutral", symbols=["SPY"])
@@ -325,6 +352,68 @@ class StrategySelectionContractTests(unittest.TestCase):
         self.assertFalse(stop_rule)
         self.assertIsNone(reservation)
         self.assertEqual(engine.strategy_state.last_action["AAA"], "Hold (max positions)")
+
+    def test_soft_confirmation_inputs_do_not_block_before_entry_scoring(self) -> None:
+        engine = TraderEngine("selection-soft-confirmations")
+        engine.config = self.candidate_config(
+            buy_rsi_max="65",
+            max_session_pullback_percent="0.75",
+            max_recent_pullback_percent="0.50",
+            min_smi="40",
+            volume_multiplier="1.0",
+        )
+        snapshot = entry_ready_snapshot()
+        snapshot.rsi = Decimal("75")
+        snapshot.session_pullback_percent = Decimal("1.25")
+        snapshot.recent_pullback_percent = Decimal("0.75")
+        snapshot.smi = Decimal("10")
+        snapshot.relative_volume = Decimal("0.10")
+        snapshot.volume_ok = False
+
+        with patch.object(engine, "snapshot", return_value=snapshot):
+            candidate = engine.entry_candidate(
+                "AAA",
+                0,
+                {"equity": "1000", "buying_power": "1000"},
+                None,
+                open_position_count=0,
+                open_orders=[],
+                entries_allowed=True,
+            )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["score"], Decimal("34.5"))
+        self.assertEqual(engine.strategy_state.last_action["AAA"], "Candidate score 34.5")
+
+    def test_direction_session_momentum_and_vwap_remain_hard_entry_gates(self) -> None:
+        scenarios = [
+            ("bearish", {"bias": "Bearish"}, "Hold (trend Bearish)"),
+            ("weak_momentum", {"momentum_percent": Decimal("0.01")}, "Hold (momentum +0.01% < 0.05%)"),
+            ("weak_session", {"session_change_percent": Decimal("0.01")}, "Hold (session trend +0.01%)"),
+            ("below_vwap", {"vwap_distance_percent": Decimal("-0.10")}, "Hold (below VWAP -0.10%)"),
+        ]
+
+        for name, updates, expected_action in scenarios:
+            with self.subTest(name=name):
+                engine = TraderEngine(f"selection-hard-gate-{name}")
+                engine.config = self.candidate_config()
+                snapshot = entry_ready_snapshot()
+                for key, value in updates.items():
+                    setattr(snapshot, key, value)
+
+                with patch.object(engine, "snapshot", return_value=snapshot):
+                    candidate = engine.entry_candidate(
+                        "AAA",
+                        0,
+                        {"equity": "1000", "buying_power": "1000"},
+                        None,
+                        open_position_count=0,
+                        open_orders=[],
+                        entries_allowed=True,
+                    )
+
+                self.assertIsNone(candidate)
+                self.assertEqual(engine.strategy_state.last_action["AAA"], expected_action)
 
 
 class ProfitLossContractBaselineTests(unittest.TestCase):
