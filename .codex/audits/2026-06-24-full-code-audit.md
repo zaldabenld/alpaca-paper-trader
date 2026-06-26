@@ -1406,6 +1406,45 @@ Verification:
 Remaining live gate:
 - The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
 
+### 2026-06-26 - Goal continuation finding: AUDIT-038 live strategy used strict H2 gates instead of documented riskbox paper-test candidate
+Status: Fixed in stable checkout; live restart still required
+Evidence:
+- The live day tape for 2026-06-26 showed exactly three buy intents in the latest three-hour window, all for `IBIT`, one per connected account.
+- The same tape's embedded config showed `profile=aggressive`, `min_entry_score=44`, `min_session_change_percent=1.35`, `volume_multiplier=1.5`, `buy_rsi_max=68`, and `reentry_score_boost=12`.
+- The documented replay recommendation `reports\recommendation-max20-riskbox-smi40-balanced2_5.md` identifies `riskbox_open_smi_40_session_0.05_score_30|balanced_2.5_1.25` as the best paper-test candidate, with `min_entry_score=30`, `min_session_change_percent=0.05`, `volume_multiplier=1.0`, `buy_rsi_max=65`, and `reentry_score_boost=10`.
+Impact:
+- The live app was running stricter H2-style gates than the documented riskbox candidate, so top-volume symbols were rejected before sizing/capacity and all accounts converged on the only symbol that cleared those stricter gates.
+Required fix:
+- Promote the documented riskbox selection thresholds into the built-in/default strategy layer.
+- Retune saved strict-H2 account configs in memory to the riskbox thresholds while preserving account sizing, exposure, max positions, credentials, and saved app data.
+- Add a replay compare profile for both the old strict-H2 live settings and the promoted riskbox settings.
+Verification:
+- Focused config/sizing tests passed in the worktree.
+- Full regression suite passed in the worktree: 125 tests.
+- Python compile and `git diff --check` passed in the worktree with only CRLF normalization warnings.
+- Current live health before cutover showed current backend, `runtime_error_count=0`, `settings_error_count=0`, `top_volume_source=alpaca_most_actives_volume`, and 25 top-volume rows.
+- The last six hours of day tape showed zero runtime, max-entry, or order-error events.
+Remaining live gate:
+- Stable checkout needs a backend restart before the new riskbox strategy values can take effect in the running app.
+
+### 2026-06-26 - Goal continuation finding: AUDIT-035 live strategy is sparse because combined hard gates reject nearly every top-volume candidate
+Status: Confirmed live; no strategy change applied in this finding
+Evidence:
+- Live `/api/health`, `/api/state`, and `/api/dashboard` report current backend health, zero runtime diagnostic errors, zero settings diagnostic errors, a streaming market data feed, and paper trading running.
+- Account capacity is not the immediate blocker: the connected accounts currently have open-position counts below their configured maximums and logs continue to show scan heartbeats with available buying power.
+- The current-day tape for 2026-06-26 shows the only buy entry intents in the last three hours were the three IBIT buys, followed by protective stop orders.
+- A gate replay over the last three hours of `strategy_scan` rows found the dominant hard-gate failures were low relative volume, excessive session pullback, session change below the configured floor, low SMI, weak recent momentum, weak momentum, weak long momentum, below VWAP, and bearish trend.
+- Relaxing any one gate in isolation still produced very few passing rows; a moderate combined relaxation produced many more hypothetical pass rows. This shows the sparse behavior is caused by the combined current profile, not by max-open-position, budget, or runtime-error blocking.
+Impact:
+- The engine is mechanically scanning and capable of submitting orders, but the deployed H2 hard-gate profile is not aligned with the expected high-frequency volatility-trading behavior on 2026-06-26.
+- SPY/QQQ are monitored as market-proxy rows in top-volume mode, but they do not currently cause the engine to admit more candidates when the broader market is positive; each candidate must still independently pass every hard gate.
+Required fix:
+- Do not loosen live gates blindly. First choose a revised strategy profile that intentionally targets the desired higher trade frequency, prove it through the app-engine replay/backtester, then deploy it through the guarded live cutover path.
+- Add or improve operator-visible decision-gate diagnostics so the UI can show the complete rejection stack instead of only the first hold reason.
+Verification needed:
+- Replay/backtest evidence comparing current H2 against the revised higher-frequency profile on recorded top-volume tape.
+- Live post-deployment proof that runtime diagnostics remain clean, max-position/budget gates remain capacity-only, and entry candidates/orders increase for the intended reasons.
+
 ### 2026-06-25 - Goal continuation finding: AUDIT-064 Daily P/L used account-field subtraction instead of Alpaca portfolio history
 Status: Fixed locally; live restart and post-relaunch verification required
 Evidence:

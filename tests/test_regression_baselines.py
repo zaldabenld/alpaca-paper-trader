@@ -74,6 +74,61 @@ def entry_ready_snapshot(price: str = "10") -> SimpleNamespace:
 
 
 class ConfigAndSizingBaselineTests(unittest.TestCase):
+    def test_default_strategy_uses_recommended_riskbox_selection_values(self) -> None:
+        config = AppConfig(profile="aggressive", symbols=["SPY"])
+
+        self.assertEqual(config.buy_rsi_min, Decimal("42"))
+        self.assertEqual(config.buy_rsi_max, Decimal("65"))
+        self.assertEqual(config.min_entry_score, Decimal("30"))
+        self.assertEqual(config.min_momentum_percent, Decimal("0.15"))
+        self.assertEqual(config.min_recent_momentum_percent, Decimal("0.08"))
+        self.assertEqual(config.min_long_momentum_percent, Decimal("0.12"))
+        self.assertEqual(config.min_session_change_percent, Decimal("0.05"))
+        self.assertEqual(config.volume_multiplier, Decimal("1.0"))
+        self.assertEqual(config.reentry_score_boost, Decimal("10"))
+        self.assertEqual(config.take_profit_percent, Decimal("2.5"))
+        self.assertEqual(config.stop_loss_percent, Decimal("1.25"))
+
+    def test_saved_h2_strategy_retunes_to_riskbox_without_changing_capacity(self) -> None:
+        config = AppConfig(
+            profile="aggressive",
+            symbols=["SPY"],
+            trade_size_mode="percent",
+            max_trade_notional="0",
+            max_trade_percent="10",
+            max_open_positions=16,
+            max_total_exposure_percent="75",
+            buy_rsi_min="42",
+            buy_rsi_max="68",
+            min_entry_score="44",
+            min_momentum_percent="0.08",
+            min_recent_momentum_percent="0.05",
+            min_long_momentum_percent="0.05",
+            min_session_change_percent="1.35",
+            min_vwap_distance_percent="0.05",
+            max_vwap_distance_percent="2.25",
+            max_session_pullback_percent="0.9",
+            max_recent_pullback_percent="0.55",
+            min_smi="40",
+            volume_multiplier="1.5",
+            reentry_score_boost="12",
+            take_profit_percent="2.5",
+            stop_loss_percent="1.25",
+        )
+
+        retuned = engine_module.retune_strategy_config(config)
+
+        self.assertEqual(retuned.buy_rsi_max, Decimal("65"))
+        self.assertEqual(retuned.min_entry_score, Decimal("30"))
+        self.assertEqual(retuned.min_session_change_percent, Decimal("0.05"))
+        self.assertEqual(retuned.volume_multiplier, Decimal("1.0"))
+        self.assertEqual(retuned.reentry_score_boost, Decimal("10"))
+        self.assertEqual(retuned.trade_size_mode, "percent")
+        self.assertEqual(retuned.max_trade_notional, Decimal("0"))
+        self.assertEqual(retuned.max_trade_percent, Decimal("10"))
+        self.assertEqual(retuned.max_open_positions, 16)
+        self.assertEqual(retuned.max_total_exposure_percent, Decimal("75"))
+
     def test_config_uses_explicit_trade_size_mode_and_migrates_legacy_single_cap(self) -> None:
         default_percent = AppConfig(profile="neutral", symbols=["SPY"])
         self.assertEqual(default_percent.trade_size_mode, "percent")
