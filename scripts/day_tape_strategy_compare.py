@@ -14,6 +14,44 @@ BACKTEST_PATH = REPO_ROOT / "scripts" / "day_tape_backtest.py"
 
 CANDIDATE_PROFILES: dict[str, dict[str, Any]] = {
     "current_h2": {},
+    "strict_h2_live_20260626": {
+        "buy_rsi_min": 42,
+        "buy_rsi_max": 68,
+        "min_entry_score": 44,
+        "min_momentum_percent": 0.08,
+        "min_recent_momentum_percent": 0.05,
+        "min_long_momentum_percent": 0.05,
+        "min_session_change_percent": 1.35,
+        "min_vwap_distance_percent": 0.05,
+        "max_vwap_distance_percent": 2.25,
+        "max_session_pullback_percent": 0.9,
+        "max_recent_pullback_percent": 0.55,
+        "late_momentum_floor_percent": 0,
+        "min_smi": 40,
+        "volume_multiplier": 1.5,
+        "reentry_score_boost": 12,
+        "take_profit_percent": 2.5,
+        "stop_loss_percent": 1.25,
+    },
+    "riskbox_open_smi_40_session_0_05_score_30": {
+        "buy_rsi_min": 42,
+        "buy_rsi_max": 65,
+        "min_entry_score": 30,
+        "min_momentum_percent": 0.15,
+        "min_recent_momentum_percent": 0.08,
+        "min_long_momentum_percent": 0.12,
+        "min_session_change_percent": 0.05,
+        "min_vwap_distance_percent": 0.05,
+        "max_vwap_distance_percent": 2.25,
+        "max_session_pullback_percent": 0.75,
+        "max_recent_pullback_percent": 0.5,
+        "late_momentum_floor_percent": 0,
+        "min_smi": 40,
+        "volume_multiplier": 1.0,
+        "reentry_score_boost": 10,
+        "take_profit_percent": 2.5,
+        "stop_loss_percent": 1.25,
+    },
     "session_0_5": {"min_session_change_percent": 0.5},
     "rsi_35_75": {"buy_rsi_min": 35, "buy_rsi_max": 75},
     "pullback_3_1_5": {"max_session_pullback_percent": 3.0, "max_recent_pullback_percent": 1.5},
@@ -62,7 +100,10 @@ def load_backtester() -> Any:
 
 
 def realized_pl(summary: dict[str, Any]) -> Decimal:
-    return sum(Decimal(str(row.get("realized_pl") or "0")) for row in summary.get("closed_trades", []))
+    return sum(
+        (Decimal(str(row.get("realized_pl") or "0")) for row in summary.get("closed_trades", [])),
+        Decimal("0"),
+    )
 
 
 def winner_count(summary: dict[str, Any]) -> int:

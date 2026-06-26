@@ -194,38 +194,38 @@ LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
 ENTRY_PROFILE_LIMITS: dict[str, dict[str, Decimal]] = {
     "conservative": {
         "min_price": Decimal("5"),
-        "min_recent_momentum": Decimal("0.05"),
-        "min_long_momentum": Decimal("0.05"),
-        "min_session_change": Decimal("1.35"),
+        "min_recent_momentum": Decimal("0.08"),
+        "min_long_momentum": Decimal("0.12"),
+        "min_session_change": Decimal("0.05"),
         "min_vwap_distance": Decimal("0.05"),
         "max_vwap_extension": Decimal("2.25"),
         "max_session_extension": Decimal("6.0"),
-        "max_session_pullback": Decimal("0.9"),
-        "max_recent_pullback": Decimal("0.55"),
+        "max_session_pullback": Decimal("0.75"),
+        "max_recent_pullback": Decimal("0.50"),
         "late_momentum_floor": Decimal("0"),
     },
     "neutral": {
         "min_price": Decimal("3"),
-        "min_recent_momentum": Decimal("0.05"),
-        "min_long_momentum": Decimal("0.05"),
-        "min_session_change": Decimal("1.35"),
+        "min_recent_momentum": Decimal("0.08"),
+        "min_long_momentum": Decimal("0.12"),
+        "min_session_change": Decimal("0.05"),
         "min_vwap_distance": Decimal("0.05"),
         "max_vwap_extension": Decimal("2.25"),
         "max_session_extension": Decimal("8.0"),
-        "max_session_pullback": Decimal("0.9"),
-        "max_recent_pullback": Decimal("0.55"),
+        "max_session_pullback": Decimal("0.75"),
+        "max_recent_pullback": Decimal("0.50"),
         "late_momentum_floor": Decimal("0"),
     },
     "aggressive": {
         "min_price": Decimal("2"),
-        "min_recent_momentum": Decimal("0.05"),
-        "min_long_momentum": Decimal("0.05"),
-        "min_session_change": Decimal("1.35"),
+        "min_recent_momentum": Decimal("0.08"),
+        "min_long_momentum": Decimal("0.12"),
+        "min_session_change": Decimal("0.05"),
         "min_vwap_distance": Decimal("0.05"),
         "max_vwap_extension": Decimal("2.25"),
         "max_session_extension": Decimal("10.0"),
-        "max_session_pullback": Decimal("0.9"),
-        "max_recent_pullback": Decimal("0.55"),
+        "max_session_pullback": Decimal("0.75"),
+        "max_recent_pullback": Decimal("0.50"),
         "late_momentum_floor": Decimal("0"),
     },
 }
@@ -256,27 +256,27 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "long_period": 21,
         "rsi_period": 14,
         "buy_rsi_min": "42",
-        "buy_rsi_max": "68",
+        "buy_rsi_max": "65",
         "sell_rsi": "70",
-        "min_entry_score": "44",
+        "min_entry_score": "30",
         "momentum_period": 6,
-        "min_momentum_percent": "0.08",
-        "min_recent_momentum_percent": "0.05",
-        "min_long_momentum_percent": "0.05",
-        "min_session_change_percent": "1.35",
+        "min_momentum_percent": "0.15",
+        "min_recent_momentum_percent": "0.08",
+        "min_long_momentum_percent": "0.12",
+        "min_session_change_percent": "0.05",
         "min_vwap_distance_percent": "0.05",
         "max_vwap_distance_percent": "2.25",
-        "max_session_pullback_percent": "0.9",
-        "max_recent_pullback_percent": "0.55",
+        "max_session_pullback_percent": "0.75",
+        "max_recent_pullback_percent": "0.50",
         "late_momentum_floor_percent": "0",
         "smi_period": 10,
         "min_smi": "40",
         "atr_period": 14,
         "min_buy_volume_ratio": "0.50",
-        "reentry_score_boost": "12",
+        "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "volume_period": 20,
-        "volume_multiplier": "1.5",
+        "volume_multiplier": "1.0",
         "min_avg_volume": "0",
         "take_profit_percent": "2.5",
         "profit_trail_start_percent": "0",
@@ -311,28 +311,28 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "short_period": 9,
         "long_period": 21,
         "rsi_period": 14,
-        "buy_rsi_min": "40",
-        "buy_rsi_max": "68",
+        "buy_rsi_min": "42",
+        "buy_rsi_max": "65",
         "sell_rsi": "72",
-        "min_entry_score": "44",
+        "min_entry_score": "30",
         "momentum_period": 6,
-        "min_momentum_percent": "0.08",
-        "min_recent_momentum_percent": "0.05",
-        "min_long_momentum_percent": "0.05",
-        "min_session_change_percent": "1.35",
+        "min_momentum_percent": "0.15",
+        "min_recent_momentum_percent": "0.08",
+        "min_long_momentum_percent": "0.12",
+        "min_session_change_percent": "0.05",
         "min_vwap_distance_percent": "0.05",
         "max_vwap_distance_percent": "2.25",
-        "max_session_pullback_percent": "0.9",
-        "max_recent_pullback_percent": "0.55",
+        "max_session_pullback_percent": "0.75",
+        "max_recent_pullback_percent": "0.50",
         "late_momentum_floor_percent": "0",
         "smi_period": 10,
         "min_smi": "40",
         "atr_period": 14,
         "min_buy_volume_ratio": "0.50",
-        "reentry_score_boost": "12",
+        "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "volume_period": 20,
-        "volume_multiplier": "1.5",
+        "volume_multiplier": "1.0",
         "min_avg_volume": "0",
         "take_profit_percent": "2.5",
         "profit_trail_start_percent": "0",
@@ -368,27 +368,27 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "long_period": 21,
         "rsi_period": 14,
         "buy_rsi_min": "42",
-        "buy_rsi_max": "68",
+        "buy_rsi_max": "65",
         "sell_rsi": "72",
-        "min_entry_score": "44",
+        "min_entry_score": "30",
         "momentum_period": 6,
-        "min_momentum_percent": "0.08",
-        "min_recent_momentum_percent": "0.05",
-        "min_long_momentum_percent": "0.05",
-        "min_session_change_percent": "1.35",
+        "min_momentum_percent": "0.15",
+        "min_recent_momentum_percent": "0.08",
+        "min_long_momentum_percent": "0.12",
+        "min_session_change_percent": "0.05",
         "min_vwap_distance_percent": "0.05",
         "max_vwap_distance_percent": "2.25",
-        "max_session_pullback_percent": "0.9",
-        "max_recent_pullback_percent": "0.55",
+        "max_session_pullback_percent": "0.75",
+        "max_recent_pullback_percent": "0.50",
         "late_momentum_floor_percent": "0",
         "smi_period": 10,
         "min_smi": "40",
         "atr_period": 14,
         "min_buy_volume_ratio": "0.50",
-        "reentry_score_boost": "12",
+        "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "volume_period": 20,
-        "volume_multiplier": "1.5",
+        "volume_multiplier": "1.0",
         "min_avg_volume": "0",
         "take_profit_percent": "2.5",
         "profit_trail_start_percent": "0",
@@ -485,27 +485,27 @@ class AppConfig(BaseModel):
     long_period: int = 21
     rsi_period: int = 14
     buy_rsi_min: Decimal = Decimal("42")
-    buy_rsi_max: Decimal = Decimal("68")
+    buy_rsi_max: Decimal = Decimal("65")
     sell_rsi: Decimal = Decimal("72")
-    min_entry_score: Decimal = Decimal("44")
+    min_entry_score: Decimal = Decimal("30")
     momentum_period: int = 6
-    min_momentum_percent: Decimal = Decimal("0.08")
-    min_recent_momentum_percent: Decimal = Decimal("0.05")
-    min_long_momentum_percent: Decimal = Decimal("0.05")
-    min_session_change_percent: Decimal = Decimal("1.35")
+    min_momentum_percent: Decimal = Decimal("0.15")
+    min_recent_momentum_percent: Decimal = Decimal("0.08")
+    min_long_momentum_percent: Decimal = Decimal("0.12")
+    min_session_change_percent: Decimal = Decimal("0.05")
     min_vwap_distance_percent: Decimal = Decimal("0.05")
     max_vwap_distance_percent: Decimal = Decimal("2.25")
-    max_session_pullback_percent: Decimal = Decimal("0.9")
-    max_recent_pullback_percent: Decimal = Decimal("0.55")
+    max_session_pullback_percent: Decimal = Decimal("0.75")
+    max_recent_pullback_percent: Decimal = Decimal("0.50")
     late_momentum_floor_percent: Decimal = Decimal("0")
     smi_period: int = 10
     min_smi: Decimal = Decimal("40")
     atr_period: int = 14
     min_buy_volume_ratio: Decimal = Decimal("0.50")
-    reentry_score_boost: Decimal = Decimal("12")
+    reentry_score_boost: Decimal = Decimal("10")
     inverse_etf_mode: str = "allow"
     volume_period: int = 20
-    volume_multiplier: Decimal = Decimal("1.5")
+    volume_multiplier: Decimal = Decimal("1.0")
     min_avg_volume: Decimal = Decimal("0")
     take_profit_percent: Decimal = Decimal("2.5")
     profit_trail_start_percent: Decimal = Decimal("0")
@@ -816,23 +816,23 @@ RETUNED_CONSERVATIVE_SIGNAL_DEFAULTS: dict[str, Any] = {
     "short_period": 9,
     "long_period": 21,
     "buy_rsi_min": Decimal("42"),
-    "buy_rsi_max": Decimal("68"),
-    "min_entry_score": Decimal("44"),
+    "buy_rsi_max": Decimal("65"),
+    "min_entry_score": Decimal("30"),
     "momentum_period": 6,
-    "min_momentum_percent": Decimal("0.08"),
-    "min_recent_momentum_percent": Decimal("0.05"),
-    "min_long_momentum_percent": Decimal("0.05"),
-    "min_session_change_percent": Decimal("1.35"),
+    "min_momentum_percent": Decimal("0.15"),
+    "min_recent_momentum_percent": Decimal("0.08"),
+    "min_long_momentum_percent": Decimal("0.12"),
+    "min_session_change_percent": Decimal("0.05"),
     "min_vwap_distance_percent": Decimal("0.05"),
     "max_vwap_distance_percent": Decimal("2.25"),
-    "max_session_pullback_percent": Decimal("0.9"),
-    "max_recent_pullback_percent": Decimal("0.55"),
+    "max_session_pullback_percent": Decimal("0.75"),
+    "max_recent_pullback_percent": Decimal("0.50"),
     "late_momentum_floor_percent": Decimal("0"),
     "min_smi": Decimal("40"),
     "min_buy_volume_ratio": Decimal("0.50"),
-    "reentry_score_boost": Decimal("12"),
+    "reentry_score_boost": Decimal("10"),
     "inverse_etf_mode": "allow",
-    "volume_multiplier": Decimal("1.5"),
+    "volume_multiplier": Decimal("1.0"),
     "take_profit_percent": Decimal("2.5"),
     "stop_loss_percent": Decimal("1.25"),
     "entry_open_guard_minutes": 15,
@@ -879,6 +879,45 @@ PROMOTED_H2_SCORE_WEIGHTS: dict[str, Decimal] = {
 
 PROMOTED_H2_SIGNAL_DEFAULTS: dict[str, Decimal] = {
     "late_momentum_floor_percent": Decimal("0"),
+}
+
+STRICT_H2_SIGNAL_DEFAULTS: dict[str, Decimal] = {
+    "buy_rsi_min": Decimal("42"),
+    "buy_rsi_max": Decimal("68"),
+    "min_entry_score": Decimal("44"),
+    "min_momentum_percent": Decimal("0.08"),
+    "min_recent_momentum_percent": Decimal("0.05"),
+    "min_long_momentum_percent": Decimal("0.05"),
+    "min_session_change_percent": Decimal("1.35"),
+    "min_vwap_distance_percent": Decimal("0.05"),
+    "max_vwap_distance_percent": Decimal("2.25"),
+    "max_session_pullback_percent": Decimal("0.9"),
+    "max_recent_pullback_percent": Decimal("0.55"),
+    "min_smi": Decimal("40"),
+    "volume_multiplier": Decimal("1.5"),
+    "reentry_score_boost": Decimal("12"),
+    "take_profit_percent": Decimal("2.5"),
+    "stop_loss_percent": Decimal("1.25"),
+}
+
+RISKBOX_SIGNAL_DEFAULTS: dict[str, Decimal] = {
+    "buy_rsi_min": Decimal("42"),
+    "buy_rsi_max": Decimal("65"),
+    "min_entry_score": Decimal("30"),
+    "min_momentum_percent": Decimal("0.15"),
+    "min_recent_momentum_percent": Decimal("0.08"),
+    "min_long_momentum_percent": Decimal("0.12"),
+    "min_session_change_percent": Decimal("0.05"),
+    "min_vwap_distance_percent": Decimal("0.05"),
+    "max_vwap_distance_percent": Decimal("2.25"),
+    "max_session_pullback_percent": Decimal("0.75"),
+    "max_recent_pullback_percent": Decimal("0.50"),
+    "late_momentum_floor_percent": Decimal("0"),
+    "min_smi": Decimal("40"),
+    "volume_multiplier": Decimal("1.0"),
+    "reentry_score_boost": Decimal("10"),
+    "take_profit_percent": Decimal("2.5"),
+    "stop_loss_percent": Decimal("1.25"),
 }
 
 
@@ -943,8 +982,26 @@ def retune_promoted_h2_config(config: AppConfig) -> AppConfig:
         return config
 
 
+def retune_riskbox_strategy_config(config: AppConfig) -> AppConfig:
+    has_strict_h2_signals = all(
+        config_value_matches(getattr(config, key), value) for key, value in STRICT_H2_SIGNAL_DEFAULTS.items()
+    )
+    if not has_strict_h2_signals:
+        return config
+    try:
+        return AppConfig(**(config.model_dump(mode="json") | RISKBOX_SIGNAL_DEFAULTS))
+    except (TypeError, ValueError) as exc:
+        record_runtime_diagnostic(
+            "config",
+            "Riskbox strategy retune failed; keeping original config",
+            exc,
+            source="engine",
+        )
+        return config
+
+
 def retune_strategy_config(config: AppConfig) -> AppConfig:
-    return retune_promoted_h2_config(retune_legacy_conservative_config(config))
+    return retune_riskbox_strategy_config(retune_promoted_h2_config(retune_legacy_conservative_config(config)))
 
 
 def config_from_profile(

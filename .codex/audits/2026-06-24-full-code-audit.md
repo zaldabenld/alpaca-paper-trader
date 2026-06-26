@@ -1406,6 +1406,23 @@ Verification:
 Remaining live gate:
 - The aggregate status is expected to remain failed until `scripts/live_cutover.py --execute` is explicitly approved and post-relaunch verifiers pass.
 
+### 2026-06-26 - Goal continuation finding: AUDIT-037 live strategy used strict H2 gates instead of documented riskbox paper-test candidate
+Status: Fixed in worktree; live cutover still requires verification and restart
+Evidence:
+- The live day tape for 2026-06-26 showed exactly three buy intents in the latest three-hour window, all for `IBIT`, one per connected account.
+- The same tape's embedded config showed `profile=aggressive`, `min_entry_score=44`, `min_session_change_percent=1.35`, `volume_multiplier=1.5`, `buy_rsi_max=68`, and `reentry_score_boost=12`.
+- The documented replay recommendation `reports\recommendation-max20-riskbox-smi40-balanced2_5.md` identifies `riskbox_open_smi_40_session_0.05_score_30|balanced_2.5_1.25` as the best paper-test candidate, with `min_entry_score=30`, `min_session_change_percent=0.05`, `volume_multiplier=1.0`, `buy_rsi_max=65`, and `reentry_score_boost=10`.
+Impact:
+- The live app was running stricter H2-style gates than the documented riskbox candidate, so top-volume symbols were rejected before sizing/capacity and all accounts converged on the only symbol that cleared those stricter gates.
+Required fix:
+- Promote the documented riskbox selection thresholds into the built-in/default strategy layer.
+- Retune saved strict-H2 account configs in memory to the riskbox thresholds while preserving account sizing, exposure, max positions, credentials, and saved app data.
+- Add a replay compare profile for both the old strict-H2 live settings and the promoted riskbox settings.
+Verification needed:
+- Regression tests must prove default strategy values and saved-account retune behavior.
+- Replay compare must show the promoted profile is being evaluated with the expected thresholds.
+- Stable/live checkout must be updated and the backend restarted only after guarded verification.
+
 ### 2026-06-26 - Goal continuation finding: AUDIT-036 latest-window backtests started cold and produced misleading Waiting rejects
 Status: Fixed in worktree `codex/alpaca-higher-frequency-strategy`; live cutover not applied
 Evidence:
