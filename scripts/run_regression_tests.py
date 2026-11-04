@@ -17,6 +17,7 @@ def configure_environment() -> None:
     os.environ["ALPACA_TRADER_DISABLE_AUTO_CONNECT"] = "1"
     os.environ["ALPACA_TRADER_DISABLE_AUTO_START"] = "1"
     os.environ.setdefault("ALPACA_TRADER_DISABLE_DAY_TAPE", "1")
+    os.environ["ALPACA_TRADER_DISABLE_ALERTS"] = "1"
     TEST_APPDATA.mkdir(parents=True, exist_ok=True)
     for path in (REPO_ROOT, PYTHON_APP):
         value = str(path)
