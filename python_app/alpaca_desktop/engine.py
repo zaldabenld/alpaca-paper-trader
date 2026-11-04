@@ -1312,27 +1312,40 @@ def chunked_symbols_for_bar_limit(symbols: list[str], per_symbol_limit: int) -> 
     return [clean[index : index + batch_size] for index in range(0, len(clean), batch_size)]
 
 
+def historical_bars_start(now: datetime, per_symbol_limit: int) -> datetime:
+    # Alpaca's request limit is a total across all symbols, and multi-symbol pages are
+    # ordered by symbol. Bounding the window to per_symbol_limit minutes caps each symbol
+    # at per_symbol_limit one-minute bars, so the total limit can never cut off the
+    # alphabetically later symbols (which would leave them trading on morning prices).
+    return now - timedelta(minutes=max(0, per_symbol_limit - 1))
+
+
 def fetch_stock_bars_chunked(
     data_client: StockHistoricalDataClient,
     symbols: list[str],
     required_bars: int,
     feed: str,
+    now: datetime | None = None,
 ) -> dict[str, list[Any]]:
     per_symbol_limit = historical_bars_per_symbol(required_bars)
+    current = now or datetime.now(timezone.utc)
     data: dict[str, list[Any]] = {str(symbol).upper(): [] for symbol in symbols}
     for batch in chunked_symbols_for_bar_limit(sorted(set(symbols)), per_symbol_limit):
+        limit = historical_bars_limit(len(batch), required_bars)
+        window_bars = min(per_symbol_limit, limit // len(batch))
         bars = data_client.get_stock_bars(
             StockBarsRequest(
                 symbol_or_symbols=batch,
                 timeframe=TimeFrame.Minute,
-                limit=historical_bars_limit(len(batch), required_bars),
+                start=historical_bars_start(current, window_bars),
+                limit=limit,
                 feed=DataFeed(feed),
                 adjustment=Adjustment.RAW,
                 sort=Sort.ASC,
             )
         )
         for symbol, symbol_bars in bars.data.items():
-            data[str(symbol).upper()] = list(symbol_bars)
+            data[str(symbol).upper()] = list(symbol_bars)[-per_symbol_limit:]
     return data
 
 
