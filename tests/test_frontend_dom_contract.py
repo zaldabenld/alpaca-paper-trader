@@ -62,6 +62,16 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertEqual(buttons, panels)
         self.assertGreaterEqual(buttons, 3)
 
+    def test_every_positions_header_is_sortable(self) -> None:
+        panel_start = self.index_html.index('<section id="positionsPanel"')
+        panel = self.index_html[panel_start:self.index_html.index("</thead>", panel_start)]
+        headers = re.findall(r'data-sort="([a-z_]+)"', panel)
+        block_start = self.app_js.index("  positionRows: {")
+        columns_start = self.app_js.index("columns: [", block_start)
+        columns = re.findall(r'"([a-z_]+)"', self.app_js[columns_start:self.app_js.index("],", columns_start)])
+        self.assertEqual(len(headers), len(columns))
+        self.assertIn("protection", columns)
+
 
 if __name__ == "__main__":
     unittest.main()
