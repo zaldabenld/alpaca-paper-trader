@@ -82,6 +82,11 @@ const els = {
   dashboardView: document.querySelector("#dashboardView"),
   accountsView: document.querySelector("#accountsView"),
   navButtons: document.querySelectorAll(".nav-button"),
+  pageTitle: document.querySelector("#pageTitle"),
+  settingsDrawerButton: document.querySelector("#settingsDrawerButton"),
+  settingsDrawerClose: document.querySelector("#settingsDrawerClose"),
+  settingsBackdrop: document.querySelector("#settingsBackdrop"),
+  tradingStatusStats: document.querySelector("#tradingStatusStats"),
   dashboardMarketStatus: document.querySelector("#dashboardMarketStatus"),
   dashboardMarketStatusText: document.querySelector("#dashboardMarketStatusText"),
   dashboardMarketStatusDetail: document.querySelector("#dashboardMarketStatusDetail"),
@@ -279,6 +284,7 @@ let selectedTradingEnabled = false;
 let selectedConnected = false;
 let selectedLiveDryRun = null;
 let selectedRisk = {};
+let selectedStats = { scanned: 0, positions: 0, protectedCount: 0 };
 let credentialKeysCollapsedFor = "";
 let accountContextVersion = 0;
 let accountTransitionDepth = 0;
@@ -341,6 +347,7 @@ const sortableTables = {
       "market_value_raw",
       "unrealized_pl_raw",
       "intraday_pl_raw",
+      "protection",
     ],
   },
   tradeHistoryRows: {
@@ -553,6 +560,22 @@ document.querySelectorAll(".tab").forEach((button) => {
   });
 });
 
+els.settingsDrawerButton?.addEventListener("click", () => setSettingsDrawer(!document.body.classList.contains("settings-open")));
+els.settingsDrawerClose?.addEventListener("click", () => {
+  setSettingsDrawer(false);
+  els.settingsDrawerButton?.focus();
+});
+els.settingsBackdrop?.addEventListener("click", () => {
+  setSettingsDrawer(false);
+  els.settingsDrawerButton?.focus();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && document.body.classList.contains("settings-open")) {
+    setSettingsDrawer(false);
+    els.settingsDrawerButton?.focus();
+  }
+});
+
 // Light / Dark / Auto (follow the system). The choice is remembered per browser profile.
 function applyThemeChoice(choice) {
   if (choice === "light" || choice === "dark") {
@@ -707,7 +730,9 @@ els.tradingToggleButton.addEventListener("click", async () => {
       await loadDashboard({ accountId: selectedAccountId, source: "trading-toggle" });
     }
   } catch (error) {
-    els.parameterStatus.textContent = `${wasTrading ? "Stop" : "Start"} failed: ${error.message}`;
+    const failure = `${wasTrading ? "Stop" : "Start"} failed: ${error.message}`;
+    els.parameterStatus.textContent = failure;
+    if (els.tradingStatusDetail) els.tradingStatusDetail.textContent = failure;
     els.tradingToggleButton.textContent = previousText;
     els.tradingToggleButton.disabled = !selectedConnected;
   }
@@ -759,8 +784,35 @@ function showView(viewId) {
   const target = document.querySelector(`#${viewId}`);
   if (target) target.classList.add("active");
   els.navButtons.forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === viewId);
+    const active = button.dataset.view === viewId;
+    button.classList.toggle("active", active);
+    if (active && els.pageTitle) els.pageTitle.textContent = button.textContent.trim();
   });
+  if (viewId !== "accountsView") setSettingsDrawer(false);
+}
+
+// Account settings live in a slide-out drawer so the tables get the full width.
+function setSettingsDrawer(open) {
+  document.body.classList.toggle("settings-open", open);
+  els.settingsDrawerButton?.setAttribute("aria-expanded", String(open));
+  // While open the drawer is modal: the page behind it can't take focus or clicks.
+  document
+    .querySelectorAll(".side-rail, .topbar, .account-bar, #tradingStatusBar, .workspace, #runtimeHealthBanner, #runtimeNote")
+    .forEach((element) => {
+      element.inert = open;
+    });
+  if (open) els.settingsDrawerClose?.focus();
+}
+
+let settingsDrawerAutoOpenedFor = null;
+
+// Open the drawer once per account when it still needs API keys (only on the Accounts page).
+function autoOpenSettingsForMissingKeys(hasCredentials) {
+  const key = selectedAccountId || "draft";
+  if (hasCredentials || settingsDrawerAutoOpenedFor === key) return;
+  if (!document.querySelector("#accountsView")?.classList.contains("active")) return;
+  settingsDrawerAutoOpenedFor = key;
+  setSettingsDrawer(true);
 }
 
 function readAccountPayload() {
@@ -992,6 +1044,7 @@ function renderCredentialStatus(account = {}) {
   if (els.credentialKeysSummary) {
     els.credentialKeysSummary.textContent = hasCredentials ? "Keys saved \u2713 \u00b7 Change keys" : "Enter API keys";
   }
+  autoOpenSettingsForMissingKeys(hasCredentials);
   const placeholderPrefix = savedCredentials ? "Saved encrypted" : "Session credential";
   fields.apiKey.placeholder = hasCredentials ? `${placeholderPrefix} - enter new key to replace` : "Enter API key";
   fields.secretKey.placeholder = hasCredentials ? `${placeholderPrefix} - enter new secret to replace` : "Enter secret key";
@@ -1681,6 +1734,7 @@ function renderPositionRows() {
     "market_value",
     showPositionPlPercent ? "unrealized_pl_pct" : "unrealized_pl",
     showPositionPlPercent ? "intraday_pl_pct" : "intraday_pl",
+    "protection",
   ];
   const sorted = sortRowsForTable("positionRows", currentPositionRows);
   els.positionRows.innerHTML = "";
@@ -1705,6 +1759,10 @@ function renderPositionRows() {
       }
       if (key === "intraday_pl" || key === "intraday_pl_pct") {
         td.className = Number(row.intraday_pl_raw || 0) >= 0 ? "positive" : "negative";
+      }
+      if (key === "protection") {
+        const value = String(row.protection || "");
+        td.className = value === "Protected" ? "positive" : value.startsWith("Unprotected") ? "negative" : "muted-cell";
       }
       tr.appendChild(td);
     });
@@ -1917,6 +1975,7 @@ function defaultSortDirection(key = "") {
   if (
     lowerKey === "symbol" ||
     lowerKey === "side" ||
+    lowerKey === "protection" ||
     lowerKey === "status" ||
     lowerKey.includes("status") ||
     lowerKey.includes("role") ||
@@ -2044,6 +2103,12 @@ function renderState(state, context) {
   selectedTradingEnabled = Boolean(selected.trading_enabled);
   selectedLiveDryRun = config.dry_run === undefined ? null : Boolean(config.dry_run);
   selectedRisk = selected.risk || {};
+  const protectionRows = (selected.protection || []).filter((row) => row.status !== "No market price");
+  selectedStats = {
+    scanned: (selected.strategy || []).length,
+    positions: protectionRows.length,
+    protectedCount: protectionRows.filter((row) => row.status === "Protected").length,
+  };
   if (selected.account_id === selectedAccountId) {
     const saved = findSavedAccount(selectedAccountId);
     if (!saved || saved.config?.profile !== config.profile) {
@@ -2096,7 +2161,11 @@ function renderState(state, context) {
     "last_action",
   ]);
 
-  currentPositionRows = selected.positions || [];
+  const protectionBySymbol = Object.fromEntries((selected.protection || []).map((row) => [row.symbol, row.status]));
+  currentPositionRows = (selected.positions || []).map((row) => ({
+    ...row,
+    protection: protectionBySymbol[String(row.symbol || "").toUpperCase()] || "",
+  }));
   renderPositionRows();
 
   currentTradeHistoryRows = selected.trade_history || [];
@@ -2197,6 +2266,14 @@ function renderTradingStatus() {
   els.tradingStatusBar.classList.add(state);
   els.tradingStatusTitle.textContent = title;
   els.tradingStatusDetail.textContent = detail;
+  if (els.tradingStatusStats) {
+    const parts = [];
+    if (selectedConnected && selectedStats.scanned) parts.push(`Scanning ${selectedStats.scanned} stocks`);
+    if (selectedConnected && selectedStats.positions) {
+      parts.push(`${selectedStats.protectedCount} of ${selectedStats.positions} positions protected`);
+    }
+    els.tradingStatusStats.textContent = parts.join(" · ");
+  }
 }
 
 function renderRealizedPlMetric(account = currentSelectedAccount) {
@@ -2399,10 +2476,14 @@ function renderAccountCards(accounts) {
     card.type = "button";
     card.dataset.accountId = account.account_id;
     const strategyLabel = accountStrategyLabel(account);
+    const equityText = account.connected && account.equity ? String(account.equity) : "—";
+    const dotState = account.trading_enabled ? "live" : account.connected ? "idle" : "off";
+    card.title = account.status || "Not connected";
     card.innerHTML = `
-      <span>${escapeHtml(account.name || "Paper Account")}</span>
-      <strong>${escapeHtml(strategyLabel)}</strong>
-      <small>${escapeHtml(account.status || "Not connected")}</small>
+      <span class="pill-dot ${dotState}" aria-hidden="true"></span>
+      <span class="pill-name">${escapeHtml(account.name || "Paper Account")}</span>
+      <strong>${escapeHtml(equityText)}</strong>
+      <small>${escapeHtml(strategyLabel)}</small>
       <em class="${Number(account.daily_pl_raw || 0) >= 0 ? "positive" : "negative"}">${escapeHtml(dailyPlDisplay(account))}</em>
     `;
     card.addEventListener("click", async () => {

@@ -22,22 +22,25 @@
   </head>
   <body>
     <main class="app-shell">
+      <nav class="side-rail" aria-label="App views">
+        <div class="rail-brand" title="Alpaca Paper Trader"><svg class="icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V9"/><path d="M4 9h0"/><rect x="2.5" y="10" width="3" height="6" rx="0.6"/><path d="M12 21V5"/><rect x="10.5" y="7" width="3" height="9" rx="0.6"/><path d="M20 17V3"/><rect x="18.5" y="5" width="3" height="7" rx="0.6"/></svg></div>
+        <button class="nav-button active" data-view="dashboardView" type="button" title="Dashboard"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span>Dashboard</span></button>
+        <button class="nav-button" data-view="accountsView" type="button" title="Accounts"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M21 9h-6a3 3 0 0 0 0 6h6z"/><circle cx="16" cy="12" r="0.6"/></svg><span>Accounts</span></button>
+        <button class="nav-button" data-view="backtestView" type="button" title="Backtest"><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6"/><path d="M10 3v6L4.5 18.5A1.8 1.8 0 0 0 6 21h12a1.8 1.8 0 0 0 1.5-2.5L14 9V3"/><path d="M7.5 15h9"/></svg><span>Backtest</span></button>
+        <div class="rail-spacer"></div>
+        <div class="theme-switch" role="group" aria-label="Color theme">
+          <button type="button" data-theme-choice="light" title="Light theme"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><span class="sr-only">Light</span></button>
+          <button type="button" data-theme-choice="dark" title="Dark theme"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><span class="sr-only">Dark</span></button>
+          <button type="button" data-theme-choice="system" title="Follow system theme"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg><span class="sr-only">Auto</span></button>
+        </div>
+      </nav>
+      <div class="app-main">
       <header class="topbar">
         <div>
-          <h1>Alpaca Paper Trader</h1>
+          <h1><span class="brand-name">Alpaca Paper Trader</span><span class="page-title" id="pageTitle">Dashboard</span></h1>
           <p id="statusText">Not connected</p>
         </div>
         <div class="topbar-actions">
-          <nav class="topnav" aria-label="App views">
-            <button class="nav-button active" data-view="dashboardView" type="button">Dashboard</button>
-            <button class="nav-button" data-view="accountsView" type="button">Accounts</button>
-            <button class="nav-button" data-view="backtestView" type="button">Backtest</button>
-          </nav>
-          <div class="theme-switch" role="group" aria-label="Color theme">
-            <button type="button" data-theme-choice="light">Light</button>
-            <button type="button" data-theme-choice="dark">Dark</button>
-            <button type="button" data-theme-choice="system">Auto</button>
-          </div>
           <div class="mode-pill">Paper API</div>
         </div>
       </header>
@@ -282,15 +285,25 @@
       </section>
 
       <section id="accountsView" class="view accounts-view">
+      <div class="account-bar">
+        <section class="account-strip" id="accountCards"></section>
+        <button id="settingsDrawerButton" class="secondary ghost-button" type="button" aria-controls="settingsDrawer" aria-expanded="false"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Settings</span></button>
+      </div>
       <section id="tradingStatusBar" class="trading-status stopped" aria-live="polite">
         <div class="trading-status-text">
           <strong id="tradingStatusTitle">Stopped</strong>
           <small id="tradingStatusDetail">Select an account to see its trading status.</small>
+          <span id="tradingStatusStats" class="trading-status-stats"></span>
         </div>
         <button id="tradingToggleButton" disabled>Start Trading</button>
       </section>
       <section class="layout">
-        <aside class="sidebar">
+        <div id="settingsBackdrop" class="drawer-backdrop"></div>
+        <aside class="sidebar settings-drawer" id="settingsDrawer" role="dialog" aria-modal="true" aria-label="Account settings">
+          <div class="drawer-header">
+            <h2>Settings</h2>
+            <button id="settingsDrawerClose" class="icon-button" type="button" aria-label="Close settings"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+          </div>
           <section class="panel">
             <h2>Account & Keys</h2>
             <label>
@@ -655,7 +668,6 @@
         </aside>
 
         <section class="workspace">
-          <section class="account-strip" id="accountCards"></section>
 
           <section class="metrics">
             <article>
@@ -715,6 +727,7 @@
                     <th><button class="position-sort-button" data-sort="market_value_raw" type="button">Market Value</button></th>
                     <th><button class="position-sort-button" data-sort="unrealized_pl_raw" type="button">Unrealized P/L</button></th>
                     <th><button class="position-sort-button" data-sort="intraday_pl_raw" type="button">Intraday P/L</button></th>
+                    <th><button class="position-sort-button" data-sort="protection" type="button">Stop</button></th>
                   </tr>
                 </thead>
                 <tbody id="positionRows"></tbody>
@@ -861,6 +874,7 @@
         </section>
       </section>
       </section>
+      </div>
     </main>
     <script src="/static/app.js"></script>
   </body>
