@@ -126,7 +126,7 @@ The **Dashboard** is the landing page. Once any account is connected, it shows A
 
 The top-volume list is pulled from Alpaca's most-actives screener and enriched with Alpaca snapshots, then refreshed on a short one-minute operational cache before account strategy scans. After the list is seeded, the app subscribes to the source dashboard symbols for trades and to a capped union of every connected market-stream account's scan and held-position symbols for bars and trading statuses. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
 
-By default, each account trades exactly the dashboard Alpaca top-25 volume symbols. In **Allow Alpaca top-25** mode, inverse ETFs are eligible only when Alpaca returns them in that current top-volume set, and they must pass the same direction, VWAP, volume, score, and tradeability checks as any other symbol. **Exclude inverse ETFs** blocks inverse ETF entries, and **Inverse set only** is the explicit override that scans the bounded inverse ETF set (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`). The manual ticker list on the Accounts page is used as a fallback, or as the active universe when **Trade Alpaca top 25 volume** is unchecked.
+By default, each account trades the dashboard Alpaca most-active volume symbols (top 100; set `ALPACA_TRADER_TOP_SYMBOLS` to change). In **Allow** mode, the bounded inverse ETF set (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`) is always scanned alongside that list, so a down day cannot hide them when Alpaca's list skips them; inverse ETFs must still pass the same direction, VWAP, volume, score, and tradeability checks as any other symbol. **Exclude inverse ETFs** blocks inverse ETF entries and drops the added set, and **Inverse set only** scans only the bounded inverse set. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when top-volume trading is unchecked (the inverse set is not added to a manual list).
 
 ## Operating Rules
 
@@ -176,7 +176,7 @@ The included strategy is intentionally conservative and transparent:
 - It sorts the eligible pool by score and buys the best candidates until max slots or block budget are full.
 - It skips symbols already owned or already pending entry.
 - It blocks same-symbol churn by requiring a higher score after an exit before that symbol can be re-entered.
-- It has an inverse ETF mode so Alpaca-returned inverse ETFs can trade through the normal top-volume path, inverse ETF entries can be excluded, or an explicit inverse-only profile can use the bounded inverse set. There is no separate SPY/QQQ downturn gate; inverse ETFs pass or fail through the normal entry-quality checks.
+- It has an inverse ETF mode so the bounded inverse set is always scanned with the top-volume list and trades through the normal entry path, inverse ETF entries can be excluded, or an explicit inverse-only profile can use the bounded inverse set. There is no separate SPY/QQQ downturn gate; inverse ETFs pass or fail through the normal entry-quality checks.
 - It uses market orders against the Alpaca paper endpoint.
 - It keeps entries fractional and manages exits with fractional DAY stop/limit orders using the configured take-profit and stop-loss percentages.
 - It classifies open orders as pending entries, strategy exits, protective exits, or manual/unknown orders so protective stop/limit orders do not count as new entries.
