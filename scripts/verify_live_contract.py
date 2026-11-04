@@ -13,6 +13,23 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+
+def expected_top_volume_count() -> int:
+    # Mirrors engine.configured_top_symbol_count(): the scanner lists up to 100 most-active stocks.
+    try:
+        count = int(os.environ.get("ALPACA_TRADER_TOP_SYMBOLS", "100"))
+    except ValueError:
+        count = 100
+    return max(1, min(100, count))
+
+
+MARKET_STREAM_SYMBOL_LIMIT = 30  # free-plan websocket limit; engine.MARKET_STREAM_SYMBOL_LIMIT
+
+
+def top_volume_count_ok(count: int) -> bool:
+    expected = expected_top_volume_count()
+    return min(25, expected) <= count <= expected
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -638,7 +655,14 @@ def verify_payload(
     add_check(
         checks,
         "market_stream.dashboard_symbols",
-        len(top_rows) == 25 and dashboard_symbol_count == len(top_rows),
+        top_volume_count_ok(len(top_rows))
+        and 0 < dashboard_symbol_count <= min(len(top_rows), MARKET_STREAM_SYMBOL_LIMIT)
+        # With free stream slots every listed symbol must be streamed; once all slots are used
+        # (positions first), the rest of the list is scanned through REST bars instead.
+        and (
+            bar_symbol_count >= MARKET_STREAM_SYMBOL_LIMIT
+            or dashboard_symbol_count == min(len(top_rows), MARKET_STREAM_SYMBOL_LIMIT)
+        ),
         f"market stream dashboard_symbols={dashboard_symbol_count}, top_volume_rows={len(top_rows)}",
     )
     add_check(
@@ -680,7 +704,7 @@ def verify_payload(
                     for symbol in trading_symbols
                     if str(symbol or "").strip()
                 }
-                exact_count_ok = len(top_rows) == 25 and count == len(top_symbols)
+                exact_count_ok = top_volume_count_ok(len(top_rows)) and count == len(top_symbols)
                 if listed_symbols:
                     universe_ok = (
                         symbol_source == "top_volume"
@@ -705,7 +729,7 @@ def verify_payload(
 
     top_source = str(dashboard.get("top_volume_source") or "")
     add_check(checks, "top_volume.source", top_source == EXPECTED_TOP_VOLUME_SOURCE, f"top-volume source={top_source or 'missing'}")
-    add_check(checks, "top_volume.count", len(top_rows) == 25, f"top-volume rows={len(top_rows)}")
+    add_check(checks, "top_volume.count", top_volume_count_ok(len(top_rows)), f"top-volume rows={len(top_rows)}")
     add_check(checks, "top_volume.error", blank(dashboard.get("top_volume_error")), f"top-volume error={dashboard.get('top_volume_error') or ''}")
     cache_seconds = dec(dashboard.get("top_volume_cache_seconds"))
     add_check(

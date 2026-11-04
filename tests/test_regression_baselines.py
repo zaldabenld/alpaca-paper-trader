@@ -926,7 +926,27 @@ class MarketStreamBaselineTests(unittest.TestCase):
 
         self.assertIn("AAPL", engine.scan_symbols())
         _dashboard_symbols, bar_symbols = manager.market_data_symbols()
-        self.assertEqual(bar_symbols, ["SPY", "AAPL"])
+        # Held positions are streamed first so exits always see live bars.
+        self.assertEqual(bar_symbols, ["AAPL", "SPY"])
+
+    def test_held_positions_keep_stream_slots_when_the_scan_list_is_larger(self) -> None:
+        manager = fresh_manager()
+        engine = manager.create_account(
+            "Busy",
+            AppConfig(symbols=["SPY"], use_top_volume_symbols=True, inverse_etf_mode="allow", use_market_stream=True),
+        )
+        engine.connected = True
+        engine.top_volume_symbols = [f"T{index:03d}" for index in range(100)]
+        engine.positions = [{"symbol": "HELD", "qty_raw": "1"}]
+        manager.selected_account_id = engine.account_id
+
+        dashboard_symbols, bar_symbols = manager.market_data_symbols()
+
+        self.assertEqual(bar_symbols[0], "HELD")
+        self.assertEqual(len(bar_symbols), engine_module.MARKET_STREAM_SYMBOL_LIMIT)
+        self.assertNotIn("HELD", dashboard_symbols)
+        self.assertTrue(set(dashboard_symbols) <= set(bar_symbols))
+        self.assertEqual(len(engine.scan_symbols()) >= 100, True)
 
     def test_market_bars_update_held_positions_outside_top_volume(self) -> None:
         engine = TraderEngine("held-bars")

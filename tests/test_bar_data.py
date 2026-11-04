@@ -174,5 +174,76 @@ class StrategyHistoryTests(unittest.TestCase):
         self.assertEqual(normalize_bar_timestamp(datetime(2026, 11, 4, 19, 0)), expected)
 
 
+
+class ScannerSizeAndTapeTests(unittest.TestCase):
+    def test_top_symbol_count_defaults_to_alpaca_max_and_is_clamped(self) -> None:
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+
+            os.environ.pop("ALPACA_TRADER_TOP_SYMBOLS", None)
+            self.assertEqual(engine_module.configured_top_symbol_count(), 100)
+        for raw, expected in (("50", 50), ("500", 100), ("0", 1), ("abc", 100)):
+            with patch.dict("os.environ", {"ALPACA_TRADER_TOP_SYMBOLS": raw}):
+                self.assertEqual(engine_module.configured_top_symbol_count(), expected)
+
+    def test_strategy_scan_is_written_at_most_once_per_interval(self) -> None:
+        from unittest.mock import patch
+
+        engine = engine_module.TraderEngine("tape-throttle")
+        calls: list[str] = []
+        clock = {"now": 600.0}
+        with (
+            patch.object(engine_module, "append_day_tape_event", lambda kind, payload: calls.append(kind)),
+            patch.object(engine_module.time, "time", lambda: clock["now"]),
+        ):
+            for _ in range(3):
+                engine.record_day_tape_scan(True, True, "", {"is_open": True}, {}, [], [], [], [])
+            self.assertEqual(len(calls), 1)
+            # a new position in the same minute is recorded
+            engine.record_day_tape_scan(True, True, "", {"is_open": True}, {}, [{"symbol": "AAA"}], [], [], [])
+            self.assertEqual(len(calls), 2)
+            # the next clock minute is recorded
+            clock["now"] = 660.0
+            engine.record_day_tape_scan(True, True, "", {"is_open": True}, {}, [{"symbol": "AAA"}], [], [], [])
+            self.assertEqual(len(calls), 3)
+
+
+class SnapshotFallbackTests(unittest.TestCase):
+    def setUp(self) -> None:
+        engine_module.INVALID_MARKET_DATA_SYMBOLS.clear()
+
+    def tearDown(self) -> None:
+        engine_module.INVALID_MARKET_DATA_SYMBOLS.clear()
+
+    def test_invalid_symbol_is_dropped_and_batch_retried(self) -> None:
+        calls: list[Any] = []
+
+        class Client:
+            def get_stock_snapshot(self, request: Any) -> Any:
+                calls.append(request.symbol_or_symbols)
+                if "046CVR015" in request.symbol_or_symbols:
+                    raise RuntimeError('{"message":"invalid symbol: 046CVR015"}')
+                return {symbol: object() for symbol in request.symbol_or_symbols}
+
+        symbols = [f"S{index:03d}" for index in range(99)] + ["046CVR015"]
+        result = engine_module.fetch_stock_snapshots_chunked(Client(), symbols, "iex")
+        self.assertEqual(len(result), 99)
+        self.assertEqual(len(calls), 2)
+
+    def test_large_failed_batch_is_not_retried_symbol_by_symbol(self) -> None:
+        calls: list[Any] = []
+
+        class Client:
+            def get_stock_snapshot(self, request: Any) -> Any:
+                calls.append(request.symbol_or_symbols)
+                raise RuntimeError("service unavailable")
+
+        symbols = [f"S{index:03d}" for index in range(100)]
+        self.assertEqual(engine_module.fetch_stock_snapshots_chunked(Client(), symbols, "iex"), {})
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
