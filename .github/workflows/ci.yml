@@ -1,0 +1,29 @@
+name: CI
+on:
+  push: {}
+  pull_request: {}
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    env:
+      ALPACA_TRADER_DISABLE_ALERTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - name: Regression tests
+        run: python scripts/run_regression_tests.py
+      - name: JavaScript syntax
+        run: node --check python_app/static/app.js
+      - name: Launcher syntax
+        run: bash -n launch-alpaca-paper-trader.sh
