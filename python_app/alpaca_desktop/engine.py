@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -85,6 +86,12 @@ HISTORICAL_BARS_CACHE_SECONDS = 3
 HISTORICAL_BARS_PER_SYMBOL = 500
 HISTORICAL_BARS_REQUEST_LIMIT = 10000
 MARKET_STREAM_SYMBOL_LIMIT = 30
+INVALID_SYMBOL_PATTERN = re.compile(r"invalid symbol:\s*([A-Za-z0-9.\-/]+)")
+# Symbols the market-data API rejects (e.g. CVR rights like 046CVR015 left in a paper
+# account by a corporate action). One of them fails a whole multi-symbol request, so
+# they are dropped from data requests and stream subscriptions for the process lifetime.
+INVALID_MARKET_DATA_SYMBOLS: set[str] = set()
+INVALID_MARKET_DATA_SYMBOLS_LOCK = threading.Lock()
 MARKET_STREAM_CONNECTION_LIMIT_RETRY_SECONDS = 120
 MIN_EXIT_PRICE_OFFSET = Decimal("0.01")
 PRICE_INCREMENT = Decimal("0.01")
@@ -1330,23 +1337,58 @@ def fetch_stock_bars_chunked(
     per_symbol_limit = historical_bars_per_symbol(required_bars)
     current = now or datetime.now(timezone.utc)
     data: dict[str, list[Any]] = {str(symbol).upper(): [] for symbol in symbols}
-    for batch in chunked_symbols_for_bar_limit(sorted(set(symbols)), per_symbol_limit):
-        limit = historical_bars_limit(len(batch), required_bars)
-        window_bars = min(per_symbol_limit, limit // len(batch))
-        bars = data_client.get_stock_bars(
-            StockBarsRequest(
-                symbol_or_symbols=batch,
-                timeframe=TimeFrame.Minute,
-                start=historical_bars_start(current, window_bars),
-                limit=limit,
-                feed=DataFeed(feed),
-                adjustment=Adjustment.RAW,
-                sort=Sort.ASC,
-            )
-        )
-        for symbol, symbol_bars in bars.data.items():
-            data[str(symbol).upper()] = list(symbol_bars)[-per_symbol_limit:]
+    requestable = without_invalid_market_data_symbols(sorted(set(symbols)))
+    for batch in chunked_symbols_for_bar_limit(requestable, per_symbol_limit):
+        while batch:
+            limit = historical_bars_limit(len(batch), required_bars)
+            window_bars = min(per_symbol_limit, limit // len(batch))
+            try:
+                bars = data_client.get_stock_bars(
+                    StockBarsRequest(
+                        symbol_or_symbols=batch,
+                        timeframe=TimeFrame.Minute,
+                        start=historical_bars_start(current, window_bars),
+                        limit=limit,
+                        feed=DataFeed(feed),
+                        adjustment=Adjustment.RAW,
+                        sort=Sort.ASC,
+                    )
+                )
+            except Exception as exc:
+                rejected = rejected_market_data_symbol(exc, batch)
+                if not rejected:
+                    raise
+                batch = [symbol for symbol in batch if symbol != rejected]
+                continue
+            for symbol, symbol_bars in bars.data.items():
+                data[str(symbol).upper()] = list(symbol_bars)[-per_symbol_limit:]
+            break
     return data
+
+
+def without_invalid_market_data_symbols(symbols: list[str]) -> list[str]:
+    with INVALID_MARKET_DATA_SYMBOLS_LOCK:
+        invalid = set(INVALID_MARKET_DATA_SYMBOLS)
+    return [symbol for symbol in symbols if str(symbol).strip().upper() not in invalid]
+
+
+def rejected_market_data_symbol(error: Exception, batch: list[str]) -> str:
+    """Return the batch symbol the API rejected as invalid and remember it, or ""."""
+    match = INVALID_SYMBOL_PATTERN.search(str(error))
+    symbol = match.group(1).upper() if match else ""
+    if symbol not in {str(item).upper() for item in batch}:
+        return ""
+    with INVALID_MARKET_DATA_SYMBOLS_LOCK:
+        first_seen = symbol not in INVALID_MARKET_DATA_SYMBOLS
+        INVALID_MARKET_DATA_SYMBOLS.add(symbol)
+    if first_seen:
+        record_runtime_diagnostic(
+            "market_data",
+            f"Skipping {symbol}: Alpaca market data does not recognize it (e.g. a CVR or rights position)",
+            MarketDataError(str(error) or error.__class__.__name__),
+            source="engine",
+        )
+    return symbol
 
 
 def fetch_stock_snapshots_chunked(
@@ -1355,7 +1397,7 @@ def fetch_stock_snapshots_chunked(
     feed: str,
 ) -> dict[str, Any]:
     snapshots: dict[str, Any] = {}
-    clean_symbols_list = sorted(set(clean_symbols(symbols)))
+    clean_symbols_list = without_invalid_market_data_symbols(sorted(set(clean_symbols(symbols))))
     for index in range(0, len(clean_symbols_list), STOCK_SNAPSHOT_BATCH_SIZE):
         batch = clean_symbols_list[index : index + STOCK_SNAPSHOT_BATCH_SIZE]
         if not batch:
@@ -1615,10 +1657,12 @@ class TraderEngine:
             ]
 
     def scan_symbols(self, position_symbols: Any = None) -> list[str]:
-        return merged_symbols(
-            self.trading_symbols(),
-            position_symbols or self.position_symbols_for_market_data(),
-            self.market_proxy_analysis_symbols(),
+        return without_invalid_market_data_symbols(
+            merged_symbols(
+                self.trading_symbols(),
+                position_symbols or self.position_symbols_for_market_data(),
+                self.market_proxy_analysis_symbols(),
+            )
         )
 
     def clear_entry_score(self, symbol: str) -> None:

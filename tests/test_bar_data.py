@@ -77,6 +77,60 @@ class HistoricalBarFetchTests(unittest.TestCase):
         self.assertEqual(NOW - start, timedelta(minutes=499))
 
 
+class RejectingBarsClient(FakeBarsClient):
+    """Fails the whole request, like Alpaca, when any symbol is not a market-data symbol."""
+
+    rejected = "046CVR015"
+
+    def get_stock_bars(self, request: Any) -> Any:
+        if self.rejected in request.symbol_or_symbols:
+            self.requests.append(request)
+            raise RuntimeError('{"message":"invalid symbol: 046CVR015"}')
+        return super().get_stock_bars(request)
+
+
+class InvalidSymbolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        engine_module.INVALID_MARKET_DATA_SYMBOLS.clear()
+
+    def tearDown(self) -> None:
+        engine_module.INVALID_MARKET_DATA_SYMBOLS.clear()
+
+    def test_cvr_position_is_dropped_instead_of_failing_the_batch(self) -> None:
+        client = RejectingBarsClient(NOW)
+        data = engine_module.fetch_stock_bars_chunked(client, ["SPY", "046CVR015", "AAPL"], 63, "iex", now=NOW)
+
+        self.assertTrue(data["SPY"])
+        self.assertTrue(data["AAPL"])
+        self.assertEqual(data["046CVR015"], [])
+        self.assertIn("046CVR015", engine_module.INVALID_MARKET_DATA_SYMBOLS)
+
+    def test_known_invalid_symbol_is_not_requested_again(self) -> None:
+        client = RejectingBarsClient(NOW)
+        engine_module.fetch_stock_bars_chunked(client, ["SPY", "046CVR015"], 63, "iex", now=NOW)
+        client.requests.clear()
+        engine_module.fetch_stock_bars_chunked(client, ["SPY", "046CVR015"], 63, "iex", now=NOW)
+
+        self.assertEqual(len(client.requests), 1)
+        self.assertNotIn("046CVR015", client.requests[0].symbol_or_symbols)
+
+    def test_other_errors_still_raise(self) -> None:
+        class BrokenClient:
+            def get_stock_bars(self, request: Any) -> Any:
+                raise RuntimeError('{"message":"forbidden"}')
+
+        with self.assertRaises(RuntimeError):
+            engine_module.fetch_stock_bars_chunked(BrokenClient(), ["SPY"], 63, "iex", now=NOW)
+
+    def test_invalid_symbol_not_in_batch_still_raises(self) -> None:
+        class OtherClient:
+            def get_stock_bars(self, request: Any) -> Any:
+                raise RuntimeError('{"message":"invalid symbol: ZZZZ"}')
+
+        with self.assertRaises(RuntimeError):
+            engine_module.fetch_stock_bars_chunked(OtherClient(), ["SPY"], 63, "iex", now=NOW)
+
+
 class StrategyHistoryTests(unittest.TestCase):
     def test_refetching_the_same_window_does_not_duplicate_bars(self) -> None:
         state = StrategyState()
