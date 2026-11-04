@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Alpaca Paper Trader stop protection during market days
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09..16:05,35:00 America/New_York
+Persistent=true
+Unit=alpaca-protect.service
+
+[Install]
+WantedBy=timers.target

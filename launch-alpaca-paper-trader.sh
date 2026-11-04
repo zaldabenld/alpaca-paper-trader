@@ -3,6 +3,8 @@
 #   launch-alpaca-paper-trader.sh                    start the backend if needed and open the app window
 #   launch-alpaca-paper-trader.sh --stop             stop the running backend
 #   launch-alpaca-paper-trader.sh --install-desktop  add the app-menu entry pointing at this checkout
+#   launch-alpaca-paper-trader.sh --install-protect-timer  install the user timer that runs stop protection
+#   launch-alpaca-paper-trader.sh --remove-protect-timer   remove that stop-protection timer
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -63,6 +65,24 @@ EOF
     echo "Installed $apps/$DESKTOP_ID.desktop"
 }
 
+install_protect_timer() {
+    local units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$units"
+    sed "s|@ROOT@|$ROOT|g" "$ROOT/deploy/systemd/alpaca-protect.service" >"$units/alpaca-protect.service"
+    sed "s|@ROOT@|$ROOT|g" "$ROOT/deploy/systemd/alpaca-protect.timer" >"$units/alpaca-protect.timer"
+    systemctl --user daemon-reload
+    systemctl --user enable --now alpaca-protect.timer
+    echo "Installed alpaca-protect.timer (runs python_app/protect.py on market days; it exits immediately while the app is running)."
+}
+
+remove_protect_timer() {
+    local units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    systemctl --user disable --now alpaca-protect.timer 2>/dev/null || true
+    rm -f "$units/alpaca-protect.service" "$units/alpaca-protect.timer"
+    systemctl --user daemon-reload
+    echo "Removed alpaca-protect.timer."
+}
+
 open_window() {
     local browser
     for browser in google-chrome chromium chromium-browser brave-browser microsoft-edge; do
@@ -81,6 +101,8 @@ open_window() {
 case "${1:-}" in
     --stop) stop_backend; exit 0 ;;
     --install-desktop) install_desktop; exit 0 ;;
+    --install-protect-timer) install_protect_timer; exit 0 ;;
+    --remove-protect-timer) remove_protect_timer; exit 0 ;;
     "") ;;
     *) fail "Unknown option: $1" ;;
 esac

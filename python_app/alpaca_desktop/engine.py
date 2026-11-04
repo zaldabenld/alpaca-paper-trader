@@ -125,6 +125,7 @@ ORDER_FLOW_MIN_CLASSIFIED_VOLUME = Decimal("1000")
 ORDER_SUBMIT_HOLD_SECONDS = 2 * 60
 ORDER_REJECT_HOLD_SECONDS = 30 * 60
 PROTECTIVE_ORDER_REJECT_HOLD_SECONDS = 5 * 60
+STOP_LOSS_EXIT_REJECT_HOLD_SECONDS = 60  # a rejected stop-loss sell retries quickly, not after 30 min
 NON_FRACTIONABLE_HOLD_SECONDS = 6 * 60 * 60
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "AlpacaPaperTrader"
 REPLAY_DIR = APP_DATA_DIR / "replay"
@@ -542,6 +543,7 @@ class AppConfig(BaseModel):
     min_session_pullback_percent: Decimal = Decimal("0")
     max_entry_rsi: Decimal = Decimal("0")
     max_entries_per_symbol_per_day: int = 0
+    flatten_on_daily_loss: bool = False
     smi_period: int = 10
     min_smi: Decimal = Decimal("40")
     atr_period: int = 14
@@ -753,8 +755,7 @@ class AppConfig(BaseModel):
             raise ValueError("Minimum average volume cannot be negative.")
         self.max_position_notional = Decimal("0")
         self.max_position_percent = Decimal("0")
-        self.daily_loss_limit = Decimal("0")
-        self.daily_loss_limit_percent = Decimal("0")
+        self.daily_loss_limit_percent = min(self.daily_loss_limit_percent, Decimal("100"))
         self.risk_per_trade_percent = Decimal("0")
         self.profit_trail_start_percent = Decimal("0")
         self.profit_trail_drop_percent = Decimal("0")
@@ -1618,6 +1619,8 @@ class TraderEngine:
         self.asset_tradeability_cache: dict[str, tuple[float, str]] = {}
         self.reentry_score_floors: dict[str, Decimal] = {}
         self.entries_today_by_symbol: dict[str, int] = {}
+        self.daily_loss_breach_session = ""
+        self.daily_loss_detail = ""
         self.processed_reentry_exit_ids: set[str] = set()
         self.reentry_reset_at: datetime | None = None
         self.entry_lock_dates: dict[str, str] = {}
@@ -2190,13 +2193,21 @@ class TraderEngine:
             self.sync_entries_today_from_orders(closed_order_dicts + order_dicts)
 
             market_clock = self.format_market_clock(clock)
+            market_open = bool(market_clock["is_open"])
+            session_date = str(market_clock.get("session_date") or datetime.now().astimezone().date().isoformat())
+            # Stops and exits for real positions are managed whenever the account is connected,
+            # not only while auto trading is on; Stop Trading only stops new entries.
+            manage_exits = bool(config.use_bracket_orders and not config.dry_run)
+            loss_breached = self.evaluate_daily_loss_limit(config, account_dict, session_date)
             status_message = ""
-            if should_trade and config.market_hours_only and not market_clock["is_open"]:
+            if should_trade and config.market_hours_only and not market_open:
                 should_trade = False
                 status_message = "Market closed; auto trading paused by setting"
             opening_guard_detail = self.entry_open_guard_message(clock, config)
             closing_guard_detail = self.entry_close_guard_message(clock, config)
             entry_guard_detail = opening_guard_detail or closing_guard_detail
+            if loss_breached:
+                entry_guard_detail = self.daily_loss_detail
             entries_allowed = not entry_guard_detail
             if should_trade and entry_guard_detail:
                 status_message = f"New entries paused: {entry_guard_detail}"
@@ -2205,7 +2216,7 @@ class TraderEngine:
             open_positions = [item for item in position_dicts if abs(decimal_value(item.get("qty"))) > Decimal("0")]
             flat_orders = self.flatten_orders(order_dicts)
             position_symbols = {str(item.get("symbol", "")).upper() for item in open_positions}
-            if should_trade:
+            if should_trade or manage_exits:
                 self.cancel_orphan_protective_orders(flat_orders, position_symbols)
             self.prune_position_trackers(position_symbols)
             pending_entry_symbols = {
@@ -2219,9 +2230,21 @@ class TraderEngine:
 
             rows = []
             stop_now = False
-            if should_trade:
+            flattened_symbols: set[str] = set()
+            if loss_breached and config.flatten_on_daily_loss and market_open and not config.dry_run:
+                flatten_events, flattened_symbols = self.flatten_for_daily_loss(position_map, flat_orders)
+                for level, message in flatten_events:
+                    self.log(level, message)
+            if not market_open and manage_exits and not should_trade:
+                for symbol in sorted(position_symbols):
+                    symbol_orders = [item for item in flat_orders if str(item.get("symbol", "")).upper() == symbol]
+                    for level, message in self.ensure_offhours_stop(
+                        symbol, position_map.get(symbol), symbol_orders, getattr(clock, "next_open", None)
+                    ):
+                        self.log(level, message)
+            if should_trade or (manage_exits and market_open):
                 for symbol in symbols:
-                    if symbol not in position_symbols:
+                    if symbol not in position_symbols or symbol in flattened_symbols:
                         continue
                     symbol_orders = [item for item in flat_orders if str(item.get("symbol", "")).upper() == symbol]
                     risk_account = dict(account_dict)
@@ -2242,6 +2265,7 @@ class TraderEngine:
                         self.log(level, message)
                     stop_now = stop_now or stop_rule
 
+            if should_trade:
                 candidates = []
                 for rank, symbol in enumerate(entry_symbols):
                     if symbol in position_symbols:
@@ -2315,7 +2339,6 @@ class TraderEngine:
 
             equity = decimal_value(account_dict.get("equity"))
             last_equity = decimal_value(account_dict.get("last_equity"))
-            session_date = str(market_clock.get("session_date") or datetime.now().astimezone().date().isoformat())
             daily_pl_payload = self.portfolio_history_daily_pl_payload(client, session_date)
             trade_history_rows = self.trade_history_rows(closed_order_dicts)
             realized_account_basis = decimal_value(daily_pl_payload.get("daily_pl_account_basis_raw"))
@@ -2351,6 +2374,8 @@ class TraderEngine:
                 if stop_now:
                     self.trading_enabled = False
                     self.status = "Auto trading stopped by risk rule"
+                elif loss_breached:
+                    self.status = f"Daily loss limit hit: {self.daily_loss_detail}"
                 elif status_message:
                     self.status = status_message
                 elif self.trading_enabled and market_clock["is_open"]:
@@ -3275,6 +3300,13 @@ class TraderEngine:
         sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
 
         protection_active = bool(protective_orders)
+        if has_long and config.use_bracket_orders and pending_strategy_exit:
+            downgrade_events = self.downgrade_stale_take_profit(
+                symbol, position, snapshot, open_orders, order_roles, opening_guard_detail
+            )
+            if downgrade_events is not None:
+                events.extend(downgrade_events)
+                return events, False, None
         if has_long and config.use_bracket_orders and not pending_strategy_exit:
             protection_events, exit_submitted, protection_active = self.ensure_position_exit_orders(
                 symbol,
@@ -3472,10 +3504,172 @@ class TraderEngine:
             config.atr_period,
         )
 
-    def effective_daily_loss_limit(self, config: AppConfig, equity: Decimal) -> Decimal:
-        if config.daily_loss_limit_percent > 0 and equity > 0:
-            return equity * config.daily_loss_limit_percent / Decimal("100")
-        return config.daily_loss_limit if config.daily_loss_limit > 0 else Decimal("0")
+    def effective_daily_loss_limit(self, config: AppConfig, last_equity: Decimal) -> Decimal:
+        """Strictest positive limit of the dollar and percent settings (0 = off).
+
+        The percent is taken of yesterday's closing equity, which does not move during the day.
+        """
+        limits = []
+        if config.daily_loss_limit > 0:
+            limits.append(config.daily_loss_limit)
+        if config.daily_loss_limit_percent > 0 and last_equity > 0:
+            limits.append(last_equity * config.daily_loss_limit_percent / Decimal("100"))
+        return min(limits) if limits else Decimal("0")
+
+    def evaluate_daily_loss_limit(self, config: AppConfig, account: dict[str, Any], session_date: str) -> bool:
+        """Latch a breach for the session once today's P/L reaches the loss limit.
+
+        Today's P/L is equity minus last_equity from the account call made every refresh. The
+        latch does not clear if equity recovers; it resets on the next session date.
+        """
+        if self.daily_loss_breach_session and self.daily_loss_breach_session != session_date:
+            self.daily_loss_breach_session = ""
+            self.daily_loss_detail = ""
+        if self.daily_loss_breach_session == session_date:
+            return True
+        equity = decimal_value(account.get("equity"))
+        last_equity = decimal_value(account.get("last_equity"))
+        limit = self.effective_daily_loss_limit(config, last_equity)
+        if limit <= 0 or equity <= 0 or last_equity <= 0:
+            return False
+        daily_pl = equity - last_equity
+        if daily_pl > -limit:
+            return False
+        self.daily_loss_breach_session = session_date
+        self.daily_loss_detail = f"down {money(-daily_pl)} today vs {money(limit)} limit; no new entries until next session"
+        self.log("warn", f"Daily loss limit hit: {self.daily_loss_detail}.")
+        return True
+
+    def flatten_for_daily_loss(
+        self,
+        position_map: dict[str, dict[str, Any]],
+        flat_orders: list[dict[str, Any]],
+    ) -> tuple[list[tuple[str, str]], set[str]]:
+        """Market-sell every position after a daily-loss breach; returns events and handled symbols."""
+        events: list[tuple[str, str]] = []
+        handled: set[str] = set()
+        for symbol, position in sorted(position_map.items()):
+            qty = abs(decimal_value(position.get("qty")))
+            if qty <= 0 or decimal_value(position.get("current_price")) <= 0:
+                continue
+            symbol_orders = [order for order in flat_orders if str(order.get("symbol", "")).upper() == symbol]
+            handled.add(symbol)  # either already exiting or being flattened now: no new stop this pass
+            if any(self.order_role(order, {symbol}) == "Strategy Exit" for order in symbol_orders):
+                continue
+            if self.order_hold_reason(symbol, OrderSide.SELL):
+                continue
+            protective = [order for order in symbol_orders if self.order_role(order, {symbol}) == "Protective Exit"]
+            if self.cancel_orders_for_symbol(protective, symbol) and not self.wait_for_symbol_app_orders_cleared(symbol):
+                events.append(("warn", f"Waiting for {symbol} stop cancellation before daily-loss flatten."))
+                continue
+            events.extend(self.submit_exit_order(symbol, qty, self.snapshot(symbol), "daily loss limit flatten"))
+        return events, handled
+
+    def ensure_offhours_stop(
+        self,
+        symbol: str,
+        position: dict[str, Any] | None,
+        symbol_orders: list[dict[str, Any]],
+        next_open: Any = None,
+    ) -> list[tuple[str, str]]:
+        """While the market is closed, make sure a DAY stop is queued for the next open.
+
+        Never sells off-hours. Alpaca only allows DAY time-in-force for fractional quantities,
+        so the stop is re-placed every session; a stop submitted after the close is queued.
+        """
+        if not position:
+            return []
+        qty = abs(decimal_value(position.get("qty")))
+        entry_price = decimal_value(position.get("avg_entry_price"))
+        current_price = decimal_value(position.get("current_price"))
+        if qty <= 0 or entry_price <= 0:
+            return []
+        take_profit_price, stop_loss_price = self.exit_prices(entry_price, self.config)
+        if stop_loss_price <= 0:
+            return []
+        roles = [self.order_role(order, {symbol}) for order in symbol_orders]
+        if "Strategy Exit" in roles:
+            return []
+        protective = [order for order, role in zip(symbol_orders, roles) if role == "Protective Exit"]
+        active = [
+            order for order in protective
+            if not self.cancel_stale_protective_order(order, qty, take_profit_price, stop_loss_price)
+        ]
+        if len(active) < len(protective):
+            # A stale stop was just cancelled; place the replacement on the next pass once Alpaca
+            # has released the quantity, so a transient rejection doesn't block it until the open.
+            return []
+        if any(self.protective_exit_kind(order) == "stop_loss" for order in active):
+            self.strategy_state.last_action[symbol] = "Protected (stop queued for next open)"
+            return []
+        if current_price <= 0:
+            self.strategy_state.last_action[symbol] = "No market price; cannot place stop"
+            return []
+        if current_price <= stop_loss_price:
+            self.strategy_state.last_action[symbol] = "Below stop; exits at the open"
+            return []
+        submitted, events = self.submit_protective_exit_order(
+            symbol,
+            qty,
+            "stop_loss",
+            stop_loss_price,
+            self.snapshot(symbol),
+            f"off-hours stop-loss {self.config.stop_loss_percent}% queued for next open",
+            reject_hold_until=next_open,
+        )
+        if submitted:
+            self.strategy_state.last_action[symbol] = "Protected (stop queued for next open)"
+        return events
+
+    def downgrade_stale_take_profit(
+        self,
+        symbol: str,
+        position: dict[str, Any],
+        snapshot: Any,
+        open_orders: list[dict[str, Any]],
+        order_roles: list[str],
+        opening_guard_detail: str = "",
+    ) -> list[tuple[str, str]] | None:
+        """A pending take-profit limit has no stop behind it; if price falls to the stop, sell."""
+        entry_price = decimal_value(position.get("avg_entry_price"))
+        current_price = decimal_value(position.get("current_price")) or (snapshot.price or Decimal("0"))
+        _, stop_loss_price = self.exit_prices(entry_price, self.config)
+        if stop_loss_price <= 0 or current_price <= 0 or current_price > stop_loss_price:
+            return None
+        limit_exits = [
+            order for order, role in zip(open_orders, order_roles)
+            if role == "Strategy Exit"
+            and str(order.get("client_order_id") or "").startswith("apt-exit-")
+            and str(order.get("side", "")).lower() == "sell"
+            and str(order.get("type") or order.get("order_type") or "").lower() == "limit"
+        ]
+        if not limit_exits:
+            return None
+        if opening_guard_detail:
+            self.strategy_state.last_action[symbol] = "Hold (open guard stop-loss)"
+            return []
+        sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
+        if sell_hold:
+            self.strategy_state.last_action[symbol] = sell_hold
+            return []
+        events: list[tuple[str, str]] = []
+        # Sell only once every take-profit limit is confirmed cancelled; a limit that could not be
+        # cancelled may have filled, and a second full-quantity sell could then open a short.
+        if not all(self.cancel_open_order(order) for order in limit_exits) or not self.wait_for_symbol_app_orders_cleared(
+            symbol, include_exits=True
+        ):
+            events.append(("warn", f"Waiting for {symbol} take-profit cancellation before stop-loss sell."))
+            return events
+        qty = abs(decimal_value(position.get("qty")))
+        events.extend(
+            self.submit_exit_order(
+                symbol,
+                qty,
+                snapshot,
+                f"stop-loss {self.config.stop_loss_percent}% (take-profit limit unfilled, price fell back)",
+            )
+        )
+        return events
 
     def planned_entry_notional_cap(self, config: AppConfig, equity: Decimal, price: Decimal | None = None) -> Decimal:
         candidates: list[Decimal] = []
@@ -3567,6 +3761,10 @@ class TraderEngine:
         current_gain = percent_change(current_price, entry_price)
 
         if stop_loss_price > 0 and current_price <= stop_loss_price and not stop_loss_orders:
+            sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
+            if sell_hold:
+                self.strategy_state.last_action[symbol] = sell_hold
+                return events, False, True
             cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
             if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
@@ -3655,6 +3853,7 @@ class TraderEngine:
         price: Decimal,
         snapshot: Any,
         reason: str,
+        reject_hold_until: Any = None,
     ) -> tuple[bool, list[tuple[str, str]]]:
         events: list[tuple[str, str]] = []
         if self.protective_order_blocked(symbol, kind):
@@ -3700,7 +3899,7 @@ class TraderEngine:
         try:
             submitted = self.submit_order_request(order)
         except OrderExecutionError as exc:
-            self.hold_rejected_protective_order(symbol, kind)
+            self.hold_rejected_protective_order(symbol, kind, until=reject_hold_until)
             self.record_order_intent(
                 symbol,
                 OrderSide.SELL,
@@ -3869,7 +4068,10 @@ class TraderEngine:
                 submitted = self.submit_order_request(order)
             except OrderExecutionError as exc:
                 message = str(exc)
-                self.hold_rejected_order(symbol, OrderSide.SELL, ORDER_REJECT_HOLD_SECONDS)
+                hold_seconds = (
+                    STOP_LOSS_EXIT_REJECT_HOLD_SECONDS if self.is_stop_loss_exit_reason(reason) else ORDER_REJECT_HOLD_SECONDS
+                )
+                self.hold_rejected_order(symbol, OrderSide.SELL, hold_seconds)
                 self.record_order_intent(
                     symbol,
                     OrderSide.SELL,
@@ -4031,12 +4233,15 @@ class TraderEngine:
         minutes = max(1, int(((until - now).total_seconds() + 59) // 60))
         return f"Hold ({side_text} blocked {minutes}m after rejected order)"
 
-    def hold_rejected_protective_order(self, symbol: str, kind: str) -> None:
+    def hold_rejected_protective_order(self, symbol: str, kind: str, until: Any = None) -> None:
         clean_symbol = symbol.strip().upper()
         clean_kind = kind.strip().lower()
         if not clean_symbol or not clean_kind:
             return
-        until = datetime.now(timezone.utc) + timedelta(seconds=PROTECTIVE_ORDER_REJECT_HOLD_SECONDS)
+        hold_until = until if isinstance(until, datetime) else None
+        if hold_until is not None and hold_until.tzinfo is None:
+            hold_until = hold_until.replace(tzinfo=timezone.utc)
+        until = hold_until or datetime.now(timezone.utc) + timedelta(seconds=PROTECTIVE_ORDER_REJECT_HOLD_SECONDS)
         with self.lock:
             self.protective_order_reject_holds[(clean_symbol, clean_kind)] = until
 
@@ -4295,7 +4500,7 @@ class TraderEngine:
 
         if client_id.startswith("apt-entry-") or (side == "buy" and order_class != "oco"):
             return "Pending Entry"
-        if client_id.startswith("apt-exit-"):
+        if client_id.startswith("apt-exit-") or client_id.startswith("apt-purge-"):
             return "Strategy Exit"
         if client_id.startswith("apt-protect-"):
             return "Protective Exit"
@@ -4331,7 +4536,9 @@ class TraderEngine:
                 cancelled += 1
         return cancelled
 
-    def wait_for_symbol_app_orders_cleared(self, symbol: str, timeout_seconds: float = 3.0) -> bool:
+    def wait_for_symbol_app_orders_cleared(
+        self, symbol: str, timeout_seconds: float = 3.0, include_exits: bool = False
+    ) -> bool:
         clean_symbol = symbol.strip().upper()
         if not clean_symbol or self.config.dry_run:
             return True
@@ -4352,7 +4559,11 @@ class TraderEngine:
             flat_orders = self.flatten_orders([model_dict(item) for item in open_orders])
             still_held = [
                 order for order in flat_orders
-                if str(order.get("symbol") or "").upper() == clean_symbol and self.is_app_protective_order(order)
+                if str(order.get("symbol") or "").upper() == clean_symbol
+                and (
+                    self.is_app_protective_order(order)
+                    or (include_exits and str(order.get("client_order_id") or "").startswith("apt-exit-"))
+                )
             ]
             if not still_held:
                 return True
@@ -4804,10 +5015,12 @@ class TraderEngine:
                 status = "Exit pending"
             elif protective_count:
                 status = "Protected"
-            elif self.config.use_bracket_orders and self.is_fractional_quantity(decimal_value(position.get("qty"))):
-                status = "Local percent fallback"
+            elif decimal_value(position.get("current_price")) <= 0:
+                status = "No market price"
+            elif self.config.use_bracket_orders and self.config.dry_run:
+                status = "Unprotected (dry run)"
             elif self.config.use_bracket_orders:
-                status = "Unprotected"
+                status = "Unprotected: stop pending"
             else:
                 status = "Manual exits off"
 
@@ -4832,8 +5045,8 @@ class TraderEngine:
                 details.append(f"{pending_entry_count} pending entry")
             if manual_count:
                 details.append(f"{manual_count} manual/unknown")
-            if status == "Local percent fallback":
-                details.append(f"fractional qty cannot use Alpaca {self.config.exit_time_in_force.upper()} bracket")
+            if status == "No market price":
+                details.append("untradable (e.g. a CVR right); no stop possible")
             if not details:
                 details.append("No open exit orders")
 
@@ -5001,6 +5214,11 @@ class TraderEngine:
                 "orders": self.orders,
                 "protection": self.protection_rows,
                 "trade_history": self.trade_history,
+                "risk": {
+                    "daily_loss_breached": bool(self.daily_loss_breach_session),
+                    "daily_loss_detail": self.daily_loss_detail,
+                    "exits_managed_when_stopped": bool(self.config.use_bracket_orders and not self.config.dry_run),
+                },
                 "order_intents": self.order_intents[-200:],
                 "strategy": self.strategy_rows,
                 "market_clock": self.market_clock,

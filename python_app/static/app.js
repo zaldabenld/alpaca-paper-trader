@@ -45,6 +45,9 @@ const fields = {
   minSessionPullbackPercent: document.querySelector("#minSessionPullbackPercent"),
   maxEntryRsi: document.querySelector("#maxEntryRsi"),
   maxEntriesPerSymbolPerDay: document.querySelector("#maxEntriesPerSymbolPerDay"),
+  dailyLossLimit: document.querySelector("#dailyLossLimit"),
+  dailyLossLimitPercent: document.querySelector("#dailyLossLimitPercent"),
+  flattenOnDailyLoss: document.querySelector("#flattenOnDailyLoss"),
   smiPeriod: document.querySelector("#smiPeriod"),
   minSmi: document.querySelector("#minSmi"),
   atrPeriod: document.querySelector("#atrPeriod"),
@@ -200,6 +203,7 @@ const configKeys = [
   "min_session_pullback_percent",
   "max_entry_rsi",
   "max_entries_per_symbol_per_day",
+  "flatten_on_daily_loss",
   "smi_period",
   "min_smi",
   "atr_period",
@@ -268,6 +272,7 @@ let isDraftAccount = false;
 let selectedTradingEnabled = false;
 let selectedConnected = false;
 let selectedLiveDryRun = null;
+let selectedRisk = {};
 let credentialKeysCollapsedFor = "";
 let accountContextVersion = 0;
 let accountTransitionDepth = 0;
@@ -600,7 +605,11 @@ els.removeAccountButton.addEventListener("click", async () => {
   const account = findSavedAccount(selectedAccountId);
   const name = account?.name || "this account";
   if (!window.confirm(`Remove ${name} from the app? Connected trading for it will stop.`)) return;
-  await fetchWithRecovery(`/api/accounts/${encodeURIComponent(selectedAccountId)}`, { method: "DELETE" });
+  const removed = await fetchWithRecovery(`/api/accounts/${encodeURIComponent(selectedAccountId)}`, {
+    method: "DELETE",
+    headers: apiHeaders(),
+  });
+  if (!removed.ok) await reloadIfTokenRejected(removed);
   await loadSettings({ guard: () => isCurrentAccountContext(context) });
   await loadState({ accountId: selectedAccountId, source: "remove-account" });
 });
@@ -836,6 +845,7 @@ function readConfig() {
     min_session_pullback_percent: readNumber("minSessionPullbackPercent", 0),
     max_entry_rsi: readNumber("maxEntryRsi", 0),
     max_entries_per_symbol_per_day: readInt("maxEntriesPerSymbolPerDay", 0),
+    flatten_on_daily_loss: fields.flattenOnDailyLoss.checked,
     smi_period: readInt("smiPeriod", 10),
     min_smi: readNumber("minSmi", 40),
     atr_period: readInt("atrPeriod", 14),
@@ -1158,6 +1168,7 @@ function presetConfig(profile) {
     min_session_pullback_percent: 0,
     max_entry_rsi: 0,
     max_entries_per_symbol_per_day: 0,
+    flatten_on_daily_loss: false,
     smi_period: 10,
     min_smi: 40,
     atr_period: 14,
@@ -1194,13 +1205,28 @@ function readInt(id, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+// Per-launch token the server writes into this page; required on every state-changing request.
+const API_TOKEN = document.querySelector('meta[name="apt-api-token"]')?.content || "";
+
+function apiHeaders(extra = {}) {
+  return { ...extra, "X-APT-Token": API_TOKEN };
+}
+
+async function reloadIfTokenRejected(response) {
+  if (response.status !== 403) return;
+  const payload = await response.clone().json().catch(() => ({}));
+  // The backend restarted with a new token; reload to pick it up.
+  if (payload.detail === "invalid api token") window.location.reload();
+}
+
 async function postJson(url, body) {
   const response = await fetchWithRecovery(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!response.ok) {
+    await reloadIfTokenRejected(response);
     const payload = await response.json().catch(() => ({}));
     const detail = payload.detail || response.statusText;
     throw new Error(detail);
@@ -1949,6 +1975,7 @@ function renderState(state, context) {
     selectedConnected = false;
     selectedTradingEnabled = false;
     selectedLiveDryRun = null;
+    selectedRisk = {};
     renderAccountCards(state.accounts || []);
     renderMarketClock(null);
     renderMarketStream(state.market_stream || {});
@@ -1970,6 +1997,7 @@ function renderState(state, context) {
   selectedConnected = Boolean(selected.connected);
   selectedTradingEnabled = Boolean(selected.trading_enabled);
   selectedLiveDryRun = config.dry_run === undefined ? null : Boolean(config.dry_run);
+  selectedRisk = selected.risk || {};
   if (selected.account_id === selectedAccountId) {
     const saved = findSavedAccount(selectedAccountId);
     if (!saved || saved.config?.profile !== config.profile) {
@@ -2106,7 +2134,15 @@ function renderTradingStatus() {
     title = "Paper trading live";
     detail = "The bot is running and sending paper orders to Alpaca.";
   } else {
-    detail = "Practice mode is off, so Start Trading will send paper orders.";
+    title = "New buys stopped";
+    detail = selectedRisk.exits_managed_when_stopped
+      ? "Stop-losses and exits on open positions are still managed. Start Trading resumes buying."
+      : "Practice mode is off, so Start Trading will send paper orders.";
+  }
+  if (selectedConnected && selectedRisk.daily_loss_breached) {
+    state = "stopped";
+    title = "Daily loss limit hit";
+    detail = `${selectedRisk.daily_loss_detail || "No new buys until the next session."} Stops and exits are still managed.`;
   }
   if (selectedConnected && selectedLiveDryRun !== null && fields.dryRun.checked !== selectedLiveDryRun) {
     detail += ` Practice mode will turn ${fields.dryRun.checked ? "on" : "off"} when you click Save, Apply Changes, or Start Trading.`;
