@@ -1404,6 +1404,7 @@ def rejected_market_data_symbol(error: Exception, batch: list[str]) -> str:
             "market_data",
             f"Skipping {symbol}: Alpaca market data does not recognize it (e.g. a CVR or rights position)",
             MarketDataError(str(error) or error.__class__.__name__),
+            severity="info",
             source="engine",
         )
     return symbol
