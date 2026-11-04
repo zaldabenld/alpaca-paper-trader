@@ -553,6 +553,40 @@ document.querySelectorAll(".tab").forEach((button) => {
   });
 });
 
+// Light / Dark / Auto (follow the system). The choice is remembered per browser profile.
+function applyThemeChoice(choice) {
+  if (choice === "light" || choice === "dark") {
+    document.documentElement.dataset.theme = choice;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    const selected = button.dataset.themeChoice === (choice || "system");
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+let savedThemeChoice = "system";
+try {
+  savedThemeChoice = localStorage.getItem("apt-theme") || "system";
+} catch {
+  savedThemeChoice = "system";
+}
+applyThemeChoice(savedThemeChoice);
+document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const choice = button.dataset.themeChoice;
+    try {
+      if (choice === "system") localStorage.removeItem("apt-theme");
+      else localStorage.setItem("apt-theme", choice);
+    } catch {
+      // storage unavailable: the choice still applies for this session
+    }
+    applyThemeChoice(choice);
+  });
+});
+
 // Details tab sub-panels use their own classes so the .tab handler above never hides them.
 document.querySelectorAll("#detailsPanel .subtab").forEach((button) => {
   button.addEventListener("click", () => {
