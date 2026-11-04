@@ -6,10 +6,11 @@ import re
 import threading
 import time
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from alpaca.common.enums import Sort
 from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
@@ -92,6 +93,10 @@ INVALID_SYMBOL_PATTERN = re.compile(r"invalid symbol:\s*([A-Za-z0-9.\-/]+)")
 # they are dropped from data requests and stream subscriptions for the process lifetime.
 INVALID_MARKET_DATA_SYMBOLS: set[str] = set()
 INVALID_MARKET_DATA_SYMBOLS_LOCK = threading.Lock()
+try:
+    MARKET_TIMEZONE: tzinfo = ZoneInfo("America/New_York")
+except ZoneInfoNotFoundError:  # Windows without tzdata; EST is close enough for a day key
+    MARKET_TIMEZONE = timezone(timedelta(hours=-5))
 MARKET_STREAM_CONNECTION_LIMIT_RETRY_SECONDS = 120
 MIN_EXIT_PRICE_OFFSET = Decimal("0.01")
 PRICE_INCREMENT = Decimal("0.01")
@@ -505,6 +510,10 @@ class AppConfig(BaseModel):
     max_session_pullback_percent: Decimal = Decimal("0.75")
     max_recent_pullback_percent: Decimal = Decimal("0.50")
     late_momentum_floor_percent: Decimal = Decimal("0")
+    # Optional entry gates for strategy experiments; 0 leaves each one off.
+    min_session_pullback_percent: Decimal = Decimal("0")
+    max_entry_rsi: Decimal = Decimal("0")
+    max_entries_per_symbol_per_day: int = 0
     smi_period: int = 10
     min_smi: Decimal = Decimal("40")
     atr_period: int = 14
@@ -580,7 +589,13 @@ class AppConfig(BaseModel):
     def validate_positions(cls, value: int) -> int:
         return max(1, int(value))
 
-    @field_validator("cooldown_minutes", "entry_open_guard_minutes", "entry_close_guard_minutes", "stop_loss_grace_minutes")
+    @field_validator(
+        "cooldown_minutes",
+        "entry_open_guard_minutes",
+        "entry_close_guard_minutes",
+        "stop_loss_grace_minutes",
+        "max_entries_per_symbol_per_day",
+    )
     @classmethod
     def validate_cooldown(cls, value: int) -> int:
         return max(0, int(value))
@@ -604,6 +619,8 @@ class AppConfig(BaseModel):
         "max_session_pullback_percent",
         "max_recent_pullback_percent",
         "late_momentum_floor_percent",
+        "min_session_pullback_percent",
+        "max_entry_rsi",
         "min_buy_volume_ratio",
         "reentry_score_boost",
         "take_profit_percent",
@@ -700,6 +717,7 @@ class AppConfig(BaseModel):
         if self.buy_rsi_min >= self.buy_rsi_max:
             raise ValueError("Buy RSI min must be below buy RSI max.")
         self.min_entry_score = min(self.min_entry_score, Decimal("100"))
+        self.max_entry_rsi = min(self.max_entry_rsi, Decimal("100"))
         self.min_buy_volume_ratio = min(self.min_buy_volume_ratio, Decimal("1"))
         if self.volume_multiplier < 0:
             raise ValueError("Volume multiplier cannot be negative.")
@@ -1554,6 +1572,7 @@ class TraderEngine:
         self.lookup_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.asset_tradeability_cache: dict[str, tuple[float, str]] = {}
         self.reentry_score_floors: dict[str, Decimal] = {}
+        self.entries_today_by_symbol: dict[str, int] = {}
         self.processed_reentry_exit_ids: set[str] = set()
         self.reentry_reset_at: datetime | None = None
         self.entry_lock_dates: dict[str, str] = {}
@@ -2121,6 +2140,7 @@ class TraderEngine:
             entry_symbols = self.trading_symbols()
 
             self.sync_loss_reentry_floors_from_closed_orders(closed_order_dicts)
+            self.sync_entries_today_from_orders(closed_order_dicts + order_dicts)
 
             market_clock = self.format_market_clock(clock)
             status_message = ""
@@ -2894,6 +2914,8 @@ class TraderEngine:
             return "Hold (RSI warming)"
         if snapshot.rsi < config.buy_rsi_min:
             return f"Hold (RSI {snapshot.rsi:.1f})"
+        if config.max_entry_rsi > 0 and snapshot.rsi > config.max_entry_rsi:
+            return f"Hold (RSI {snapshot.rsi:.1f} above {config.max_entry_rsi})"
         if snapshot.bias == "Waiting":
             return "Hold (trend warming)"
         if snapshot.bias != "Bullish":
@@ -2928,6 +2950,12 @@ class TraderEngine:
             return f"Hold (below VWAP {snapshot.vwap_distance_percent:+.2f}%)"
         if snapshot.vwap_distance_percent > limits["max_vwap_extension"]:
             return f"Hold (extended above VWAP {snapshot.vwap_distance_percent:+.2f}%)"
+        if config.min_session_pullback_percent > 0:
+            pullback = getattr(snapshot, "session_pullback_percent", None)
+            if pullback is None:
+                return "Hold (session pullback warming)"
+            if pullback < config.min_session_pullback_percent:
+                return f"Hold (no pullback yet {pullback:.2f}%)"
         if snapshot.smi is None:
             return "Hold (SMI warming)"
         if snapshot.relative_volume is None:
@@ -3053,6 +3081,12 @@ class TraderEngine:
         if not entries_allowed:
             self.strategy_state.last_action[symbol] = "Hold (entry guard)"
             return None
+        if config.max_entries_per_symbol_per_day > 0:
+            with self.lock:
+                entries_today = self.entries_today_by_symbol.get(symbol.strip().upper(), 0)
+            if entries_today >= config.max_entries_per_symbol_per_day:
+                self.strategy_state.last_action[symbol] = f"Hold (bought {entries_today}x today)"
+                return None
         quality_hold = self.entry_quality_hold_reason(symbol, snapshot, config)
         if quality_hold:
             self.strategy_state.last_action[symbol] = quality_hold
@@ -4385,6 +4419,27 @@ class TraderEngine:
             "percent": percent.quantize(Decimal("0.000001")),
             "session_date": today.isoformat(),
         }
+
+    def sync_entries_today_from_orders(self, orders: list[dict[str, Any]]) -> None:
+        # Counted from broker orders (not local memory) so the daily cap survives restarts.
+        today = datetime.now(MARKET_TIMEZONE).date()
+        counts: dict[str, int] = {}
+        seen: set[str] = set()
+        for item in self.flatten_orders(orders):
+            if str(item.get("side") or "").lower() != "buy" or decimal_value(item.get("filled_qty")) <= 0:
+                continue
+            order_id = str(item.get("id") or "")
+            if order_id and order_id in seen:
+                continue
+            seen.add(order_id)
+            filled_at = self.parse_order_datetime(item.get("filled_at") or item.get("submitted_at"))
+            if filled_at is None or filled_at.astimezone(MARKET_TIMEZONE).date() != today:
+                continue
+            symbol = str(item.get("symbol") or "").strip().upper()
+            if symbol:
+                counts[symbol] = counts.get(symbol, 0) + 1
+        with self.lock:
+            self.entries_today_by_symbol = counts
 
     def sync_loss_reentry_floors_from_closed_orders(self, orders: list[dict[str, Any]]) -> None:
         filled_orders: list[dict[str, Any]] = []
