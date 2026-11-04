@@ -995,17 +995,28 @@ class MarketStreamBaselineTests(unittest.TestCase):
         engine.config = config
         engine.top_volume_symbols = ["MSFT", "NVDA"]
 
-        self.assertNotIn("SQQQ", engine.trading_symbols())
+        # Allow mode always scans the bounded inverse set, even when the most-active list skips it,
+        # and an inverse ETF gets no special hold reason: it passes or fails the normal checks.
+        symbols = engine.trading_symbols()
+        self.assertEqual(symbols[:2], ["MSFT", "NVDA"])
+        for inverse in ("SQQQ", "SPXU", "SDS", "SH", "TZA"):
+            self.assertIn(inverse, symbols)
         self.assertEqual(engine.inverse_etf_hold_reason("SQQQ", config), "")
         self.assertFalse(hasattr(engine, "market_downturn_active"))
         self.assertFalse(hasattr(engine, "downturn_inverse_allowed"))
 
         engine.top_volume_symbols = ["MSFT", "SQQQ"]
-        self.assertIn("SQQQ", engine.trading_symbols())
+        self.assertEqual(engine.trading_symbols().count("SQQQ"), 1)
+
+        manual_config = AppConfig(symbols=["MSFT"], use_top_volume_symbols=False, inverse_etf_mode="allow")
+        engine.config = manual_config
+        self.assertEqual(engine.trading_symbols(), ["MSFT"])
 
         exclude_config = AppConfig(symbols=["MSFT"], use_top_volume_symbols=True, inverse_etf_mode="exclude")
         self.assertEqual(exclude_config.inverse_etf_mode, "exclude")
         engine.config = exclude_config
+        engine.top_volume_symbols = ["MSFT", "NVDA"]
+        self.assertNotIn("SQQQ", engine.trading_symbols())
         self.assertEqual(engine.inverse_etf_hold_reason("SQQQ", exclude_config), "Hold (inverse ETF excluded)")
 
         inverse_only_config = AppConfig(symbols=["MSFT"], use_top_volume_symbols=True, inverse_etf_mode="inverse_only")
