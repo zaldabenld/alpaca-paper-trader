@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,6 +15,23 @@ def decimal_value(value: Any, default: Decimal = Decimal("0")) -> Decimal:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return default
+
+
+def normalize_bar_timestamp(value: Any) -> str:
+    # REST bars carry datetimes ("+00:00") while stream bars arrive as JSON strings ("Z");
+    # both must map to the same UTC ISO string so the same minute is recognized.
+    if value is None or value == "":
+        return datetime.now(timezone.utc).isoformat()
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        try:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return str(value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat()
 
 
 def money(value: Any) -> str:
@@ -147,12 +165,19 @@ class StrategyState:
             bar_low = price
         if bar_low > bar_high:
             bar_low, bar_high = bar_high, bar_low
-        when = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp or datetime.now(timezone.utc).isoformat())
+        when = normalize_bar_timestamp(timestamp)
+        point = BarPoint(when, price, bar_volume, bar_high, bar_low)
         history = self.histories[clean]
-        if history and history[-1].timestamp == when:
-            history[-1] = BarPoint(when, price, bar_volume, bar_high, bar_low)
+        # REST refreshes resend the whole window and stream bars can repeat a minute, so
+        # keep one point per timestamp in time order instead of appending copies.
+        if not history or history[-1].timestamp < when:
+            history.append(point)
         else:
-            history.append(BarPoint(when, price, bar_volume, bar_high, bar_low))
+            index = bisect_left(history, when, key=lambda item: item.timestamp)
+            if index < len(history) and history[index].timestamp == when:
+                history[index] = point
+            else:
+                history.insert(index, point)
 
         if len(history) > max_bars:
             del history[: len(history) - max_bars]
