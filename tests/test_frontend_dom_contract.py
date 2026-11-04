@@ -52,6 +52,21 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertEqual([], missing)
         self.assertGreater(len(keys), 40)
 
+    def test_universe_mode_control_and_status_are_wired(self) -> None:
+        self.assertEqual(1, len(re.findall(r'(?<![\w-])id="universeMode"', self.index_html)))
+        self.assertEqual(1, len(re.findall(r'(?<![\w-])id="dailyUniverseStatus"', self.index_html)))
+        for value in ("most_active", "daily_rvol"):
+            self.assertIn(f'<option value="{value}"', self.index_html)
+
+        config_start = self.app_js.index("const configKeys = [")
+        config_text = self.app_js[config_start : self.app_js.index("];", config_start)]
+        self.assertIn('"universe_mode"', config_text)
+        profile_start = self.app_js.index("const strategyProfileKeys = new Set([")
+        profile_text = self.app_js[profile_start : self.app_js.index("]);", profile_start)]
+        self.assertIn('"universe_mode"', profile_text)
+        self.assertIn("universe_mode: fields.universeMode.value", self.app_js)
+        self.assertIn('universe_mode: "most_active"', self.app_js)
+
     def test_tab_buttons_match_tab_panels(self) -> None:
         buttons = len(
             re.findall(r'<button[^>]*class="tab(?: active)?"', self.index_html)

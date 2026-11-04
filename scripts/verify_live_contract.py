@@ -696,7 +696,40 @@ def verify_payload(
             count = int(selected.get("trading_symbol_count") or summary.get("trading_symbol_count") or 0)
             inverse_mode = str(config.get("inverse_etf_mode") or "allow").strip().lower()
             trading_symbols = selected.get("trading_symbols") if isinstance(selected.get("trading_symbols"), list) else []
-            if inverse_mode == "inverse_only":
+            # Same condition as engine.trading_symbols(): inverse_only overrides the daily list.
+            if (
+                str(config.get("universe_mode") or "most_active").strip().lower() == "daily_rvol"
+                and inverse_mode != "inverse_only"
+            ):
+                daily = selected.get("daily_universe") if isinstance(selected.get("daily_universe"), dict) else {}
+                daily_symbols = {
+                    str(symbol or "").strip().upper()
+                    for symbol in (daily.get("symbols") if isinstance(daily.get("symbols"), list) else [])
+                    if str(symbol or "").strip()
+                }
+                # Allow mode also scans the bounded inverse set (engine.TOP_VOLUME_INVERSE_ETF_SYMBOLS).
+                expected_symbols = daily_symbols | (set(INVERSE_SCAN_SYMBOLS) if inverse_mode == "allow" else set())
+                listed_symbols = {
+                    str(symbol or "").strip().upper()
+                    for symbol in trading_symbols
+                    if str(symbol or "").strip()
+                }
+                daily_status = str(daily.get("status") or "").lower()
+                universe_ok = (
+                    symbol_source in {"daily_rvol", "daily_rvol_pending"}
+                    and listed_symbols == expected_symbols
+                    and count == len(expected_symbols)
+                )
+                if symbol_source == "daily_rvol_pending":
+                    universe_ok = universe_ok and daily_status == "pending"
+                elif symbol_source == "daily_rvol":
+                    universe_ok = universe_ok and daily_status == "picked"
+                universe_detail = (
+                    f"{account_label(index)} symbol_source={symbol_source or 'missing'}, "
+                    f"daily_status={daily_status or 'missing'}, trading_symbol_count={count}, "
+                    f"extras={len(listed_symbols - expected_symbols)}, missing={len(expected_symbols - listed_symbols)}"
+                )
+            elif inverse_mode == "inverse_only":
                 universe_ok = symbol_source == "inverse_only" and count > 0
                 universe_detail = f"{account_label(index)} symbol_source={symbol_source or 'missing'}, trading_symbol_count={count}"
             else:

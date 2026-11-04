@@ -188,3 +188,25 @@ def save_settings(settings: dict[str, Any]) -> None:
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+def write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write an owner-only JSON file (same pattern as save_settings)."""
+    if path.parent == APP_DIR:
+        ensure_private_app_dir()
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with os.fdopen(os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass

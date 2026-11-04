@@ -57,6 +57,7 @@ const fields = {
   minBuyVolumeRatio: document.querySelector("#minBuyVolumeRatio"),
   reentryScoreBoost: document.querySelector("#reentryScoreBoost"),
   inverseEtfMode: document.querySelector("#inverseEtfMode"),
+  universeMode: document.querySelector("#universeMode"),
   sellRsi: document.querySelector("#sellRsi"),
   volumePeriod: document.querySelector("#volumePeriod"),
   volumeMultiplier: document.querySelector("#volumeMultiplier"),
@@ -74,6 +75,7 @@ const fields = {
 };
 
 const els = {
+  dailyUniverseStatus: document.querySelector("#dailyUniverseStatus"),
   statusText: document.querySelector("#statusText"),
   runtimeHealthBanner: document.querySelector("#runtimeHealthBanner"),
   runtimeHealthTitle: document.querySelector("#runtimeHealthTitle"),
@@ -221,6 +223,7 @@ const configKeys = [
   "min_buy_volume_ratio",
   "reentry_score_boost",
   "inverse_etf_mode",
+  "universe_mode",
   "sell_rsi",
   "volume_period",
   "volume_multiplier",
@@ -262,6 +265,7 @@ const strategyProfileKeys = new Set([
   "min_buy_volume_ratio",
   "reentry_score_boost",
   "inverse_etf_mode",
+  "universe_mode",
   "sell_rsi",
   "volume_period",
   "volume_multiplier",
@@ -947,6 +951,7 @@ function readConfig() {
     min_buy_volume_ratio: readNumber("minBuyVolumeRatio", 0.5),
     reentry_score_boost: readNumber("reentryScoreBoost", 12),
     inverse_etf_mode: fields.inverseEtfMode.value,
+    universe_mode: fields.universeMode.value,
     sell_rsi: readNumber("sellRsi", 72),
     volume_period: readInt("volumePeriod", 20),
     volume_multiplier: readNumber("volumeMultiplier", 1.5),
@@ -1162,6 +1167,26 @@ function renderProfileStatus() {
   }
 }
 
+function renderDailyUniverseStatus(selected) {
+  const el = els.dailyUniverseStatus;
+  if (!el) return;
+  const config = selected?.config || {};
+  // Same condition as the engine: the daily list needs most-active trading and is overridden by inverse-only.
+  if (config.universe_mode !== "daily_rvol" || !config.use_top_volume_symbols || config.inverse_etf_mode === "inverse_only") {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const daily = selected?.daily_universe || {};
+  if (daily.status === "picked") {
+    const symbols = Array.isArray(daily.symbols) ? daily.symbols : [];
+    el.textContent = `Daily list: ${symbols.length} stocks (${daily.picked_count ?? 0} picked at ${daily.picked_at || "-"}, +${daily.added_count ?? 0} added since)`;
+  } else {
+    el.textContent = "Daily list: waiting for the 9:45 ET pick (only inverse ETFs and held positions until then)";
+  }
+  el.hidden = false;
+}
+
 function renderParameterStatus(selected = null) {
   if (!els.parameterStatus) return;
   const liveConfig = selected?.config || null;
@@ -1274,6 +1299,7 @@ function presetConfig(profile) {
     min_buy_volume_ratio: 0.5,
     reentry_score_boost: 12,
     inverse_etf_mode: "allow",
+    universe_mode: "most_active",
     sell_rsi: 72,
     volume_period: 20,
     volume_multiplier: 1.5,
@@ -2127,6 +2153,7 @@ function renderState(state, context) {
   renderMarketStream(state.market_stream || {});
   renderReplay(state.replay || {});
   renderParameterStatus(selected);
+  renderDailyUniverseStatus(selected);
   renderTradingToggle();
   els.cancelOrdersButton.disabled = !selected.connected;
   els.purgeAccountButton.disabled = !selected.connected;
