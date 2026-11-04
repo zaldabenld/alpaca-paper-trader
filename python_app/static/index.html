@@ -32,6 +32,7 @@
         <strong id="runtimeHealthTitle">Runtime warning</strong>
         <span id="runtimeHealthText"></span>
       </section>
+      <p id="runtimeNote" class="runtime-note" hidden></p>
 
       <section id="dashboardView" class="view dashboard-view active">
         <section class="dashboard-grid">
@@ -152,36 +153,41 @@
               <label><span>Stop loss %</span><input id="backtestStopLoss" type="number" min="0" max="100" step="0.05" value="1.25" /></label>
               <label><span>Inverse ETFs</span><select id="backtestInverseEtfMode"><option value="allow" selected>Allow same rules</option><option value="exclude">Exclude</option><option value="inverse_only">Inverse only</option></select></label>
             </section>
-            <section>
-              <h3>Score Weights</h3>
-              <label><span>RSI</span><input id="backtestWeightRsi" type="number" min="0" max="100" step="0.5" value="5" /></label>
-              <label><span>Relative volume</span><input id="backtestWeightRelativeVolume" type="number" min="0" max="100" step="0.5" value="13" /></label>
-              <label><span>Momentum</span><input id="backtestWeightMomentum" type="number" min="0" max="100" step="0.5" value="14" /></label>
-              <label><span>Recent momentum</span><input id="backtestWeightRecentMomentum" type="number" min="0" max="100" step="0.5" value="8" /></label>
-              <label><span>Long momentum</span><input id="backtestWeightLongMomentum" type="number" min="0" max="100" step="0.5" value="14" /></label>
-              <label><span>Session change</span><input id="backtestWeightSessionChange" type="number" min="0" max="100" step="0.5" value="16" /></label>
-              <label><span>VWAP</span><input id="backtestWeightVwap" type="number" min="0" max="100" step="0.5" value="14" /></label>
-              <label><span>SMI</span><input id="backtestWeightSmi" type="number" min="0" max="100" step="0.5" value="7" /></label>
-              <label><span>Volatility</span><input id="backtestWeightVolatility" type="number" min="0" max="100" step="0.5" value="0" /></label>
-              <label><span>Flow</span><input id="backtestWeightFlow" type="number" min="0" max="100" step="0.5" value="3" /></label>
-              <label><span>Session pullback penalty</span><input id="backtestWeightSessionPullbackPenalty" type="number" min="0" max="100" step="0.5" value="9" /></label>
-              <label><span>Recent pullback penalty</span><input id="backtestWeightRecentPullbackPenalty" type="number" min="0" max="100" step="0.5" value="6" /></label>
-              <label><span>VWAP extension penalty</span><input id="backtestWeightVwapExtensionPenalty" type="number" min="0" max="100" step="0.5" value="10" /></label>
-              <label><span>Session extension penalty</span><input id="backtestWeightSessionExtensionPenalty" type="number" min="0" max="100" step="0.5" value="4" /></label>
-              <label><span>Volatility penalty</span><input id="backtestWeightVolatilityPenalty" type="number" min="0" max="100" step="0.5" value="4" /></label>
-              <label><span>SMI overheat penalty</span><input id="backtestWeightSmiOverheatPenalty" type="number" min="0" max="100" step="0.5" value="4" /></label>
-            </section>
-            <section>
-              <h3>Sizing Harness</h3>
-              <label><span>Account equity</span><input id="backtestStartingEquity" type="number" min="1" max="100000000" step="100" value="1000" /></label>
-              <label><span>Cash</span><input id="backtestStartingCash" type="number" min="0" max="100000000" step="100" value="1000" /></label>
-              <label><span>Sizing mode</span><select id="backtestTradeSizeMode"><option value="percent" selected>Percent</option><option value="notional">Dollar</option></select></label>
-              <label><span>Trade %</span><input id="backtestTradePercent" type="number" min="0" max="100" step="0.25" value="5" /></label>
-              <label><span>Trade $</span><input id="backtestTradeNotional" type="number" min="0" max="1000000" step="10" value="0" /></label>
-              <label><span>Max positions</span><input id="backtestMaxPositions" type="number" min="1" max="200" step="1" value="20" /></label>
-              <label><span>Total exposure %</span><input id="backtestTotalExposure" type="number" min="0" max="1000" step="1" value="100" /></label>
-            </section>
           </div>
+          <details class="backtest-advanced">
+            <summary>Advanced: score weights and sizing</summary>
+            <div class="backtest-parameter-grid backtest-grid-advanced">
+              <section>
+                <h3>Score Weights</h3>
+                <label><span>RSI</span><input id="backtestWeightRsi" type="number" min="0" max="100" step="0.5" value="5" /></label>
+                <label><span>Relative volume</span><input id="backtestWeightRelativeVolume" type="number" min="0" max="100" step="0.5" value="13" /></label>
+                <label><span>Momentum</span><input id="backtestWeightMomentum" type="number" min="0" max="100" step="0.5" value="14" /></label>
+                <label><span>Recent momentum</span><input id="backtestWeightRecentMomentum" type="number" min="0" max="100" step="0.5" value="8" /></label>
+                <label><span>Long momentum</span><input id="backtestWeightLongMomentum" type="number" min="0" max="100" step="0.5" value="14" /></label>
+                <label><span>Session change</span><input id="backtestWeightSessionChange" type="number" min="0" max="100" step="0.5" value="16" /></label>
+                <label><span>VWAP</span><input id="backtestWeightVwap" type="number" min="0" max="100" step="0.5" value="14" /></label>
+                <label><span>SMI</span><input id="backtestWeightSmi" type="number" min="0" max="100" step="0.5" value="7" /></label>
+                <label><span>Volatility</span><input id="backtestWeightVolatility" type="number" min="0" max="100" step="0.5" value="0" /></label>
+                <label><span>Flow</span><input id="backtestWeightFlow" type="number" min="0" max="100" step="0.5" value="3" /></label>
+                <label><span>Session pullback penalty</span><input id="backtestWeightSessionPullbackPenalty" type="number" min="0" max="100" step="0.5" value="9" /></label>
+                <label><span>Recent pullback penalty</span><input id="backtestWeightRecentPullbackPenalty" type="number" min="0" max="100" step="0.5" value="6" /></label>
+                <label><span>VWAP extension penalty</span><input id="backtestWeightVwapExtensionPenalty" type="number" min="0" max="100" step="0.5" value="10" /></label>
+                <label><span>Session extension penalty</span><input id="backtestWeightSessionExtensionPenalty" type="number" min="0" max="100" step="0.5" value="4" /></label>
+                <label><span>Volatility penalty</span><input id="backtestWeightVolatilityPenalty" type="number" min="0" max="100" step="0.5" value="4" /></label>
+                <label><span>SMI overheat penalty</span><input id="backtestWeightSmiOverheatPenalty" type="number" min="0" max="100" step="0.5" value="4" /></label>
+              </section>
+              <section>
+                <h3>Sizing Harness</h3>
+                <label><span>Account equity</span><input id="backtestStartingEquity" type="number" min="1" max="100000000" step="100" value="1000" /></label>
+                <label><span>Cash</span><input id="backtestStartingCash" type="number" min="0" max="100000000" step="100" value="1000" /></label>
+                <label><span>Sizing mode</span><select id="backtestTradeSizeMode"><option value="percent" selected>Percent</option><option value="notional">Dollar</option></select></label>
+                <label><span>Trade %</span><input id="backtestTradePercent" type="number" min="0" max="100" step="0.25" value="5" /></label>
+                <label><span>Trade $</span><input id="backtestTradeNotional" type="number" min="0" max="1000000" step="10" value="0" /></label>
+                <label><span>Max positions</span><input id="backtestMaxPositions" type="number" min="1" max="200" step="1" value="20" /></label>
+                <label><span>Total exposure %</span><input id="backtestTotalExposure" type="number" min="0" max="1000" step="1" value="100" /></label>
+              </section>
+            </div>
+          </details>
           <section id="backtestSummary" class="backtest-summary" hidden>
             <article>
               <span>Engine</span>
@@ -262,6 +268,13 @@
       </section>
 
       <section id="accountsView" class="view accounts-view">
+      <section id="tradingStatusBar" class="trading-status stopped" aria-live="polite">
+        <div class="trading-status-text">
+          <strong id="tradingStatusTitle">Stopped</strong>
+          <small id="tradingStatusDetail">Select an account to see its trading status.</small>
+        </div>
+        <button id="tradingToggleButton" disabled>Start Trading</button>
+      </section>
       <section class="layout">
         <aside class="sidebar">
           <section class="panel">
@@ -280,19 +293,22 @@
               <button id="removeAccountButton" class="danger">Remove</button>
             </div>
             <div class="compact-section">
-              <h3>Credentials</h3>
+              <h3>Connection</h3>
               <div id="credentialStatus" class="credential-status">No saved credentials</div>
-              <label>
-                API key
-                <input id="apiKey" name="alpaca-api-key-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter API key" />
-              </label>
-              <label>
-                Secret key
-                <input id="secretKey" name="alpaca-secret-key-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter secret key" />
-              </label>
+              <details id="credentialKeys" class="credential-keys" open>
+                <summary id="credentialKeysSummary">Enter API keys</summary>
+                <label>
+                  API key
+                  <input id="apiKey" name="alpaca-api-key-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter API key" />
+                </label>
+                <label>
+                  Secret key
+                  <input id="secretKey" name="alpaca-secret-key-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter secret key" />
+                </label>
+              </details>
               <label class="check-row">
                 <input id="remember" type="checkbox" checked />
-                <span>Store encrypted for auto-connect</span>
+                <span>Remember keys on this computer</span>
               </label>
               <label class="check-row">
                 <input id="autoConnect" type="checkbox" checked />
@@ -319,262 +335,282 @@
             </div>
             <h2>Trading Setup</h2>
             <label>
-              Trading profile
+              Trading style
               <select id="profile">
                 <option value="conservative">Conservative</option>
                 <option value="neutral" selected>Neutral</option>
                 <option value="aggressive">Aggressive</option>
               </select>
             </label>
+            <small id="profileStatus" class="helper-text">Built-in profiles can be adjusted and saved as custom.</small>
+            <small class="helper-text">Changing the style resets the buy rules, exits, and entry timing (including Advanced settings) to that style's values.</small>
+
+            <div class="compact-section basic-settings">
+              <h3>Basic Settings</h3>
+              <label class="check-row" title="When on, the app picks trades but never sends orders to Alpaca.">
+                <input id="dryRun" type="checkbox" checked />
+                <span>Practice mode (don't send orders)</span>
+              </label>
+              <label>
+                How to size each trade
+                <select id="tradeSizeMode">
+                  <option value="percent">Percent of account</option>
+                  <option value="notional">Fixed dollar amount</option>
+                  <option value="exposure_slot">Equal share of exposure limit</option>
+                </select>
+              </label>
+              <small id="tradeSizingStatus" class="helper-text">One trade sizing mode is active at a time.</small>
+              <div class="two-col">
+                <label>
+                  $ per trade
+                  <input id="maxTradeNotional" type="number" min="0" step="1" value="35" />
+                </label>
+                <label>
+                  % of account per trade
+                  <input id="maxTradePercent" type="number" min="0" step="0.05" value="7" />
+                </label>
+              </div>
+              <div class="two-col">
+                <label title="Most positions the bot will hold at once.">
+                  Max open positions
+                  <input id="maxOpenPositions" type="number" min="1" step="1" value="3" />
+                </label>
+                <span></span>
+              </div>
+              <div class="two-col">
+                <label title="Sell if a position falls this far below its entry price.">
+                  Stop-loss %
+                  <input id="stopLossPercent" type="number" min="0" step="0.05" value="1.25" />
+                </label>
+                <label title="Sell once a position gains this much.">
+                  Take-profit %
+                  <input id="takeProfitPercent" type="number" min="0" step="0.05" value="2.5" />
+                </label>
+              </div>
+              <div class="two-col">
+                <label title="No new buys for this many minutes after the market opens.">
+                  Wait after open (min)
+                  <input id="entryOpenGuardMinutes" type="number" min="0" step="1" value="15" />
+                </label>
+                <label title="No new buys during this many minutes before the market closes (180 = stop at 1 p.m. ET).">
+                  Stop buying before close (min)
+                  <input id="entryCloseGuardMinutes" type="number" min="0" step="1" value="15" />
+                </label>
+              </div>
+              <label class="check-row">
+                <input id="marketHoursOnly" type="checkbox" checked />
+                <span>Only trade during market hours</span>
+              </label>
+            </div>
+
             <div class="setup-toolbar">
               <div class="button-row setup-actions">
                 <button id="applyParametersButton">Apply Changes</button>
-                <button id="tradingToggleButton" disabled>Start Trading</button>
               </div>
               <small id="parameterStatus" class="helper-text">Live parameters load after selecting an account.</small>
             </div>
 
-            <div class="compact-section">
-              <h3>Custom Profile</h3>
-              <div class="two-col uneven">
-                <label>
-                  Profile name
-                  <input id="customProfileName" value="Custom Profile" spellcheck="false" />
-                </label>
-                <button id="saveCustomProfileButton" class="secondary align-input">Save Custom</button>
-              </div>
-              <small id="profileStatus" class="helper-text">Built-in profiles can be adjusted and saved as custom.</small>
-            </div>
+            <details id="advancedSettings" class="compact-section advanced-settings">
+              <summary>Advanced strategy settings</summary>
+              <small class="helper-text">Fine-tuning for the buy rules. Hover a field for what it does. 0 turns a limit off where noted.</small>
 
-            <div class="compact-section">
-              <h3>Strategy Parameters</h3>
-              <input id="shortPeriod" type="hidden" value="9" />
-              <input id="longPeriod" type="hidden" value="21" />
-              <input id="sellRsi" type="hidden" value="72" />
-              <input id="cooldownMinutes" type="hidden" value="0" />
-              <div class="strategy-grid">
-                <label>
-                  RSI Period
-                  <input id="rsiPeriod" type="number" min="1" step="1" value="14" />
-                </label>
-                <label>
-                  Buy RSI Min
-                  <input id="buyRsiMin" type="number" min="0" max="100" step="0.5" value="42" />
-                </label>
-                <label>
-                  Buy RSI Max
-                  <input id="buyRsiMax" type="number" min="0" max="100" step="0.5" value="68" />
-                </label>
-                <label>
-                  Min Score
-                  <input id="minEntryScore" type="number" min="0" max="100" step="0.5" value="44" />
-                </label>
-                <label>
-                  Momentum Bars
-                  <input id="momentumPeriod" type="number" min="1" step="1" value="6" />
-                </label>
-                <label>
-                  Min Momentum %
-                  <input id="minMomentumPercent" type="number" step="0.01" value="0.08" />
-                </label>
-                <label>
-                  Min Recent Momentum %
-                  <input id="minRecentMomentumPercent" type="number" step="0.01" value="0.05" />
-                </label>
-                <label>
-                  Min Long Momentum %
-                  <input id="minLongMomentumPercent" type="number" step="0.01" value="0.05" />
-                </label>
-                <label>
-                  Min Session Change %
-                  <input id="minSessionChangePercent" type="number" step="0.01" value="1.35" />
-                </label>
-                <label>
-                  Min VWAP Distance %
-                  <input id="minVwapDistancePercent" type="number" step="0.01" value="0.05" />
-                </label>
-                <label>
-                  Max VWAP Distance %
-                  <input id="maxVwapDistancePercent" type="number" min="0" step="0.05" value="2.25" />
-                </label>
-                <label>
-                  Max Session Pullback %
-                  <input id="maxSessionPullbackPercent" type="number" min="0" step="0.05" value="0.9" />
-                </label>
-                <label>
-                  Max Recent Pullback %
-                  <input id="maxRecentPullbackPercent" type="number" min="0" step="0.05" value="0.55" />
-                </label>
-                <label>
-                  Min Session Pullback % (0 = off)
-                  <input id="minSessionPullbackPercent" type="number" min="0" step="0.05" value="0" />
-                </label>
-                <label>
-                  Max Entry RSI (0 = off)
-                  <input id="maxEntryRsi" type="number" min="0" max="100" step="1" value="0" />
-                </label>
-                <label>
-                  Max Buys per Symbol per Day (0 = off)
-                  <input id="maxEntriesPerSymbolPerDay" type="number" min="0" step="1" value="0" />
-                </label>
-                <label>
-                  Late Momentum Floor %
-                  <input id="lateMomentumFloorPercent" type="number" min="0" step="0.05" value="0.5" />
-                </label>
-                <label>
-                  SMI Bars
-                  <input id="smiPeriod" type="number" min="1" step="1" value="10" />
-                </label>
-                <label>
-                  Min SMI
-                  <input id="minSmi" type="number" min="-100" max="100" step="0.5" value="40" />
-                </label>
-                <label>
-                  ATR Bars
-                  <input id="atrPeriod" type="number" min="1" step="1" value="14" />
-                </label>
-                <label>
-                  Buy Flow Ratio
-                  <input id="minBuyVolumeRatio" type="number" min="0" max="1" step="0.01" value="0.5" />
-                </label>
-                <label>
-                  Re-entry Boost
-                  <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="12" />
-                </label>
-                <label>
-                  Inverse ETFs
-                  <select id="inverseEtfMode">
-                    <option value="exclude">Exclude inverse ETFs</option>
-                    <option value="allow" selected>Allow Alpaca top-25</option>
-                    <option value="inverse_only">Inverse set only</option>
-                  </select>
-                </label>
-                <label>
-                  Vol Period
-                  <input id="volumePeriod" type="number" min="1" step="1" value="20" />
-                </label>
-                <label>
-                  Vol Mult
-                  <input id="volumeMultiplier" type="number" min="0" step="0.05" value="1.5" />
-                </label>
-                <label>
-                  Min Avg Vol
-                  <input id="minAvgVolume" type="number" min="0" step="1000" value="0" />
-                </label>
-                <label>
-                  Profit %
-                  <input id="takeProfitPercent" type="number" min="0" step="0.05" value="2.5" />
-                </label>
-                <label>
-                  Stop %
-                  <input id="stopLossPercent" type="number" min="0" step="0.05" value="1.25" />
-                </label>
+              <div class="compact-section">
+                <h3>Custom Profile</h3>
+                <div class="two-col uneven">
+                  <label>
+                    Profile name
+                    <input id="customProfileName" value="Custom Profile" spellcheck="false" />
+                  </label>
+                  <button id="saveCustomProfileButton" class="secondary align-input">Save Custom</button>
+                </div>
+              </div>
+
+              <div class="compact-section">
+                <h3>Buy Rules</h3>
+                <input id="shortPeriod" type="hidden" value="9" />
+                <input id="longPeriod" type="hidden" value="21" />
+                <input id="sellRsi" type="hidden" value="72" />
+                <input id="cooldownMinutes" type="hidden" value="0" />
                 <input id="profitTrailStartPercent" type="hidden" value="0" />
                 <input id="profitTrailDropPercent" type="hidden" value="0" />
                 <input id="stopLossGraceMinutes" type="hidden" value="0" />
-                <label>
-                  Open Guard
-                  <input id="entryOpenGuardMinutes" type="number" min="0" step="1" value="15" />
+                <div class="strategy-grid">
+                  <label title="Number of bars used to calculate RSI (a 0-100 overbought/oversold gauge).">
+                    RSI Period
+                    <input id="rsiPeriod" type="number" min="1" step="1" value="14" />
+                  </label>
+                  <label title="Only buy when RSI is at least this high.">
+                    Buy RSI Min
+                    <input id="buyRsiMin" type="number" min="0" max="100" step="0.5" value="42" />
+                  </label>
+                  <label title="RSI above this lowers the entry score (it does not block the buy; use Max Entry RSI for that).">
+                    Buy RSI Max
+                    <input id="buyRsiMax" type="number" min="0" max="100" step="0.5" value="68" />
+                  </label>
+                  <label title="Lowest 0-100 entry score that can trigger a buy.">
+                    Min Score
+                    <input id="minEntryScore" type="number" min="0" max="100" step="0.5" value="44" />
+                  </label>
+                  <label title="Bars used for the short momentum check.">
+                    Momentum Bars
+                    <input id="momentumPeriod" type="number" min="1" step="1" value="6" />
+                  </label>
+                  <label title="Minimum short-term price rise over the momentum bars.">
+                    Min Momentum %
+                    <input id="minMomentumPercent" type="number" step="0.01" value="0.08" />
+                  </label>
+                  <label title="Minimum rise over the last few bars.">
+                    Min Recent Momentum %
+                    <input id="minRecentMomentumPercent" type="number" step="0.01" value="0.05" />
+                  </label>
+                  <label title="Minimum rise over the longer lookback.">
+                    Min Long Momentum %
+                    <input id="minLongMomentumPercent" type="number" step="0.01" value="0.05" />
+                  </label>
+                  <label title="Minimum gain since today's open.">
+                    Min Session Change %
+                    <input id="minSessionChangePercent" type="number" step="0.01" value="1.35" />
+                  </label>
+                  <label title="Price must be at least this far above VWAP (the day's volume-weighted average price).">
+                    Min VWAP Distance %
+                    <input id="minVwapDistancePercent" type="number" step="0.01" value="0.05" />
+                  </label>
+                  <label title="Skip stocks already this far above VWAP (avoids chasing).">
+                    Max VWAP Distance %
+                    <input id="maxVwapDistancePercent" type="number" min="0" step="0.05" value="2.25" />
+                  </label>
+                  <label title="Larger drops from the day's high lower the score.">
+                    Max Session Pullback %
+                    <input id="maxSessionPullbackPercent" type="number" min="0" step="0.05" value="0.9" />
+                  </label>
+                  <label title="Larger drops over the last few bars lower the score.">
+                    Max Recent Pullback %
+                    <input id="maxRecentPullbackPercent" type="number" min="0" step="0.05" value="0.55" />
+                  </label>
+                  <label title="Wait until price has dipped at least this much from the day's high before buying.">
+                    Min Session Pullback % (0 = off)
+                    <input id="minSessionPullbackPercent" type="number" min="0" step="0.05" value="0" />
+                  </label>
+                  <label title="Never buy when RSI is above this.">
+                    Max Entry RSI (0 = off)
+                    <input id="maxEntryRsi" type="number" min="0" max="100" step="1" value="0" />
+                  </label>
+                  <label title="Most times the bot may buy the same stock in one trading day.">
+                    Max Buys per Symbol per Day (0 = off)
+                    <input id="maxEntriesPerSymbolPerDay" type="number" min="0" step="1" value="0" />
+                  </label>
+                  <label title="When RSI or SMI is near its top, require at least this much momentum.">
+                    Late Momentum Floor %
+                    <input id="lateMomentumFloorPercent" type="number" min="0" step="0.05" value="0.5" />
+                  </label>
+                  <label title="Bars used for the SMI momentum indicator.">
+                    SMI Bars
+                    <input id="smiPeriod" type="number" min="1" step="1" value="10" />
+                  </label>
+                  <label title="Minimum SMI (stochastic momentum) reading.">
+                    Min SMI
+                    <input id="minSmi" type="number" min="-100" max="100" step="0.5" value="40" />
+                  </label>
+                  <label title="Bars used for ATR (average true range, a volatility measure).">
+                    ATR Bars
+                    <input id="atrPeriod" type="number" min="1" step="1" value="14" />
+                  </label>
+                  <label title="Minimum share of recent volume that was buying (0-1).">
+                    Buy Flow Ratio
+                    <input id="minBuyVolumeRatio" type="number" min="0" max="1" step="0.01" value="0.5" />
+                  </label>
+                  <label title="After a losing exit, a re-buy needs this many extra score points.">
+                    Re-entry Boost
+                    <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="12" />
+                  </label>
+                  <label title="Whether inverse (short-the-market) ETFs can be traded.">
+                    Inverse ETFs
+                    <select id="inverseEtfMode">
+                      <option value="exclude">Exclude inverse ETFs</option>
+                      <option value="allow" selected>Allow Alpaca top-25</option>
+                      <option value="inverse_only">Inverse set only</option>
+                    </select>
+                  </label>
+                  <label title="Bars used for the average-volume baseline.">
+                    Vol Period
+                    <input id="volumePeriod" type="number" min="1" step="1" value="20" />
+                  </label>
+                  <label title="Current volume must be this many times the average.">
+                    Vol Mult
+                    <input id="volumeMultiplier" type="number" min="0" step="0.05" value="1.5" />
+                  </label>
+                  <label title="Skip stocks with lower average volume than this (0 = off).">
+                    Min Avg Vol
+                    <input id="minAvgVolume" type="number" min="0" step="1000" value="0" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="compact-section">
+                <h3>Symbols & Data</h3>
+                <label class="check-row">
+                  <input id="useTopVolumeSymbols" type="checkbox" checked />
+                  <span>Trade Alpaca top 25 volume</span>
                 </label>
                 <label>
-                  Close Guard
-                  <input id="entryCloseGuardMinutes" type="number" min="0" step="1" value="15" />
+                  Fallback tickers
+                  <input id="symbols" value="SPY,QQQ" spellcheck="false" />
+                </label>
+                <div class="two-col">
+                  <label>
+                    Feed
+                    <select id="feed">
+                      <option value="iex">IEX</option>
+                      <option value="sip">SIP</option>
+                      <option value="delayed_sip">Delayed SIP</option>
+                      <option value="otc">OTC</option>
+                      <option value="boats">BOATS</option>
+                      <option value="overnight">Overnight</option>
+                    </select>
+                  </label>
+                  <label>
+                    Scan loop (sec)
+                    <input id="pollSeconds" type="number" min="5" step="1" value="5" />
+                  </label>
+                </div>
+                <label class="check-row">
+                  <input id="useMarketStream" type="checkbox" checked />
+                  <span>Stream minute bars</span>
                 </label>
               </div>
-            </div>
 
-            <div class="compact-section">
-              <h3>Symbols & Data</h3>
-              <label class="check-row">
-                <input id="useTopVolumeSymbols" type="checkbox" checked />
-                <span>Trade Alpaca top 25 volume</span>
-              </label>
-              <label>
-                Fallback tickers
-                <input id="symbols" value="SPY,QQQ" spellcheck="false" />
-              </label>
-              <div class="two-col">
-                <label>
-                  Feed
-                  <select id="feed">
-                    <option value="iex">IEX</option>
-                    <option value="sip">SIP</option>
-                    <option value="delayed_sip">Delayed SIP</option>
-                    <option value="otc">OTC</option>
-                    <option value="boats">BOATS</option>
-                    <option value="overnight">Overnight</option>
-                  </select>
-                </label>
-                <label>
-                  Scan loop (sec)
-                  <input id="pollSeconds" type="number" min="5" step="1" value="5" />
-                </label>
-              </div>
-              <label class="check-row">
-                <input id="useMarketStream" type="checkbox" checked />
-                <span>Stream minute bars</span>
-              </label>
-            </div>
-
-            <div class="compact-section">
-              <h3>Risk & Size</h3>
-              <input id="maxPositionNotional" type="hidden" value="0" />
-              <input id="maxPositionPercent" type="hidden" value="0" />
-              <input id="dailyLossLimit" type="hidden" value="0" />
-              <input id="dailyLossLimitPercent" type="hidden" value="0" />
-              <input id="riskPerTradePercent" type="hidden" value="0" />
-              <input id="exitTimeInForce" type="hidden" value="day" />
-              <div class="setup-checks">
-                <label class="check-row">
-                  <input id="dryRun" type="checkbox" checked />
-                  <span>Dry run</span>
-                </label>
-                <label class="check-row">
-                  <input id="marketHoursOnly" type="checkbox" checked />
-                  <span>Market hours only</span>
+              <div class="compact-section">
+                <h3>Risk Limits</h3>
+                <input id="maxPositionNotional" type="hidden" value="0" />
+                <input id="maxPositionPercent" type="hidden" value="0" />
+                <input id="dailyLossLimit" type="hidden" value="0" />
+                <input id="dailyLossLimitPercent" type="hidden" value="0" />
+                <input id="riskPerTradePercent" type="hidden" value="0" />
+                <input id="exitTimeInForce" type="hidden" value="day" />
+                <label title="Most of the account that can be in open positions at once.">
+                  Total exposure limit %
+                  <input id="maxTotalExposurePercent" type="number" min="0" step="0.5" value="25" />
                 </label>
                 <label class="check-row">
                   <input id="useBracketOrders" type="checkbox" checked />
                   <span>Manual exit orders</span>
                 </label>
               </div>
-              <label>
-                Trade size mode
-                <select id="tradeSizeMode">
-                  <option value="percent">Percent of equity</option>
-                  <option value="notional">Dollar amount</option>
-                  <option value="exposure_slot">Exposure slot</option>
-                </select>
-              </label>
-              <small id="tradeSizingStatus" class="helper-text">One trade sizing mode is active at a time.</small>
-              <div class="two-col">
-                <label>
-                  Trade $
-                  <input id="maxTradeNotional" type="number" min="0" step="1" value="35" />
-                </label>
-                <label>
-                  Trade % Eq
-                  <input id="maxTradePercent" type="number" min="0" step="0.05" value="7" />
-                </label>
-              </div>
-              <div class="two-col">
-                <label>
-                  Total Exposure %
-                  <input id="maxTotalExposurePercent" type="number" min="0" step="0.5" value="25" />
-                </label>
-                <label>
-                  Max pos
-                  <input id="maxOpenPositions" type="number" min="1" step="1" value="3" />
-                </label>
+            </details>
+
+            <div class="compact-section">
+              <h3>Refresh</h3>
+              <div class="button-row">
+                <button id="refreshAllButton" class="secondary">Refresh All Accounts</button>
               </div>
             </div>
 
-            <div class="compact-section">
-              <h3>Trading Actions</h3>
+            <div class="compact-section danger-zone">
+              <h3>Danger Zone</h3>
+              <small class="helper-text">These act on the selected account right away. You'll be asked to confirm.</small>
               <div class="button-row">
-                <button id="cancelOrdersButton" class="warning">Cancel Selected Orders</button>
-                <button id="refreshAllButton" class="secondary">Refresh All Accounts</button>
-                <button id="purgeAccountButton" class="danger">Purge Selected</button>
+                <button id="cancelOrdersButton" class="warning">Cancel Open Orders</button>
+                <button id="purgeAccountButton" class="danger">Stop &amp; Sell Everything</button>
               </div>
             </div>
           </section>
@@ -616,43 +652,13 @@
 
           <section class="tabs">
             <div class="tab-list">
-              <button class="tab active" data-tab="strategyPanel">Strategy</button>
-              <button class="tab" data-tab="positionsPanel">Positions</button>
+              <button class="tab active" data-tab="positionsPanel">Positions</button>
               <button class="tab" data-tab="tradeHistoryPanel">Trade History</button>
-              <button class="tab" data-tab="protectionPanel">Protection</button>
-              <button class="tab" data-tab="ordersPanel">Open Orders</button>
-              <button class="tab" data-tab="ledgerPanel">Ledger</button>
-              <button class="tab" data-tab="replayPanel">Replay</button>
-              <button class="tab" data-tab="logPanel">Log</button>
+              <button class="tab" data-tab="strategyPanel">Scanner</button>
+              <button class="tab" data-tab="detailsPanel">Details</button>
             </div>
 
-            <section id="strategyPanel" class="tab-panel active">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>Price</th>
-                    <th>RSI</th>
-                    <th>Volume</th>
-                    <th>Rel Vol</th>
-                    <th>Vol Swing</th>
-                    <th>Momentum</th>
-                    <th>Long Mom</th>
-                    <th>Day</th>
-                    <th>VWAP</th>
-                    <th>SMI</th>
-                    <th>ATR</th>
-                    <th>Vol OK</th>
-                    <th>Score</th>
-                    <th>Bars</th>
-                    <th>Last Action</th>
-                  </tr>
-                </thead>
-                <tbody id="strategyRows"></tbody>
-              </table>
-            </section>
-
-            <section id="positionsPanel" class="tab-panel">
+            <section id="positionsPanel" class="tab-panel active">
               <div class="table-tools">
                 <label class="check-row compact-toggle">
                   <input id="positionsPercentToggle" type="checkbox" />
@@ -700,80 +706,118 @@
               </table>
             </section>
 
-            <section id="ordersPanel" class="tab-panel">
-              <table>
+            <section id="strategyPanel" class="tab-panel">
+              <div class="table-tools">
+                <label class="check-row compact-toggle">
+                  <input id="scannerAllColumnsToggle" type="checkbox" />
+                  <span>Show all indicators</span>
+                </label>
+              </div>
+              <table id="scannerTable" class="scanner-table scanner-compact">
                 <thead>
                   <tr>
                     <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Type</th>
-                    <th>Qty</th>
-                    <th>Status</th>
-                    <th>Role</th>
-                    <th>TIF</th>
-                    <th>Class</th>
-                    <th>Submitted</th>
-                    <th>Client ID</th>
+                    <th>Price</th>
+                    <th>RSI</th>
+                    <th>Volume</th>
+                    <th>Rel Vol</th>
+                    <th>Vol Swing</th>
+                    <th>Momentum</th>
+                    <th>Long Mom</th>
+                    <th>Day</th>
+                    <th>VWAP</th>
+                    <th>SMI</th>
+                    <th>ATR</th>
+                    <th>Vol OK</th>
+                    <th>Score</th>
+                    <th>Bars</th>
+                    <th>Last Action</th>
                   </tr>
                 </thead>
-                <tbody id="orderRows"></tbody>
+                <tbody id="strategyRows"></tbody>
               </table>
             </section>
 
-            <section id="protectionPanel" class="tab-panel">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>Qty</th>
-                    <th>Market Value</th>
-                    <th>Unrealized P/L</th>
-                    <th>Status</th>
-                    <th>Protective</th>
-                    <th>Strategy Exits</th>
-                    <th>Manual</th>
-                    <th>Detail</th>
-                  </tr>
-                </thead>
-                <tbody id="protectionRows"></tbody>
-              </table>
-            </section>
+            <section id="detailsPanel" class="tab-panel">
+              <div class="subtab-list">
+                <button class="subtab active" data-subtab="protectionPanel" type="button">Protection</button>
+                <button class="subtab" data-subtab="ordersPanel" type="button">Open Orders</button>
+                <button class="subtab" data-subtab="ledgerPanel" type="button">Ledger</button>
+                <button class="subtab" data-subtab="replayPanel" type="button">Replay</button>
+                <button class="subtab" data-subtab="logPanel" type="button">Log</button>
+              </div>
 
-            <section id="ledgerPanel" class="tab-panel">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Qty</th>
-                    <th>Role</th>
-                    <th>Status</th>
-                    <th>Client ID</th>
-                    <th>Order ID</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody id="intentRows"></tbody>
-              </table>
-            </section>
-
-            <section id="replayPanel" class="tab-panel">
-              <div id="replayStatus" class="replay-status">Replay file not initialized.</div>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Kind</th>
-                    <th>Summary</th>
-                  </tr>
-                </thead>
-                <tbody id="replayRows"></tbody>
-              </table>
-            </section>
-
-            <section id="logPanel" class="tab-panel">
-              <div id="logRows" class="log-view"></div>
+              <section id="protectionPanel" class="subtab-panel active">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Symbol</th>
+                      <th>Qty</th>
+                      <th>Market Value</th>
+                      <th>Unrealized P/L</th>
+                      <th>Status</th>
+                      <th>Protective</th>
+                      <th>Strategy Exits</th>
+                      <th>Manual</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody id="protectionRows"></tbody>
+                </table>
+              </section>
+              <section id="ordersPanel" class="subtab-panel">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th>Type</th>
+                      <th>Qty</th>
+                      <th>Status</th>
+                      <th>Role</th>
+                      <th>TIF</th>
+                      <th>Class</th>
+                      <th>Submitted</th>
+                      <th>Client ID</th>
+                    </tr>
+                  </thead>
+                  <tbody id="orderRows"></tbody>
+                </table>
+              </section>
+              <section id="ledgerPanel" class="subtab-panel">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th>Qty</th>
+                      <th>Role</th>
+                      <th>Status</th>
+                      <th>Client ID</th>
+                      <th>Order ID</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody id="intentRows"></tbody>
+                </table>
+              </section>
+              <section id="replayPanel" class="subtab-panel">
+                <div id="replayStatus" class="replay-status">Replay file not initialized.</div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Kind</th>
+                      <th>Summary</th>
+                    </tr>
+                  </thead>
+                  <tbody id="replayRows"></tbody>
+                </table>
+              </section>
+              <section id="logPanel" class="subtab-panel">
+                <div id="logRows" class="log-view"></div>
+              </section>
             </section>
           </section>
         </section>

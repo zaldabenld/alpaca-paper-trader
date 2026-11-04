@@ -65,6 +65,26 @@ class EntryExperimentGateTests(unittest.TestCase):
         self.assertEqual(restored.max_entry_rsi, Decimal("60"))
         self.assertEqual(restored.max_entries_per_symbol_per_day, 2)
 
+    def test_switching_profiles_sets_and_clears_the_new_gates(self) -> None:
+        tuned = experiment_config(
+            min_session_pullback_percent="0.15", max_entry_rsi="60", max_entries_per_symbol_per_day=2
+        )
+        catalog = dict(engine_module.PROFILE_PRESETS)
+        catalog["test-b"] = tuned.model_copy(update={"profile": "test-b"}).model_dump(mode="json")
+        current = experiment_config(trade_size_mode="notional", max_trade_notional="25").model_dump(mode="json")
+
+        switched = engine_module.config_from_profile("test-b", current, catalog)
+        self.assertEqual(switched.min_session_pullback_percent, Decimal("0.15"))
+        self.assertEqual(switched.max_entry_rsi, Decimal("60"))
+        self.assertEqual(switched.max_entries_per_symbol_per_day, 2)
+        self.assertEqual(switched.max_trade_notional, Decimal("25"))
+
+        back = engine_module.config_from_profile("neutral", switched.model_dump(mode="json"), catalog)
+        self.assertEqual(back.min_session_pullback_percent, Decimal("0"))
+        self.assertEqual(back.max_entry_rsi, Decimal("0"))
+        self.assertEqual(back.max_entries_per_symbol_per_day, 0)
+        self.assertEqual(back.max_trade_notional, Decimal("25"))
+
     def test_defaults_leave_entry_selection_unchanged(self) -> None:
         engine = TraderEngine("experiment-defaults")
         engine.config = experiment_config()

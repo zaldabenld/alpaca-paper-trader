@@ -72,6 +72,7 @@ const els = {
   runtimeHealthBanner: document.querySelector("#runtimeHealthBanner"),
   runtimeHealthTitle: document.querySelector("#runtimeHealthTitle"),
   runtimeHealthText: document.querySelector("#runtimeHealthText"),
+  runtimeNote: document.querySelector("#runtimeNote"),
   dashboardView: document.querySelector("#dashboardView"),
   accountsView: document.querySelector("#accountsView"),
   navButtons: document.querySelectorAll(".nav-button"),
@@ -144,6 +145,13 @@ const els = {
   connectButton: document.querySelector("#connectButton"),
   refreshButton: document.querySelector("#refreshButton"),
   tradingToggleButton: document.querySelector("#tradingToggleButton"),
+  tradingStatusBar: document.querySelector("#tradingStatusBar"),
+  tradingStatusTitle: document.querySelector("#tradingStatusTitle"),
+  tradingStatusDetail: document.querySelector("#tradingStatusDetail"),
+  credentialKeys: document.querySelector("#credentialKeys"),
+  credentialKeysSummary: document.querySelector("#credentialKeysSummary"),
+  scannerAllColumnsToggle: document.querySelector("#scannerAllColumnsToggle"),
+  scannerTable: document.querySelector("#scannerTable"),
   cancelOrdersButton: document.querySelector("#cancelOrdersButton"),
   purgeAccountButton: document.querySelector("#purgeAccountButton"),
   refreshAllButton: document.querySelector("#refreshAllButton"),
@@ -230,6 +238,9 @@ const strategyProfileKeys = new Set([
   "max_session_pullback_percent",
   "max_recent_pullback_percent",
   "late_momentum_floor_percent",
+  "min_session_pullback_percent",
+  "max_entry_rsi",
+  "max_entries_per_symbol_per_day",
   "smi_period",
   "min_smi",
   "atr_period",
@@ -256,6 +267,8 @@ let selectedAccountId = "";
 let isDraftAccount = false;
 let selectedTradingEnabled = false;
 let selectedConnected = false;
+let selectedLiveDryRun = null;
+let credentialKeysCollapsedFor = "";
 let accountContextVersion = 0;
 let accountTransitionDepth = 0;
 const requestChannels = {
@@ -528,6 +541,22 @@ document.querySelectorAll(".tab").forEach((button) => {
     document.querySelector(`#${button.dataset.tab}`).classList.add("active");
   });
 });
+
+// Details tab sub-panels use their own classes so the .tab handler above never hides them.
+document.querySelectorAll("#detailsPanel .subtab").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll("#detailsPanel .subtab").forEach((item) => item.classList.toggle("active", item === button));
+    document.querySelectorAll("#detailsPanel .subtab-panel").forEach((panel) => {
+      panel.classList.toggle("active", panel.id === button.dataset.subtab);
+    });
+  });
+});
+
+els.scannerAllColumnsToggle?.addEventListener("change", () => {
+  els.scannerTable?.classList.toggle("scanner-compact", !els.scannerAllColumnsToggle.checked);
+});
+
+fields.dryRun.addEventListener("change", () => renderTradingToggle());
 
 fields.accountSelect.addEventListener("change", async () => {
   await switchToAccount(fields.accountSelect.value);
@@ -840,6 +869,7 @@ function applyAccount(account) {
   fields.autoConnect.checked = account.auto_connect !== false;
   fields.autoStartTrading.checked = Boolean(account.auto_start_trading);
   syncAutoConnectControl();
+  if (credentialKeysCollapsedFor !== (selectedAccountId || "draft")) credentialKeysCollapsedFor = "";
   renderCredentialStatus(account);
   applyConfig(account.config || presetConfig("neutral"));
 }
@@ -867,10 +897,10 @@ function syncTradeSizeModeControl(config = readConfig()) {
   if (els.tradeSizingStatus) {
     els.tradeSizingStatus.textContent =
       mode === "notional"
-        ? "Dollar amount is active; percent sizing is disabled."
+        ? "Fixed dollar amount is active; the percent field is ignored."
         : mode === "exposure_slot"
-          ? "Exposure slot is active; dollar and percent caps are disabled."
-          : "Percent of equity is active; dollar sizing is disabled.";
+          ? "Each trade gets an equal share of the exposure limit; both fields are ignored."
+          : "Percent of account is active; the dollar field is ignored.";
   }
 }
 
@@ -891,12 +921,24 @@ function renderCredentialStatus(account = {}) {
   );
   const savedCredentials = Boolean(account.credentials_saved);
   els.credentialStatus.textContent = savedCredentials
-    ? "Credentials saved encrypted. Fields are blank unless you replace them."
+    ? "API keys saved on this computer. Leave the key fields blank to keep them."
     : sessionCredentials
-      ? "Credentials loaded for this session. Check store encrypted to auto-connect next launch."
-      : "No credentials loaded";
+      ? "API keys loaded for this session only. Tick \"Remember keys\" to connect automatically next launch."
+      : "No API keys yet. Enter this account's Alpaca paper keys.";
   const hasCredentials = savedCredentials || sessionCredentials;
   els.credentialStatus.classList.toggle("saved", hasCredentials);
+  if (els.credentialKeys) {
+    if (!hasCredentials) {
+      els.credentialKeys.open = true;
+      credentialKeysCollapsedFor = "";
+    } else if (credentialKeysCollapsedFor !== (selectedAccountId || "draft")) {
+      els.credentialKeys.open = false;
+      credentialKeysCollapsedFor = selectedAccountId || "draft";
+    }
+  }
+  if (els.credentialKeysSummary) {
+    els.credentialKeysSummary.textContent = hasCredentials ? "Keys saved \u2713 \u00b7 Change keys" : "Enter API keys";
+  }
   const placeholderPrefix = savedCredentials ? "Saved encrypted" : "Session credential";
   fields.apiKey.placeholder = hasCredentials ? `${placeholderPrefix} - enter new key to replace` : "Enter API key";
   fields.secretKey.placeholder = hasCredentials ? `${placeholderPrefix} - enter new secret to replace` : "Enter secret key";
@@ -1208,12 +1250,32 @@ function runtimeDiagnosticsSummary(diagnostics = {}) {
     .join(" ");
 }
 
+const RUNTIME_ERROR_BANNER_MS = 30 * 60 * 1000;
+
+// Only recent errors earn the red banner; info/warning notes (e.g. a skipped CVR symbol)
+// and older errors are shown as a quiet one-line note instead.
+function isActiveRuntimeError(item) {
+  if (item?.severity !== "error") return false;
+  const when = Date.parse(item.time || "");
+  return Number.isNaN(when) || Date.now() - when <= RUNTIME_ERROR_BANNER_MS;
+}
+
+function renderRuntimeNote(text) {
+  if (!els.runtimeNote) return;
+  els.runtimeNote.textContent = text;
+  els.runtimeNote.title = text;
+  els.runtimeNote.hidden = !text;
+}
+
 function renderRuntimeHealth(health) {
   runtimeHealth = health || null;
   runtimeStale = Boolean(health && health.current === false);
   if (!els.runtimeHealthBanner || !els.runtimeHealthText) return;
   const settingsWarning = settingsDiagnosticsSummary(health?.settings_diagnostics || {});
-  const runtimeWarning = runtimeDiagnosticsSummary(health?.runtime_diagnostics || {});
+  const entries = health?.runtime_diagnostics?.entries || [];
+  const activeErrors = entries.filter(isActiveRuntimeError);
+  const runtimeWarning = runtimeDiagnosticsSummary({ entries: activeErrors });
+  renderRuntimeNote(runtimeDiagnosticsSummary({ entries: entries.filter((item) => !activeErrors.includes(item)) }));
   if (!health || (health.current === true && !settingsWarning && !runtimeWarning)) {
     els.runtimeHealthBanner.hidden = true;
     if (els.runtimeHealthTitle) els.runtimeHealthTitle.textContent = "Runtime warning";
@@ -1222,7 +1284,7 @@ function renderRuntimeHealth(health) {
   }
   const title = health.current === false
     ? "Stale runtime warning"
-    : (settingsWarning ? "Settings warning" : "Runtime warning");
+    : (settingsWarning ? "Settings warning" : "Runtime error");
   if (els.runtimeHealthTitle) els.runtimeHealthTitle.textContent = title;
   els.runtimeHealthText.textContent = health.current === false ? healthSummary(health) : (settingsWarning || runtimeWarning);
   els.runtimeHealthBanner.hidden = false;
@@ -1886,6 +1948,7 @@ function renderState(state, context) {
   if (isDraftAccount) {
     selectedConnected = false;
     selectedTradingEnabled = false;
+    selectedLiveDryRun = null;
     renderAccountCards(state.accounts || []);
     renderMarketClock(null);
     renderMarketStream(state.market_stream || {});
@@ -1906,6 +1969,7 @@ function renderState(state, context) {
   const config = selected.config || {};
   selectedConnected = Boolean(selected.connected);
   selectedTradingEnabled = Boolean(selected.trading_enabled);
+  selectedLiveDryRun = config.dry_run === undefined ? null : Boolean(config.dry_run);
   if (selected.account_id === selectedAccountId) {
     const saved = findSavedAccount(selectedAccountId);
     if (!saved || saved.config?.profile !== config.profile) {
@@ -2017,6 +2081,40 @@ function renderTradingToggle() {
   els.tradingToggleButton.disabled = !selectedConnected;
   els.tradingToggleButton.classList.toggle("danger", selectedTradingEnabled);
   els.tradingToggleButton.textContent = selectedTradingEnabled ? "Stop Trading" : "Start Trading";
+  renderTradingStatus();
+}
+
+// The status comes from the running account's config (selectedLiveDryRun), not the form,
+// so it never claims orders are being sent when they are not.
+function renderTradingStatus() {
+  if (!els.tradingStatusBar) return;
+  const practice = selectedLiveDryRun ?? fields.dryRun.checked;
+  let state = "stopped";
+  let title = "Stopped";
+  let detail = "";
+  if (!selectedConnected) {
+    title = "Not connected";
+    detail = "Connect this account to see its trading status.";
+  } else if (practice) {
+    state = "practice";
+    title = "Practice mode \u2014 no orders are sent";
+    detail = selectedTradingEnabled
+      ? "The bot is running and picking trades, but nothing is sent to Alpaca."
+      : "The bot is stopped. Start Trading runs it in practice mode.";
+  } else if (selectedTradingEnabled) {
+    state = "live";
+    title = "Paper trading live";
+    detail = "The bot is running and sending paper orders to Alpaca.";
+  } else {
+    detail = "Practice mode is off, so Start Trading will send paper orders.";
+  }
+  if (selectedConnected && selectedLiveDryRun !== null && fields.dryRun.checked !== selectedLiveDryRun) {
+    detail += ` Practice mode will turn ${fields.dryRun.checked ? "on" : "off"} when you click Save, Apply Changes, or Start Trading.`;
+  }
+  els.tradingStatusBar.classList.remove("stopped", "practice", "live");
+  els.tradingStatusBar.classList.add(state);
+  els.tradingStatusTitle.textContent = title;
+  els.tradingStatusDetail.textContent = detail;
 }
 
 function renderRealizedPlMetric(account = currentSelectedAccount) {
