@@ -601,6 +601,14 @@
 
               <div class="compact-section">
                 <h3>Symbols & Data</h3>
+                <label title="How the stock list is chosen.">
+                  Stock list
+                  <select id="universeMode">
+                    <option value="most_active" selected>Top 100 most active (live)</option>
+                    <option value="daily_rvol">Daily top 25 by relative volume</option>
+                  </select>
+                </label>
+                <small id="dailyUniverseStatus" hidden></small>
                 <label class="check-row">
                   <input id="useTopVolumeSymbols" type="checkbox" checked />
                   <span>Trade Alpaca's most-active stocks</span>

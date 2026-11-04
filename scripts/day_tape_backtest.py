@@ -261,6 +261,8 @@ def replay_config(
     payload.setdefault("symbols", ["SPY", "QQQ"])
     payload.update(
         {
+            # Replay does not support the daily relative-volume list; always use the recorded most-active universe.
+            "universe_mode": "most_active",
             "use_top_volume_symbols": True,
             "dry_run": True,
             "market_hours_only": False,
@@ -271,6 +273,8 @@ def replay_config(
     payload.update(active_harness.config_overrides())
     payload.update(
         {
+            # Replay does not support the daily relative-volume list; always use the recorded most-active universe.
+            "universe_mode": "most_active",
             "use_top_volume_symbols": True,
             "dry_run": True,
             "market_hours_only": False,
