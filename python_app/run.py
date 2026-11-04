@@ -185,6 +185,8 @@ def active_instance_url(host: str, port: int, restart_stale: bool = True) -> str
 def save_instance_url(url: str) -> None:
     try:
         APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(APP_DATA_DIR, 0o700)
         INSTANCE_PATH.write_text(
             json.dumps(
                 {

@@ -16,6 +16,7 @@ from .runtime_diagnostics import SettingsPersistenceError, record_runtime_diagno
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AlpacaPaperTrader"
 SETTINGS_PATH = APP_DIR / "python-settings.json"
+SETTINGS_BACKUP_KEEP = 20
 
 
 class DataBlob(ctypes.Structure):
@@ -152,13 +153,30 @@ def load_settings() -> dict[str, Any]:
         return error_payload
 
 
-def save_settings(settings: dict[str, Any]) -> None:
+def ensure_private_app_dir() -> None:
+    # Outside Windows there is no DPAPI, so saved keys are only base64. Keep the app
+    # folder owner-only so other local users cannot read settings, backups, or logs.
     APP_DIR.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(APP_DIR, 0o700)
+
+
+def _prune_settings_backups() -> None:
+    for stale in _settings_backups()[SETTINGS_BACKUP_KEEP:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    ensure_private_app_dir()
     if SETTINGS_PATH.exists() and SETTINGS_PATH.is_file():
         shutil.copy2(SETTINGS_PATH, _backup_path())
+        _prune_settings_backups()
     temp_path = SETTINGS_PATH.with_name(f"{SETTINGS_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        with temp_path.open("w", encoding="utf-8") as handle:
+        with os.fdopen(os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as handle:
             json.dump(settings, handle, indent=2)
             handle.write("\n")
             handle.flush()
