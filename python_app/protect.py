@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from alpaca_desktop.alerts import NOTIFIER  # noqa: E402
 from alpaca_desktop.server import acquire_engine_lock, load_saved_settings_to_manager, manager  # noqa: E402
 from alpaca_desktop.storage import APP_DIR, ensure_private_app_dir  # noqa: E402
 
@@ -57,10 +58,21 @@ def main() -> int:
             for entry in (state.get("logs") or [])[-10:]:
                 if entry.get("level") in {"warn", "error"}:
                     log(f"{engine.name}: {entry.get('level')}: {entry.get('message')}")
+            # Rejections already alert from the engine; also alert on sells this job submitted.
+            for intent in engine.order_intents:
+                if (
+                    intent.get("role") == "Strategy Exit"
+                    and intent.get("status") == "submitted"
+                    and not str(intent.get("client_order_id") or "").startswith("apt-exit-limit-")
+                ):
+                    log(f"{engine.name}: sold {intent.get('qty')} {intent.get('symbol')} ({intent.get('reason')})")
+                    engine.alert("trade", f"Protect job sold {intent.get('symbol')}",
+                                 f"{intent.get('qty')} shares while the app was closed")
         except Exception as exc:  # keep protecting the other accounts
             log(f"{engine.name}: protect failed: {exc}")
         finally:
             engine.disconnect()
+    NOTIFIER.flush(timeout=5)
     return 0
 
 

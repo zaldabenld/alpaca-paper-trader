@@ -103,6 +103,35 @@ def url_is_alive(url: str, timeout: float = 1.0) -> bool:
     return False
 
 
+def pid_is_this_backend(pid: int, url: str, proc_root: Path = Path("/proc")) -> bool:
+    """True only if the backend at url reports this pid and (on Linux) that pid runs this run.py."""
+    health = fetch_health(url)
+    try:
+        if int(health.get("pid") or 0) != int(pid):
+            return False
+    except (TypeError, ValueError):
+        return False
+    proc_dir = proc_root / str(pid)
+    if not proc_dir.exists():
+        return os.name == "nt"   # no /proc (Windows): the health pid check is all we have
+    try:
+        args = [part for part in (proc_dir / "cmdline").read_bytes().split(b"\0") if part]
+        cwd = Path(os.readlink(proc_dir / "cwd"))
+    except OSError:
+        return False
+    this_script = Path(__file__).resolve()
+    for raw_arg in args:
+        candidate = Path(os.fsdecode(raw_arg))
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        try:
+            if candidate.resolve() == this_script:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def health_matches_current_source(health: dict[str, Any]) -> bool:
     if health.get("current") is not True:
         return False
@@ -138,6 +167,9 @@ def describe_health(health: dict[str, Any], raw: dict[str, Any]) -> str:
 def stop_instance(raw: dict[str, Any], url: str) -> bool:
     pid = instance_pid(raw)
     if pid <= 0 or pid == os.getpid():
+        return False
+    if not pid_is_this_backend(pid, url):
+        safe_print(f"Not stopping pid {pid}: it is not this checkout's Alpaca Paper Trader backend.")
         return False
     try:
         os.kill(pid, signal.SIGTERM)

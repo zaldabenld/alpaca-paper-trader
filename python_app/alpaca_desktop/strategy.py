@@ -3,9 +3,17 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+try:
+    SESSION_TIMEZONE: Any = ZoneInfo("America/New_York")
+except ZoneInfoNotFoundError:  # Windows without tzdata; requirements.txt installs tzdata
+    SESSION_TIMEZONE = timezone(timedelta(hours=-5))
+REGULAR_SESSION_OPEN = time(9, 30)
+REGULAR_SESSION_CLOSE = time(16, 0)
 
 
 def decimal_value(value: Any, default: Decimal = Decimal("0")) -> Decimal:
@@ -352,22 +360,38 @@ def _pullback_from_high_percent(current: Decimal | None, high: Decimal | None) -
 
 
 def _latest_session_points(history: list[BarPoint]) -> list[BarPoint]:
+    """Regular-hours bars (09:30-16:00 ET) of the latest bar's US/Eastern trading day.
+
+    Session metrics (VWAP, session change, session high, long momentum) use these. Sessions used
+    to be cut at UTC midnight, which in winter is 19:00 ET, so after-hours bars leaked into the
+    next day and pre-market bars into VWAP. Before the open the same ET day's extended-hours bars
+    are used so the display still has values; entries are blocked then anyway.
+    """
     if not history:
         return []
-    latest_key = _timestamp_session_key(history[-1].timestamp)
-    if not latest_key:
+    latest = _bar_local_time(history[-1].timestamp)
+    if latest is None:
         return list(history)
-    return [point for point in history if _timestamp_session_key(point.timestamp) == latest_key]
+    same_day: list[tuple[datetime, BarPoint]] = []
+    for point in history:
+        local = _bar_local_time(point.timestamp)
+        if local is not None and local.date() == latest.date():
+            same_day.append((local, point))
+    regular = [point for local, point in same_day if REGULAR_SESSION_OPEN <= local.time() < REGULAR_SESSION_CLOSE]
+    return regular or [point for _, point in same_day]
 
 
-def _timestamp_session_key(value: str) -> str:
+def _bar_local_time(value: str) -> datetime | None:
     raw = str(value or "")
     if not raw:
-        return ""
+        return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc).date().isoformat()
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        return raw[:10]
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(SESSION_TIMEZONE)
 
 
 def _vwap(points: list[BarPoint]) -> Decimal | None:
