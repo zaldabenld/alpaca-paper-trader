@@ -171,6 +171,32 @@ class StopProtectionTests(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         self.assertIn("blocked", engine.strategy_state.last_action["AAA"])
 
+    def test_flatten_cancels_a_resting_take_profit_and_sells(self) -> None:
+        take_profit = {"id": "tp1", "symbol": "AAA", "side": "sell", "type": "limit", "qty": "0.25",
+                       "limit_price": "102.5", "client_order_id": "apt-exit-limit-aaa-1"}
+        client = FakeTradingClient(is_open=True, orders=[take_profit])
+        client.equity = "970"
+        engine = connected_engine(client, daily_loss_limit="20", flatten_on_daily_loss=True)
+        run_refresh(engine, run_strategy=False)
+        self.assertEqual(client.cancelled, ["tp1"])
+        self.assertEqual(kinds(client), [("sell", "market")])
+
+    def test_rejected_flatten_sell_restores_the_stop_next_pass(self) -> None:
+        client = FakeTradingClient(is_open=True)
+        client.equity = "970"
+        original_submit = client.submit_order
+
+        def reject_market(order: Any) -> Any:
+            if order.type.value == "market":
+                raise RuntimeError("market sell rejected")
+            return original_submit(order)
+
+        client.submit_order = reject_market  # type: ignore[method-assign]
+        engine = connected_engine(client, daily_loss_limit="20", flatten_on_daily_loss=True)
+        run_refresh(engine, run_strategy=False)  # flatten attempt rejected -> 60 s sell hold
+        run_refresh(engine, run_strategy=False)  # held: normal pass puts the stop back
+        self.assertEqual(kinds(client), [("sell", "stop")])
+
     def test_purge_orders_count_as_app_exits(self) -> None:
         engine = TraderEngine("roles")
         role = engine.order_role({"symbol": "AAA", "side": "sell", "client_order_id": "apt-purge-aaa-1"}, {"AAA"})

@@ -47,8 +47,8 @@ API_TOKEN_HEADER = "x-apt-token"
 LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 ENGINE_LOCK_PATH = APP_DIR / "engine.lock"
-ENGINE_LOCK_WAIT_SECONDS = 120
 _engine_lock_handle: Any | None = None
+_engine_lock_held = False
 
 
 def loopback_hostname(netloc: str) -> str:
@@ -86,12 +86,13 @@ async def local_only_guard(request: Request, call_next: Any) -> Any:
 
 def acquire_engine_lock() -> bool:
     """Hold an exclusive lock for the life of this process so the headless protect job skips."""
-    global _engine_lock_handle
-    if _engine_lock_handle is not None:
+    global _engine_lock_handle, _engine_lock_held
+    if _engine_lock_held:
         return True
     try:
         import fcntl
     except ImportError:  # Windows: the protect timer is Linux-only
+        _engine_lock_held = True
         return True
     APP_DIR.mkdir(parents=True, exist_ok=True)
     handle = open(ENGINE_LOCK_PATH, "a+")
@@ -101,6 +102,7 @@ def acquire_engine_lock() -> bool:
         handle.close()
         return False
     _engine_lock_handle = handle
+    _engine_lock_held = True
     return True
 manager = TraderManager()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -157,26 +159,36 @@ _settings_loaded = False
 @app.on_event("startup")
 async def startup() -> None:
     global _auto_connect_complete
-    # The headless protect job holds the lock for a few seconds per run; wait for it so the
-    # two never manage the same accounts at once.
-    for _ in range(ENGINE_LOCK_WAIT_SECONDS):
-        if acquire_engine_lock():
-            break
-        await asyncio.sleep(1)
-    else:
-        record_runtime_diagnostic(
-            "runtime",
-            "Another trader process still holds the engine lock; the background loop will keep trying",
-            None,
-            severity="error",
-            source="server",
-        )
     load_saved_settings_to_manager()
+    # The headless protect job holds the engine lock for a few seconds per run. Serve the UI
+    # right away, but connect and manage accounts only once this process holds the lock, so the
+    # two never manage the same accounts at once.
     if os.environ.get("ALPACA_TRADER_DISABLE_AUTO_CONNECT") != "1":
-        asyncio.create_task(auto_connect_saved_accounts())
+        asyncio.create_task(auto_connect_when_lock_held())
     else:
+        acquire_engine_lock()
         _auto_connect_complete = True
     asyncio.create_task(background_refresh_loop())
+
+
+async def wait_for_engine_lock() -> None:
+    warned = False
+    while not acquire_engine_lock():
+        if not warned:
+            record_runtime_diagnostic(
+                "runtime",
+                "Waiting for the headless protect job to finish before connecting accounts",
+                None,
+                severity="info",
+                source="server",
+            )
+            warned = True
+        await asyncio.sleep(1)
+
+
+async def auto_connect_when_lock_held() -> None:
+    await wait_for_engine_lock()
+    await auto_connect_saved_accounts()
 
 
 async def auto_connect_saved_accounts() -> None:
@@ -224,8 +236,8 @@ async def background_refresh_loop() -> None:
         try:
             await asyncio.sleep(1)
             now = time.monotonic()
-            if _engine_lock_handle is None:
-                acquire_engine_lock()  # keep trying until the protect job releases it
+            if not acquire_engine_lock():
+                continue  # the protect job is managing the accounts right now
             for account_engine in manager.list_engines():
                 state = account_engine.state()
                 if not state.get("connected"):
@@ -417,6 +429,8 @@ async def select_account(payload: SelectAccountPayload) -> dict[str, Any]:
 
 @app.post("/api/connect")
 async def connect(payload: AccountPayload) -> dict[str, Any]:
+    if not acquire_engine_lock():
+        raise HTTPException(status_code=409, detail="The background stop-protection job is running; try again in a few seconds.")
     try:
         engine = manager.upsert_payload(payload)
         await asyncio.to_thread(engine.connect, payload.model_copy(update={"account_id": engine.account_id}))

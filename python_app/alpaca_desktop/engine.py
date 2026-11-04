@@ -3553,14 +3553,27 @@ class TraderEngine:
             if qty <= 0 or decimal_value(position.get("current_price")) <= 0:
                 continue
             symbol_orders = [order for order in flat_orders if str(order.get("symbol", "")).upper() == symbol]
-            handled.add(symbol)  # either already exiting or being flattened now: no new stop this pass
-            if any(self.order_role(order, {symbol}) == "Strategy Exit" for order in symbol_orders):
+            roles = [self.order_role(order, {symbol}) for order in symbol_orders]
+            strategy_exits = [order for order, role in zip(symbol_orders, roles) if role == "Strategy Exit"]
+            take_profit_limits = [
+                order for order in strategy_exits
+                if str(order.get("client_order_id") or "").startswith("apt-exit-")
+                and str(order.get("type") or order.get("order_type") or "").lower() == "limit"
+            ]
+            if len(take_profit_limits) < len(strategy_exits):
+                handled.add(symbol)  # a market exit is already working
                 continue
             if self.order_hold_reason(symbol, OrderSide.SELL):
+                continue  # not handled: the normal pass keeps the stop in place meanwhile
+            # From here this pass owns the symbol's exit: no new stop behind the flatten sell.
+            handled.add(symbol)
+            protective = [order for order, role in zip(symbol_orders, roles) if role == "Protective Exit"]
+            if take_profit_limits and not all(self.cancel_open_order(order) for order in take_profit_limits):
+                events.append(("warn", f"Waiting for {symbol} take-profit cancellation before daily-loss flatten."))
                 continue
-            protective = [order for order in symbol_orders if self.order_role(order, {symbol}) == "Protective Exit"]
-            if self.cancel_orders_for_symbol(protective, symbol) and not self.wait_for_symbol_app_orders_cleared(symbol):
-                events.append(("warn", f"Waiting for {symbol} stop cancellation before daily-loss flatten."))
+            cancelled = self.cancel_orders_for_symbol(protective, symbol) + len(take_profit_limits)
+            if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol, include_exits=True):
+                events.append(("warn", f"Waiting for {symbol} order cancellation before daily-loss flatten."))
                 continue
             events.extend(self.submit_exit_order(symbol, qty, self.snapshot(symbol), "daily loss limit flatten"))
         return events, handled
@@ -4068,9 +4081,10 @@ class TraderEngine:
                 submitted = self.submit_order_request(order)
             except OrderExecutionError as exc:
                 message = str(exc)
-                hold_seconds = (
-                    STOP_LOSS_EXIT_REJECT_HOLD_SECONDS if self.is_stop_loss_exit_reason(reason) else ORDER_REJECT_HOLD_SECONDS
-                )
+                # Protective sells (stop-loss, loss-limit flatten) retry soon; while held, the normal
+                # pass restores the stop so the position is not left unprotected.
+                protective_sell = self.is_stop_loss_exit_reason(reason) or "flatten" in str(reason).lower()
+                hold_seconds = STOP_LOSS_EXIT_REJECT_HOLD_SECONDS if protective_sell else ORDER_REJECT_HOLD_SECONDS
                 self.hold_rejected_order(symbol, OrderSide.SELL, hold_seconds)
                 self.record_order_intent(
                     symbol,
