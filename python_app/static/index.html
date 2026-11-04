@@ -3,8 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#1f7a65" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f151c" media="(prefers-color-scheme: dark)" />
     <meta name="apt-api-token" content="__APT_API_TOKEN__" />
+    <script>
+      // Apply a saved theme before first paint so the page doesn't flash.
+      try {
+        const savedTheme = localStorage.getItem("apt-theme");
+        if (savedTheme === "light" || savedTheme === "dark") document.documentElement.dataset.theme = savedTheme;
+      } catch (error) {}
+    </script>
     <title>Alpaca Paper Trader</title>
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" sizes="32x32" href="/static/alpaca-paper-trader-32.png" />
@@ -25,6 +33,11 @@
             <button class="nav-button" data-view="accountsView" type="button">Accounts</button>
             <button class="nav-button" data-view="backtestView" type="button">Backtest</button>
           </nav>
+          <div class="theme-switch" role="group" aria-label="Color theme">
+            <button type="button" data-theme-choice="light">Light</button>
+            <button type="button" data-theme-choice="dark">Dark</button>
+            <button type="button" data-theme-choice="system">Auto</button>
+          </div>
           <div class="mode-pill">Paper API</div>
         </div>
       </header>
