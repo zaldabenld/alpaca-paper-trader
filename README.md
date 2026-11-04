@@ -51,6 +51,17 @@ To verify the existing desktop shortcut/VBS path without launching the app:
 .\.venv\Scripts\python.exe scripts\verify_desktop_shortcut.py
 ```
 
+### Linux (KDE/Fedora)
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+./launch-alpaca-paper-trader.sh --install-desktop
+```
+
+This adds **Alpaca Paper Trader** to the app menu (pin it to the taskbar from there). The launcher starts or reuses the backend on `127.0.0.1:8765` and opens a Chrome/Chromium/Brave app window. The backend keeps running after the window closes; right-click the icon and choose **Stop Alpaca Paper Trader**, or run `./launch-alpaca-paper-trader.sh --stop`.
+
+On Linux there is no DPAPI, so saved keys are base64-encoded rather than encrypted. They are protected by file permissions only: `~/AlpacaPaperTrader` is kept at `700` and settings files are written `600`.
+
 After an approved relaunch, run the sanitized live contract verifier:
 
 ```powershell
