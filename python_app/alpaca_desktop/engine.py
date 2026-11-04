@@ -74,8 +74,21 @@ from .runtime_diagnostics import (
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
 
 
-DASHBOARD_TOP_LIMIT = 25
+MOST_ACTIVES_MAX = 100  # Alpaca screener maximum for `top`
+
+
+def configured_top_symbol_count() -> int:
+    # How many of Alpaca's most-active stocks to scan; ALPACA_TRADER_TOP_SYMBOLS overrides.
+    try:
+        count = int(os.environ.get("ALPACA_TRADER_TOP_SYMBOLS", str(MOST_ACTIVES_MAX)))
+    except ValueError:
+        count = MOST_ACTIVES_MAX
+    return max(1, min(MOST_ACTIVES_MAX, count))
+
+
+DASHBOARD_TOP_LIMIT = configured_top_symbol_count()
 STOCK_SNAPSHOT_BATCH_SIZE = 100
+STOCK_SNAPSHOT_SINGLE_RETRY_LIMIT = 30
 TOP_VOLUME_CACHE_SECONDS = 60
 PORTFOLIO_HISTORY_CACHE_SECONDS = 15
 TOP_VOLUME_FORCE_COOLDOWN_SECONDS = 30
@@ -83,7 +96,10 @@ TOP_VOLUME_SOURCE = "alpaca_most_actives_volume"
 LOOKUP_CACHE_SECONDS = 60
 BUILT_IN_PROFILE_KEYS = ("conservative", "neutral", "aggressive")
 REPLAY_EVENT_LIMIT = 400
-HISTORICAL_BARS_CACHE_SECONDS = 3
+# Minute bars change once a minute and streamed symbols get live bars, so a 15 s cache keeps a
+# 100-symbol REST scan well under the free plan's 200 data requests per minute.
+HISTORICAL_BARS_CACHE_SECONDS = 15
+DAY_TAPE_SCAN_INTERVAL_SECONDS = 60
 HISTORICAL_BARS_PER_SYMBOL = 500
 HISTORICAL_BARS_REQUEST_LIMIT = 10000
 MARKET_STREAM_SYMBOL_LIMIT = 30
@@ -1431,43 +1447,57 @@ def fetch_stock_snapshots_chunked(
     clean_symbols_list = without_invalid_market_data_symbols(sorted(set(clean_symbols(symbols))))
     for index in range(0, len(clean_symbols_list), STOCK_SNAPSHOT_BATCH_SIZE):
         batch = clean_symbols_list[index : index + STOCK_SNAPSHOT_BATCH_SIZE]
-        if not batch:
-            continue
-        try:
-            response = data_client.get_stock_snapshot(
-                StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed(feed))
-            )
-        except Exception as exc:
-            record_runtime_diagnostic(
-                "market_data",
-                "Batch snapshot request failed; retrying individual symbols",
-                MarketDataError(str(exc) or exc.__class__.__name__),
-                source="engine",
-            )
-            symbol_failures = 0
-            for symbol in batch:
-                try:
-                    response = data_client.get_stock_snapshot(
-                        StockSnapshotRequest(symbol_or_symbols=symbol, feed=DataFeed(feed))
-                    )
-                except Exception as symbol_exc:
-                    if symbol_failures < 3:
-                        record_runtime_diagnostic(
-                            "market_data",
-                            f"Snapshot request failed for {symbol}",
-                            MarketDataError(str(symbol_exc) or symbol_exc.__class__.__name__),
-                            source="engine",
-                        )
-                    symbol_failures += 1
+        while batch:
+            try:
+                response = data_client.get_stock_snapshot(
+                    StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed(feed))
+                )
+            except Exception as exc:
+                rejected = rejected_market_data_symbol(exc, batch)
+                if rejected:
+                    batch = [symbol for symbol in batch if symbol != rejected]
                     continue
-                if isinstance(response, dict):
-                    snapshot = response.get(symbol)
-                    if snapshot is not None:
-                        snapshots[str(symbol).upper()] = snapshot
-            continue
-        if isinstance(response, dict):
-            for symbol, snapshot in response.items():
-                snapshots[str(symbol).upper()] = snapshot
+                if len(batch) > STOCK_SNAPSHOT_SINGLE_RETRY_LIMIT:
+                    # One request per symbol for a 100-symbol batch would blow through the free
+                    # plan's 200 calls/min; skip this round and let the next refresh try again.
+                    record_runtime_diagnostic(
+                        "market_data",
+                        f"Batch snapshot request failed for {len(batch)} symbols; will retry next refresh",
+                        MarketDataError(str(exc) or exc.__class__.__name__),
+                        source="engine",
+                    )
+                    break
+                record_runtime_diagnostic(
+                    "market_data",
+                    "Batch snapshot request failed; retrying individual symbols",
+                    MarketDataError(str(exc) or exc.__class__.__name__),
+                    source="engine",
+                )
+                symbol_failures = 0
+                for symbol in batch:
+                    try:
+                        response = data_client.get_stock_snapshot(
+                            StockSnapshotRequest(symbol_or_symbols=symbol, feed=DataFeed(feed))
+                        )
+                    except Exception as symbol_exc:
+                        if symbol_failures < 3:
+                            record_runtime_diagnostic(
+                                "market_data",
+                                f"Snapshot request failed for {symbol}",
+                                MarketDataError(str(symbol_exc) or symbol_exc.__class__.__name__),
+                                source="engine",
+                            )
+                        symbol_failures += 1
+                        continue
+                    if isinstance(response, dict):
+                        snapshot = response.get(symbol)
+                        if snapshot is not None:
+                            snapshots[str(symbol).upper()] = snapshot
+                break
+            if isinstance(response, dict):
+                for symbol, snapshot in response.items():
+                    snapshots[str(symbol).upper()] = snapshot
+            break
     return snapshots
 
 
@@ -1579,6 +1609,8 @@ class TraderEngine:
         self.top_volume_last_fetch_at = 0.0
         self.top_volume_updated = ""
         self.top_volume_error = ""
+        self.last_day_tape_scan_bucket = -1
+        self.last_day_tape_scan_signature: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
         self.latest_trading_statuses: dict[str, dict[str, Any]] = {}
         self.latest_quotes: dict[str, dict[str, Any]] = {}
         self.halted_symbols: dict[str, dict[str, Any]] = {}
@@ -2131,7 +2163,9 @@ class TraderEngine:
                 bars_data = fetch_stock_bars_chunked(data_client, symbols, required_bars, config.feed)
             else:
                 bars_data = {symbol: shared_bars.get(symbol, []) for symbol in symbols}
-                missing_symbols = [symbol for symbol, symbol_bars in bars_data.items() if not symbol_bars]
+                # Only fetch symbols the shared request did not cover; a symbol that came back
+                # empty (no IEX bars yet) would otherwise be re-requested by every account each loop.
+                missing_symbols = [symbol for symbol in symbols if symbol not in shared_bars]
                 if missing_symbols:
                     data_client = self.require_data_client()
                     required_bars = required_strategy_bars(config)
@@ -2484,6 +2518,18 @@ class TraderEngine:
         try:
             if not bool(market_clock.get("is_open")):
                 return
+            # Each scan record is large (every symbol's indicators plus orders), so keep one per
+            # clock minute (bars are minutely, so the backtester still sees every bar) plus one
+            # whenever positions or open orders change.
+            minute_bucket = int(time.time() // DAY_TAPE_SCAN_INTERVAL_SECONDS)
+            signature = (
+                tuple(sorted(str(item.get("symbol") or "") for item in positions)),
+                tuple(sorted(str(item.get("id") or item.get("client_order_id") or "") for item in open_orders)),
+            )
+            if minute_bucket == self.last_day_tape_scan_bucket and signature == self.last_day_tape_scan_signature:
+                return
+            self.last_day_tape_scan_bucket = minute_bucket
+            self.last_day_tape_scan_signature = signature
             with self.lock:
                 symbol_source = self.trading_symbol_source()
                 top_volume_symbols = list(self.top_volume_symbols[:DASHBOARD_TOP_LIMIT])
@@ -5402,30 +5448,31 @@ class TraderManager:
         engines = [engine for engine in self.connected_engines() if engine.config.use_market_stream]
         source = self.shared_market_source()
         ordered_engines = ([source] if source in engines else []) + [engine for engine in engines if engine is not source]
-        dashboard_symbols: list[str] = []
-        if source in engines:
-            for symbol in source.trading_symbols():
-                clean = str(symbol or "").strip().upper()
-                if clean and clean not in dashboard_symbols:
-                    dashboard_symbols.append(clean)
-                if len(dashboard_symbols) >= MARKET_STREAM_SYMBOL_LIMIT:
-                    break
 
-        bar_symbols: list[str] = []
+        # The free plan streams at most MARKET_STREAM_SYMBOL_LIMIT symbols in total. Positions held
+        # when the stream (re)subscribes come first, then the most-active list, then other scan
+        # symbols; everything else is scanned through the cached REST bars. (Exits price positions
+        # from the broker's current_price, so they do not depend on being streamed.)
+        stream_symbols: list[str] = []
 
-        def append_bar_symbol(symbol: Any) -> None:
+        def add(symbol: Any) -> None:
             clean = str(symbol or "").strip().upper()
-            if clean and clean not in bar_symbols and len(bar_symbols) < MARKET_STREAM_SYMBOL_LIMIT:
-                bar_symbols.append(clean)
+            if clean and clean not in stream_symbols and len(stream_symbols) < MARKET_STREAM_SYMBOL_LIMIT:
+                stream_symbols.append(clean)
 
-        for symbol in dashboard_symbols:
-            append_bar_symbol(symbol)
+        for engine in ordered_engines:
+            for symbol in without_invalid_market_data_symbols(engine.position_symbols_for_market_data()):
+                add(symbol)
+        source_trading = source.trading_symbols() if source in engines else []
+        for symbol in source_trading:
+            add(symbol)
         for engine in ordered_engines:
             for symbol in engine.scan_symbols():
-                append_bar_symbol(symbol)
-            if len(bar_symbols) >= MARKET_STREAM_SYMBOL_LIMIT:
-                break
-        return dashboard_symbols, bar_symbols
+                add(symbol)
+
+        source_trading_set = {str(symbol or "").strip().upper() for symbol in source_trading}
+        dashboard_symbols = [symbol for symbol in stream_symbols if symbol in source_trading_set]
+        return dashboard_symbols, stream_symbols
 
     def ensure_market_data_stream(self, force: bool = False) -> None:
         with self.market_stream_control_lock:

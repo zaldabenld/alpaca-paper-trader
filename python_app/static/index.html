@@ -80,7 +80,7 @@
         <section class="dashboard-table panel">
           <div class="table-heading">
             <div>
-              <h2>Top 25 By Volume</h2>
+              <h2>Most Active By Volume</h2>
               <p id="topVolumeUpdated">Waiting for a connected account.</p>
             </div>
             <button id="refreshTopVolumeButton" class="secondary" type="button">Refresh List</button>
@@ -527,7 +527,7 @@
                     Inverse ETFs
                     <select id="inverseEtfMode">
                       <option value="exclude">Exclude inverse ETFs</option>
-                      <option value="allow" selected>Allow Alpaca top-25</option>
+                      <option value="allow" selected>Allow (most-active list)</option>
                       <option value="inverse_only">Inverse set only</option>
                     </select>
                   </label>
@@ -550,7 +550,7 @@
                 <h3>Symbols & Data</h3>
                 <label class="check-row">
                   <input id="useTopVolumeSymbols" type="checkbox" checked />
-                  <span>Trade Alpaca top 25 volume</span>
+                  <span>Trade Alpaca's most-active stocks</span>
                 </label>
                 <label>
                   Fallback tickers
