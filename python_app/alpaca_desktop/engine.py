@@ -552,6 +552,9 @@ class AppConfig(BaseModel):
     # Optional entry gates for strategy experiments; 0 leaves each one off.
     min_session_pullback_percent: Decimal = Decimal("0")
     max_entry_rsi: Decimal = Decimal("0")
+    # Scale the VWAP and session extension caps by each symbol's own 1-min ATR%: a stock at this ATR%
+    # gets the flat caps, one twice as volatile gets twice the room. 0 keeps the flat percent caps.
+    extension_atr_reference_percent: Decimal = Decimal("0")
     max_entries_per_symbol_per_day: int = 0
     flatten_on_daily_loss: bool = False
     # Sell every position this many minutes before the close (0 = off; for pure day trading).
@@ -775,6 +778,7 @@ class AppConfig(BaseModel):
             raise ValueError("Buy RSI min must be below buy RSI max.")
         self.min_entry_score = min(self.min_entry_score, Decimal("100"))
         self.max_entry_rsi = min(self.max_entry_rsi, Decimal("100"))
+        self.extension_atr_reference_percent = min(max(self.extension_atr_reference_percent, Decimal("0")), Decimal("5"))
         self.min_buy_volume_ratio = min(self.min_buy_volume_ratio, Decimal("1"))
         if self.volume_multiplier < 0:
             raise ValueError("Volume multiplier cannot be negative.")
@@ -1665,6 +1669,14 @@ def entry_profile_limits(config: AppConfig) -> dict[str, Decimal]:
         limits["max_recent_pullback"] = config.max_recent_pullback_percent
     limits["late_momentum_floor"] = config.late_momentum_floor_percent
     return limits
+
+
+def atr_scaled_cap(cap: Decimal, snapshot: Any, config: AppConfig) -> Decimal:
+    reference = config.extension_atr_reference_percent
+    atr = getattr(snapshot, "atr_percent", None)
+    if reference <= 0 or atr is None or atr <= 0:
+        return cap
+    return cap * atr / reference
 
 
 def below_entry_floor(value: Decimal | None, floor: Decimal) -> bool:
@@ -3195,13 +3207,13 @@ class TraderEngine:
             return "Hold (session trend warming)"
         if below_entry_floor(snapshot.session_change_percent, limits["min_session_change"]):
             return f"Hold (session trend {snapshot.session_change_percent:+.2f}%)"
-        if snapshot.session_change_percent > limits["max_session_extension"]:
+        if snapshot.session_change_percent > atr_scaled_cap(limits["max_session_extension"], snapshot, config):
             return f"Hold (session extended {snapshot.session_change_percent:+.2f}%)"
         if getattr(snapshot, "vwap_distance_percent", None) is None:
             return "Hold (VWAP warming)"
         if below_entry_floor(snapshot.vwap_distance_percent, limits["min_vwap_distance"]):
             return f"Hold (below VWAP {snapshot.vwap_distance_percent:+.2f}%)"
-        if snapshot.vwap_distance_percent > limits["max_vwap_extension"]:
+        if snapshot.vwap_distance_percent > atr_scaled_cap(limits["max_vwap_extension"], snapshot, config):
             return f"Hold (extended above VWAP {snapshot.vwap_distance_percent:+.2f}%)"
         if config.min_session_pullback_percent > 0:
             pullback = getattr(snapshot, "session_pullback_percent", None)
