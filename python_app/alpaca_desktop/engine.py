@@ -1343,6 +1343,11 @@ def is_already_stopped_stream_error(exc: Exception) -> bool:
     return "nonetype" in message and "is_running" in message
 
 
+def is_pending_cancel_error(exc: Exception) -> bool:
+    # Alpaca 422 (code 42210000) when a cancel is sent for an order whose earlier cancel is still in flight.
+    return "pending cancel" in str(exc or "").lower()
+
+
 def credential_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -1932,6 +1937,8 @@ class TraderEngine:
         try:
             self.backtester_boundary().orders.cancel_order_by_id(order_id)
         except OrderExecutionError as exc:
+            if is_pending_cancel_error(exc):
+                return  # an earlier cancel is still being processed; that is the outcome we asked for
             record_runtime_diagnostic(
                 "order_execution",
                 "Live order cancellation failed",
@@ -3499,7 +3506,7 @@ class TraderEngine:
                 self.strategy_state.last_action[symbol] = sell_hold
                 return events, False, None
             cancelled = self.cancel_orders_for_symbol(protective_orders, symbol)
-            if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol):
+            if cancelled is None or (cancelled and not self.wait_for_symbol_app_orders_cleared(symbol)):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 return events, False, None
             qty_to_sell = abs(qty)
@@ -3749,8 +3756,11 @@ class TraderEngine:
             if take_profit_limits and not all(self.cancel_open_order(order) for order in take_profit_limits):
                 events.append(("warn", f"Waiting for {symbol} take-profit cancellation before {reason}."))
                 continue
-            cancelled = self.cancel_orders_for_symbol(protective, symbol) + len(take_profit_limits)
-            if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol, include_exits=True):
+            cancelled = self.cancel_orders_for_symbol(protective, symbol)
+            if cancelled is None or (
+                (cancelled or take_profit_limits)
+                and not self.wait_for_symbol_app_orders_cleared(symbol, include_exits=True)
+            ):
                 events.append(("warn", f"Waiting for {symbol} order cancellation before {reason}."))
                 continue
             events.extend(self.submit_exit_order(symbol, qty, self.snapshot(symbol), reason))
@@ -3957,7 +3967,7 @@ class TraderEngine:
                 self.strategy_state.last_action[symbol] = sell_hold
                 return events, False, True, False
             cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
-            if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol):
+            if cancelled is None or (cancelled and not self.wait_for_symbol_app_orders_cleared(symbol)):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 events.append(("warn", f"Waiting for existing exit order cancellation before selling {symbol}."))
                 return events, False, True, False
@@ -3970,7 +3980,7 @@ class TraderEngine:
 
         if take_profit_price > 0 and current_price >= take_profit_price and not take_profit_orders:
             cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
-            if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol):
+            if cancelled is None or (cancelled and not self.wait_for_symbol_app_orders_cleared(symbol)):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 events.append(("warn", f"Waiting for stop cancellation before placing take-profit limit for {symbol}."))
                 return events, False, True, False
@@ -4769,9 +4779,15 @@ class TraderEngine:
             return "stop_loss"
         return ""
 
-    def cancel_orders_for_symbol(self, orders: list[dict[str, Any]], symbol: str) -> int:
+    def cancel_orders_for_symbol(self, orders: list[dict[str, Any]], symbol: str) -> int | None:
+        """Cancel the app's protective orders for symbol; returns how many are now cancelling.
+
+        None means a cancel was refused: the order may still hold the shares (or have filled),
+        so callers must not sell this pass.
+        """
         clean_symbol = symbol.strip().upper()
         cancelled = 0
+        refused = False
         for order in orders:
             if str(order.get("symbol") or "").upper() != clean_symbol:
                 continue
@@ -4779,7 +4795,9 @@ class TraderEngine:
                 continue
             if self.cancel_open_order(order):
                 cancelled += 1
-        return cancelled
+            else:
+                refused = True
+        return None if refused else cancelled
 
     def wait_for_symbol_app_orders_cleared(
         self, symbol: str, timeout_seconds: float = 3.0, include_exits: bool = False
@@ -4829,6 +4847,8 @@ class TraderEngine:
         order_id = str(item.get("id") or "")
         if not order_id:
             return False
+        if str(item.get("status") or "").lower() == "pending_cancel":
+            return True
         try:
             self.cancel_order_request(order_id)
             return True
