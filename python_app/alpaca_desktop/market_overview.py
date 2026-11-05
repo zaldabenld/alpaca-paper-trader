@@ -7,6 +7,7 @@ the TraderManager owns fetching and caching.
 """
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, time as dtime, timezone, tzinfo
 from typing import Any
 
@@ -45,6 +46,16 @@ def percent_change(price: float | None, previous: float | None) -> float | None:
     if price is None or previous is None or previous <= 0:
         return None
     return (price / previous - 1) * 100
+
+
+def nearer_previous_close(today_open: float | None, raw: float | None, adjusted: float | None) -> float | None:
+    """Pick the previous close (raw or split-adjusted) on the same basis as today's trading."""
+    candidates = [value for value in (raw, adjusted) if value and value > 0]
+    if not candidates:
+        return None
+    if not today_open or today_open <= 0 or len(candidates) == 1:
+        return candidates[-1]
+    return min(candidates, key=lambda value: abs(math.log(today_open / value)))
 
 
 def as_utc(value: Any) -> datetime | None:

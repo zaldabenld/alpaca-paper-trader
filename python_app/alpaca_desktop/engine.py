@@ -2606,9 +2606,10 @@ class TraderEngine:
         """Previous-session closes on the same split basis as today's price, fetched once per symbol per session.
 
         A snapshot's previous_daily_bar is raw, so a split reads as a huge move (SOXX's 3:1 split
-        on 2026-11-05 showed as -70.7%). Adjusted bars can also already carry a split that takes
-        effect tomorrow (CDT's 1:20 reverse split), so the adjusted previous close is scaled back by
-        how much today's bar was adjusted, measured on today's open. Falls back to the raw close.
+        on 2026-11-05 showed as -70.7%). Split-adjusted bars can also apply a split before it shows
+        in trading (CDT's 1:20 reverse split read as -95.7% while it still traded near $0.04). So
+        the raw and adjusted closes are both candidates, and the one nearer today's open wins: a
+        real split leaves a 2x-or-more gap at the open, an ordinary overnight gap does not.
         """
         session_bars = {
             str(symbol).upper(): model_dict(getattr(snapshot, "daily_bar", None)) for symbol, snapshot in snapshots.items()
@@ -2632,15 +2633,14 @@ class TraderEngine:
             if bars is not None:
                 for symbol in missing:
                     session = sessions[symbol]
-                    dated = [(daily_bar_session_date(getattr(bar, "timestamp", None)), bar) for bar in bars.get(symbol, [])]
-                    earlier = [bar for day, bar in dated if day < session]
-                    today = next((bar for day, bar in dated if day == session), None)
-                    previous = market_overview.number(getattr(earlier[-1], "close", None)) if earlier else None
-                    adjusted_open = market_overview.number(getattr(today, "open", None))
-                    raw_open = market_overview.number(session_bars[symbol].get("open"))
-                    if previous and adjusted_open and raw_open:
-                        previous = previous * raw_open / adjusted_open
-                    cache[(symbol, session)] = previous
+                    earlier = [
+                        bar for bar in bars.get(symbol, []) if daily_bar_session_date(getattr(bar, "timestamp", None)) < session
+                    ]
+                    adjusted = market_overview.number(getattr(earlier[-1], "close", None)) if earlier else None
+                    raw = market_overview.number(model_dict(getattr(snapshots.get(symbol), "previous_daily_bar", None)).get("close"))
+                    cache[(symbol, session)] = market_overview.nearer_previous_close(
+                        market_overview.number(session_bars[symbol].get("open")), raw, adjusted
+                    )
                 oldest = min(sessions.values())
                 with self.lock:
                     self.previous_close_cache = {key: value for key, value in cache.items() if key[1] >= oldest}
@@ -6230,7 +6230,9 @@ class TraderManager:
             if cached and time.monotonic() - cached[0] < MARKET_OVERVIEW_CACHE_SECONDS:
                 return cached[1]
             payload = self.fetch_market_overview()
-            if payload.get("connected"):
+            movers = payload.get("movers") or {}
+            # Right after a restart the most-active list may not be loaded yet; don't hold empty movers for a minute.
+            if payload.get("connected") and (movers.get("gainers") or movers.get("losers")):
                 self.market_overview_cache = (time.monotonic(), payload)
             return payload
 

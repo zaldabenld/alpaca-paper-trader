@@ -57,6 +57,13 @@ class MarketOverviewLogicTests(unittest.TestCase):
         self.assertEqual([item["symbol"] for item in movers["gainers"]], ["BBB", "AAA"])
         self.assertEqual([item["symbol"] for item in movers["losers"]], ["CCC", "DDD"])
 
+    def test_previous_close_nearest_todays_open_wins(self) -> None:
+        self.assertEqual(mo.nearer_previous_close(143.0, 451.2, 150.4), 150.4)  # SOXX 3:1 split
+        self.assertEqual(mo.nearer_previous_close(0.045, 0.0498, 0.996), 0.0498)  # CDT adjustment not traded yet
+        self.assertEqual(mo.nearer_previous_close(None, 10.0, 10.1), 10.1)
+        self.assertEqual(mo.nearer_previous_close(5.0, None, 4.9), 4.9)
+        self.assertIsNone(mo.nearer_previous_close(5.0, None, None))
+
     def test_news_symbols_start_with_the_indexes_and_skip_placeholders(self) -> None:
         self.assertEqual(
             mo.news_symbols(["046CVR015", "SH", ""], ["SH", "APP"]),
@@ -128,6 +135,15 @@ class MarketOverviewEndpointTests(unittest.TestCase):
         self.assertEqual(payload["errors"], ["News unavailable: down"])
         self.assertEqual(payload["indexes"][0]["symbol"], "SPY")
 
+    def test_empty_movers_are_not_cached(self) -> None:
+        manager, data_client, _ = self.manager_with_source()
+        source = manager.get(manager.selected_account_id)
+        source.top_volume_rows = []  # most-active list not loaded yet, as right after a restart
+        self.assertEqual(manager.market_overview()["movers"], {"gainers": [], "losers": []})
+        source.top_volume_rows = [{"symbol": "AAA", "change_pct_raw": 5.0, "last_price_raw": 2}]
+        self.assertEqual(manager.market_overview()["movers"]["gainers"][0]["symbol"], "AAA")
+        self.assertEqual(data_client.bar_requests, 2)
+
     def test_disconnected_overview_is_empty_and_not_cached(self) -> None:
         manager = TraderManager()
         self.assertFalse(manager.market_overview()["connected"])
@@ -176,9 +192,8 @@ class MostActiveChangeTests(unittest.TestCase):
         self.assertAlmostEqual(row["change_pct_raw"], -12.97, places=2)
         self.assertEqual(daily_bars.call_count, 1)  # cached for the rest of the session
 
-    def test_a_split_effective_tomorrow_keeps_todays_basis(self) -> None:
-        # CDT: 1:20 reverse split after today's close. Adjusted bars already scale today and
-        # yesterday by 20, but today's live price is still pre-split.
+    def test_an_adjustment_not_yet_seen_in_trading_is_ignored(self) -> None:
+        # CDT on 2026-11-05: adjusted bars carried a 1:20 reverse split, but it still traded near $0.04.
         engine = engine_module.TraderEngine("reverse-split")
         engine.connected = True
         engine.data_client = object()  # type: ignore[assignment]
