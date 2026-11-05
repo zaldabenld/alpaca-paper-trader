@@ -1757,6 +1757,8 @@ class TraderEngine:
         self.news_client: NewsClient | None = None
         self.trade_stream: Any | None = None
         self.top_volume_rows: list[dict[str, Any]] = []
+        # (symbol, session date) -> split-adjusted previous close, or None when there is no earlier bar
+        self.previous_close_cache: dict[tuple[str, str], float | None] = {}
         self.top_volume_symbols: list[str] = []
         self.top_volume_last_fetch_at = 0.0
         self.top_volume_updated = ""
@@ -2600,6 +2602,47 @@ class TraderEngine:
         finally:
             self.refresh_lock.release()
 
+    def split_adjusted_previous_closes(self, data_client: Any, snapshots: dict[str, Any], feed: str) -> dict[str, float]:
+        """Previous-session closes adjusted for splits, fetched once per symbol per session.
+
+        A snapshot's previous_daily_bar is raw, so a split reads as a huge move (SOXX's 3:1
+        split on 2026-11-05 showed as -70.7%). Falls back to the raw close if the fetch fails.
+        """
+        sessions = {
+            str(symbol).upper(): daily_bar_session_date(model_dict(getattr(snapshot, "daily_bar", None)).get("timestamp"))
+            for symbol, snapshot in snapshots.items()
+        }
+        sessions = {symbol: session for symbol, session in sessions.items() if session}
+        with self.lock:
+            cache = dict(self.previous_close_cache)
+        missing = [symbol for symbol, session in sessions.items() if (symbol, session) not in cache]
+        if missing:
+            try:
+                bars = fetch_daily_bars_chunked(data_client, missing, feed)
+            except Exception as exc:
+                record_runtime_diagnostic(
+                    "market_data",
+                    "Split-adjusted daily bars failed; movers use raw previous closes",
+                    MarketDataError(str(exc) or exc.__class__.__name__),
+                    source="engine",
+                )
+                bars = None
+            if bars is not None:
+                for symbol in missing:
+                    session = sessions[symbol]
+                    earlier = [
+                        bar for bar in bars.get(symbol, []) if daily_bar_session_date(getattr(bar, "timestamp", None)) < session
+                    ]
+                    cache[(symbol, session)] = market_overview.number(getattr(earlier[-1], "close", None)) if earlier else None
+                oldest = min(sessions.values())
+                with self.lock:
+                    self.previous_close_cache = {key: value for key, value in cache.items() if key[1] >= oldest}
+        return {
+            symbol: close
+            for symbol, session in sessions.items()
+            if (close := cache.get((symbol, session))) is not None
+        }
+
     def refresh_top_volume(self, force: bool = False, restart_stream: bool = True) -> None:
         with self.lock:
             if not self.connected:
@@ -2626,6 +2669,7 @@ class TraderEngine:
             ranked = fetch_most_active_symbols(screener_client, DASHBOARD_TOP_LIMIT)
             snapshot_symbols = [str(item.get("symbol") or "").strip().upper() for item in ranked]
             snapshots = fetch_stock_snapshots_chunked(data_client, snapshot_symbols, feed)
+            previous_closes = self.split_adjusted_previous_closes(data_client, snapshots, feed)
             updated_at = datetime.now().strftime("%b %d, %I:%M:%S %p")
 
             rows: list[dict[str, Any]] = []
@@ -2644,7 +2688,9 @@ class TraderEngine:
                 daily_bar = model_dict(getattr(snapshot, "daily_bar", None))
                 latest_trade = model_dict(getattr(snapshot, "latest_trade", None))
                 last_price_raw = latest_trade.get("price") or daily_bar.get("close") or previous.get("last_price_raw", 0)
-                previous_close_raw = model_dict(getattr(snapshot, "previous_daily_bar", None)).get("close")
+                previous_close_raw = previous_closes.get(symbol)
+                if previous_close_raw is None:
+                    previous_close_raw = model_dict(getattr(snapshot, "previous_daily_bar", None)).get("close")
                 change_pct_raw = market_overview.percent_change(
                     market_overview.number(last_price_raw), market_overview.number(previous_close_raw)
                 )

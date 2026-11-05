@@ -149,6 +149,31 @@ class MostActiveChangeTests(unittest.TestCase):
         self.assertAlmostEqual(row["change_pct_raw"], 10.0)
         self.assertEqual(row["previous_close_raw"], 10.0)
 
+    def test_a_split_does_not_read_as_a_crash(self) -> None:
+        # SOXX split 3:1 on 2026-11-05: raw previous close 451.20, split-adjusted 150.40.
+        engine = engine_module.TraderEngine("split")
+        engine.connected = True
+        engine.data_client = object()  # type: ignore[assignment]
+        engine.screener_client = object()  # type: ignore[assignment]
+        daily = {"SOXX": [
+            SimpleNamespace(timestamp="2026-11-03T05:00:00Z", close=152.0),
+            SimpleNamespace(timestamp="2026-11-04T05:00:00Z", close=150.4),
+            SimpleNamespace(timestamp="2026-11-05T05:00:00Z", close=130.9),  # today's bar is not "previous"
+        ]}
+        with (
+            patch.object(engine_module, "fetch_most_active_symbols", return_value=[{"symbol": "SOXX", "daily_volume_raw": 10}]),
+            patch.object(engine_module, "fetch_stock_snapshots_chunked", return_value={"SOXX": snapshot(130.9, 451.2)}),
+            patch.object(engine_module, "fetch_daily_bars_chunked", return_value=daily) as daily_bars,
+            patch.object(engine_module, "load_dashboard_cache_rows", return_value={}),
+        ):
+            engine.refresh_top_volume(force=True, restart_stream=False)
+            engine.top_volume_last_fetch_at = 0
+            engine.refresh_top_volume(force=True, restart_stream=False)
+        row = engine.top_volume_rows[0]
+        self.assertEqual(row["previous_close_raw"], 150.4)
+        self.assertAlmostEqual(row["change_pct_raw"], -12.97, places=2)
+        self.assertEqual(daily_bars.call_count, 1)  # cached for the rest of the session
+
 
 if __name__ == "__main__":
     unittest.main()
