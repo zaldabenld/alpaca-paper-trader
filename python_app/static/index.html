@@ -41,9 +41,18 @@
           <p id="statusText">Not connected</p>
         </div>
         <div class="topbar-actions">
+          <button id="marketOverviewToggle" class="secondary ghost-button" type="button" aria-controls="tickerTape marketOverview" aria-pressed="true" title="Show or hide the market overview"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="m7 15 4-5 3 3 5-6"/></svg><span>Markets</span></button>
           <div class="mode-pill">Paper API</div>
         </div>
       </header>
+
+      <section id="tickerTape" class="ticker-tape" aria-label="Top movers from the most-active list">
+        <div class="ticker-viewport">
+          <div id="tickerTrack" class="ticker-track">
+            <span class="ticker-empty">Top movers load once an account is connected.</span>
+          </div>
+        </div>
+      </section>
 
       <section id="runtimeHealthBanner" class="runtime-warning" hidden>
         <strong id="runtimeHealthTitle">Runtime warning</strong>
@@ -52,6 +61,31 @@
       <p id="runtimeNote" class="runtime-note" hidden></p>
 
       <section id="dashboardView" class="view dashboard-view active">
+        <section id="marketOverview" class="market-overview" aria-label="Market overview">
+          <article class="panel index-box">
+            <div class="table-heading">
+              <div>
+                <h2>Market Indexes</h2>
+                <p id="indexBoxUpdated">Index ETFs: S&amp;P 500, Nasdaq 100, Dow 30 and Russell 2000.</p>
+              </div>
+            </div>
+            <div id="indexCharts" class="index-charts"></div>
+          </article>
+          <article class="panel news-box">
+            <div class="table-heading">
+              <div>
+                <h2>News</h2>
+                <p id="newsUpdated">Headlines for the indexes and the stocks you hold or watch.</p>
+              </div>
+            </div>
+            <a id="newsFlash" class="news-flash" target="_blank" rel="noopener noreferrer" hidden>
+              <span class="news-flash-badge">New</span>
+              <span id="newsFlashText"></span>
+            </a>
+            <ul id="newsList" class="news-list"></ul>
+          </article>
+        </section>
+
         <section class="dashboard-grid">
           <article class="dashboard-card market-status dashboard-market" id="dashboardMarketStatus">
             <div>
