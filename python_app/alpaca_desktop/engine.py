@@ -555,6 +555,12 @@ class AppConfig(BaseModel):
     # Scale the VWAP and session extension caps by each symbol's own 1-min ATR%: a stock at this ATR%
     # gets the flat caps, one twice as volatile gets twice the room. 0 keeps the flat percent caps.
     extension_atr_reference_percent: Decimal = Decimal("0")
+    # Entry style. "momentum": the trend/RSI/VWAP/score checks above. "orb": opening-range breakout,
+    # buy once per symbol per day when price clears the first orb_minutes' high while above VWAP,
+    # at most orb_max_breakout_percent past it (0 = no cap). Exits stay the take-profit/stop settings.
+    entry_mode: str = "momentum"
+    orb_minutes: int = 15
+    orb_max_breakout_percent: Decimal = Decimal("1.0")
     max_entries_per_symbol_per_day: int = 0
     flatten_on_daily_loss: bool = False
     # Sell every position this many minutes before the close (0 = off; for pure day trading).
@@ -724,6 +730,14 @@ class AppConfig(BaseModel):
             raise ValueError("Stock list must be most_active or daily_rvol.")
         return mode
 
+    @field_validator("entry_mode", mode="before")
+    @classmethod
+    def validate_entry_mode(cls, value: str) -> str:
+        mode = str(value or "momentum").strip().lower()
+        if mode not in {"momentum", "orb"}:
+            raise ValueError("Entry mode must be momentum or orb.")
+        return mode
+
     @field_validator("trade_size_mode", mode="before")
     @classmethod
     def validate_trade_size_mode(cls, value: str) -> str:
@@ -779,6 +793,8 @@ class AppConfig(BaseModel):
         self.min_entry_score = min(self.min_entry_score, Decimal("100"))
         self.max_entry_rsi = min(self.max_entry_rsi, Decimal("100"))
         self.extension_atr_reference_percent = min(max(self.extension_atr_reference_percent, Decimal("0")), Decimal("5"))
+        self.orb_minutes = min(max(int(self.orb_minutes), 5), 60)
+        self.orb_max_breakout_percent = min(max(self.orb_max_breakout_percent, Decimal("0")), Decimal("10"))
         self.min_buy_volume_ratio = min(self.min_buy_volume_ratio, Decimal("1"))
         if self.volume_multiplier < 0:
             raise ValueError("Volume multiplier cannot be negative.")
@@ -3352,6 +3368,8 @@ class TraderEngine:
             if entries_today >= config.max_entries_per_symbol_per_day:
                 self.strategy_state.last_action[symbol] = f"Hold (bought {entries_today}x today)"
                 return None
+        if config.entry_mode == "orb":
+            return self.orb_entry_candidate(symbol, rank, snapshot, config)
         quality_hold = self.entry_quality_hold_reason(symbol, snapshot, config)
         if quality_hold:
             self.strategy_state.last_action[symbol] = quality_hold
@@ -3368,6 +3386,39 @@ class TraderEngine:
             return None
         self.strategy_state.last_action[symbol] = f"Candidate score {score:.1f}"
         return {"symbol": symbol, "rank": rank, "score": score}
+
+    def orb_entry_candidate(self, symbol: str, rank: int, snapshot: Any, config: AppConfig) -> dict[str, Any] | None:
+        hold = self.orb_entry_hold_reason(symbol, snapshot, config)
+        if hold:
+            self.strategy_state.last_action[symbol] = hold
+            return None
+        # The scan list is already in priority order (relative-volume rank for the daily list).
+        score = Decimal("100") - Decimal(rank)
+        self.set_entry_score(symbol, score)
+        self.strategy_state.last_action[symbol] = "Candidate ORB breakout"
+        return {"symbol": symbol, "rank": rank, "score": score}
+
+    def orb_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
+        for reason in (self.inverse_etf_hold_reason(symbol, config), self.halt_hold_reason(symbol)):
+            if reason:
+                return reason
+        with self.lock:
+            entries_today = self.entries_today_by_symbol.get(symbol.strip().upper(), 0)
+        if entries_today:
+            return "Hold (ORB: one entry per day)"
+        opening = self.strategy_state.opening_range(symbol, config.orb_minutes)
+        if opening is None or not opening.complete:
+            return "Hold (opening range forming)"
+        price = snapshot.price
+        if price <= opening.high:
+            return f"Hold (inside opening range; high {opening.high})"
+        breakout = (price / opening.high - Decimal("1")) * Decimal("100")
+        if config.orb_max_breakout_percent > 0 and breakout > config.orb_max_breakout_percent:
+            return f"Hold (breakout extended +{breakout:.2f}% past range)"
+        vwap_distance = getattr(snapshot, "vwap_distance_percent", None)
+        if vwap_distance is None or vwap_distance <= 0:
+            return "Hold (below VWAP)"
+        return self.order_flow_hold_reason(symbol, config) or self.asset_tradeability_hold_reason(symbol)
 
     def entry_score(self, snapshot: Any, config: AppConfig, flow_ratio: Decimal | None = None) -> Decimal:
         limits = entry_profile_limits(config)

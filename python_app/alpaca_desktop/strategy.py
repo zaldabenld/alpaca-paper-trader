@@ -190,6 +190,9 @@ class StrategyState:
         if len(history) > max_bars:
             del history[: len(history) - max_bars]
 
+    def opening_range(self, symbol: str, minutes: int) -> OpeningRange | None:
+        return opening_range(self.histories.get(symbol.strip().upper(), []), minutes)
+
     def snapshot(
         self,
         symbol: str,
@@ -379,6 +382,44 @@ def _latest_session_points(history: list[BarPoint]) -> list[BarPoint]:
             same_day.append((local, point))
     regular = [point for local, point in same_day if REGULAR_SESSION_OPEN <= local.time() < REGULAR_SESSION_CLOSE]
     return regular or [point for _, point in same_day]
+
+
+@dataclass(frozen=True)
+class OpeningRange:
+    high: Decimal
+    low: Decimal
+    bars: int
+    complete: bool
+
+
+def opening_range(history: list[BarPoint], minutes: int) -> OpeningRange | None:
+    """High/low of the first `minutes` of the latest regular session (bars stamped 09:30 up to the cutoff).
+
+    complete is True once a bar at or after the cutoff exists. None when the session has no bars in
+    the window yet, or fewer than half its minutes (thin IEX names can skip minutes).
+    """
+    if minutes <= 0:
+        return None
+    session = _latest_session_points(history)
+    cutoff = (datetime.combine(datetime.min, REGULAR_SESSION_OPEN) + timedelta(minutes=minutes)).time()
+    in_range: list[BarPoint] = []
+    complete = False
+    for point in session:
+        local = _bar_local_time(point.timestamp)
+        if local is None:
+            continue
+        if REGULAR_SESSION_OPEN <= local.time() < cutoff:
+            in_range.append(point)
+        elif local.time() >= cutoff:
+            complete = True
+    if len(in_range) < max(1, minutes // 2):
+        return None
+    return OpeningRange(
+        high=max(point.high for point in in_range),
+        low=min(point.low for point in in_range),
+        bars=len(in_range),
+        complete=complete,
+    )
 
 
 def _bar_local_time(value: str) -> datetime | None:
