@@ -254,6 +254,28 @@ class StopProtectionTests(unittest.TestCase):
         rows = engine.protection_status_rows([{"symbol": "046CVR015", "qty": "2.8", "current_price": "0"}], [])
         self.assertEqual(rows[0]["status"], "No market price")
 
+    def test_placeholder_position_does_not_use_a_position_slot(self) -> None:
+        client = FakeTradingClient(is_open=True)
+        cvr = {"symbol": "046CVR015", "qty": "3.05", "avg_entry_price": "0.37", "current_price": "0", "market_value": "0", "side": "long"}
+        client.get_all_positions = lambda: [*FakeTradingClient.get_all_positions(client), cvr]  # type: ignore[method-assign]
+        engine = connected_engine(client, max_open_positions=2)
+        engine.config = engine.config.model_copy(update={"symbols": ["AAA", "BBB"]})
+        engine.strategy_state.add_bar("BBB", "50", NOW - timedelta(minutes=1))
+        engine.trading_enabled = True
+        with (
+            patch.object(engine, "entry_open_guard_message", return_value=""),
+            patch.object(engine, "entry_close_guard_message", return_value=""),
+            patch.object(engine, "entry_candidate", return_value=None) as candidate,
+            patch.object(engine, "portfolio_history_daily_pl_payload", return_value={}),
+            patch.object(engine, "record_day_tape_scan"),
+            patch.object(engine, "record_day_tape_bars"),
+        ):
+            engine.refresh(run_strategy=True, shared_bars={"AAA": [], "BBB": [], "046CVR015": []})
+        bbb_calls = [call for call in candidate.call_args_list if call.args[0] == "BBB"]
+        self.assertEqual(bbb_calls[0].args[4], 1)  # only AAA counts toward max_open_positions
+        self.assertTrue(engine_module.is_placeholder_position(cvr))
+        self.assertFalse(engine_module.is_placeholder_position({"symbol": "AAA", "qty": "1"}))  # no price reported yet
+
 
 class DailyLossLimitTests(unittest.TestCase):
     def test_limit_settings_are_no_longer_forced_off(self) -> None:
