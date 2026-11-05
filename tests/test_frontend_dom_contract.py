@@ -82,6 +82,15 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertIn("entry_mode: fields.entryMode.value", self.app_js)
         self.assertIn('entry_mode: "momentum"', self.app_js)
 
+    def test_market_overview_is_wired(self) -> None:
+        for element_id in ("tickerTape", "tickerTrack", "marketOverview", "indexCharts", "newsList", "newsFlash"):
+            self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
+        # The tape sits outside the views so it shows on every page; the index box is on the dashboard.
+        self.assertLess(self.index_html.index('id="tickerTape"'), self.index_html.index('id="dashboardView"'))
+        self.assertLess(self.index_html.index('id="dashboardView"'), self.index_html.index('id="marketOverview"'))
+        self.assertIn('fetchWithRecovery("/api/market-overview"', self.app_js)
+        self.assertIn("setInterval(loadMarketOverview, MARKET_OVERVIEW_POLL_MS)", self.app_js)
+
     def test_tab_buttons_match_tab_panels(self) -> None:
         buttons = len(
             re.findall(r'<button[^>]*class="tab(?: active)?"', self.index_html)
