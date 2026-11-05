@@ -19,10 +19,12 @@ from alpaca_desktop.engine import TraderManager
 ET = ZoneInfo("America/New_York")
 
 
-def snapshot(price: float, previous: float, session_stamp: str = "2026-11-05T05:00:00Z") -> SimpleNamespace:
+def snapshot(
+    price: float, previous: float, session_stamp: str = "2026-11-05T05:00:00Z", open_price: float | None = None
+) -> SimpleNamespace:
     return SimpleNamespace(
         latest_trade=SimpleNamespace(price=price),
-        daily_bar=SimpleNamespace(timestamp=session_stamp, close=price),
+        daily_bar=SimpleNamespace(timestamp=session_stamp, close=price, open=open_price or price),
         previous_daily_bar=SimpleNamespace(close=previous),
     )
 
@@ -158,11 +160,11 @@ class MostActiveChangeTests(unittest.TestCase):
         daily = {"SOXX": [
             SimpleNamespace(timestamp="2026-11-03T05:00:00Z", close=152.0),
             SimpleNamespace(timestamp="2026-11-04T05:00:00Z", close=150.4),
-            SimpleNamespace(timestamp="2026-11-05T05:00:00Z", close=130.9),  # today's bar is not "previous"
+            SimpleNamespace(timestamp="2026-11-05T05:00:00Z", open=143.0, close=130.9),  # today is not "previous"
         ]}
         with (
             patch.object(engine_module, "fetch_most_active_symbols", return_value=[{"symbol": "SOXX", "daily_volume_raw": 10}]),
-            patch.object(engine_module, "fetch_stock_snapshots_chunked", return_value={"SOXX": snapshot(130.9, 451.2)}),
+            patch.object(engine_module, "fetch_stock_snapshots_chunked", return_value={"SOXX": snapshot(130.9, 451.2, open_price=143.0)}),
             patch.object(engine_module, "fetch_daily_bars_chunked", return_value=daily) as daily_bars,
             patch.object(engine_module, "load_dashboard_cache_rows", return_value={}),
         ):
@@ -173,6 +175,28 @@ class MostActiveChangeTests(unittest.TestCase):
         self.assertEqual(row["previous_close_raw"], 150.4)
         self.assertAlmostEqual(row["change_pct_raw"], -12.97, places=2)
         self.assertEqual(daily_bars.call_count, 1)  # cached for the rest of the session
+
+    def test_a_split_effective_tomorrow_keeps_todays_basis(self) -> None:
+        # CDT: 1:20 reverse split after today's close. Adjusted bars already scale today and
+        # yesterday by 20, but today's live price is still pre-split.
+        engine = engine_module.TraderEngine("reverse-split")
+        engine.connected = True
+        engine.data_client = object()  # type: ignore[assignment]
+        engine.screener_client = object()  # type: ignore[assignment]
+        daily = {"CDT": [
+            SimpleNamespace(timestamp="2026-11-04T05:00:00Z", open=1.0, close=0.996),
+            SimpleNamespace(timestamp="2026-11-05T05:00:00Z", open=0.9, close=0.866),
+        ]}
+        with (
+            patch.object(engine_module, "fetch_most_active_symbols", return_value=[{"symbol": "CDT", "daily_volume_raw": 10}]),
+            patch.object(engine_module, "fetch_stock_snapshots_chunked", return_value={"CDT": snapshot(0.0433, 0.0498, open_price=0.045)}),
+            patch.object(engine_module, "fetch_daily_bars_chunked", return_value=daily),
+            patch.object(engine_module, "load_dashboard_cache_rows", return_value={}),
+        ):
+            engine.refresh_top_volume(force=True, restart_stream=False)
+        row = engine.top_volume_rows[0]
+        self.assertAlmostEqual(row["previous_close_raw"], 0.0498)
+        self.assertAlmostEqual(row["change_pct_raw"], -13.05, places=1)
 
 
 if __name__ == "__main__":

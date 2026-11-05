@@ -2603,15 +2603,17 @@ class TraderEngine:
             self.refresh_lock.release()
 
     def split_adjusted_previous_closes(self, data_client: Any, snapshots: dict[str, Any], feed: str) -> dict[str, float]:
-        """Previous-session closes adjusted for splits, fetched once per symbol per session.
+        """Previous-session closes on the same split basis as today's price, fetched once per symbol per session.
 
-        A snapshot's previous_daily_bar is raw, so a split reads as a huge move (SOXX's 3:1
-        split on 2026-11-05 showed as -70.7%). Falls back to the raw close if the fetch fails.
+        A snapshot's previous_daily_bar is raw, so a split reads as a huge move (SOXX's 3:1 split
+        on 2026-11-05 showed as -70.7%). Adjusted bars can also already carry a split that takes
+        effect tomorrow (CDT's 1:20 reverse split), so the adjusted previous close is scaled back by
+        how much today's bar was adjusted, measured on today's open. Falls back to the raw close.
         """
-        sessions = {
-            str(symbol).upper(): daily_bar_session_date(model_dict(getattr(snapshot, "daily_bar", None)).get("timestamp"))
-            for symbol, snapshot in snapshots.items()
+        session_bars = {
+            str(symbol).upper(): model_dict(getattr(snapshot, "daily_bar", None)) for symbol, snapshot in snapshots.items()
         }
+        sessions = {symbol: daily_bar_session_date(bar.get("timestamp")) for symbol, bar in session_bars.items()}
         sessions = {symbol: session for symbol, session in sessions.items() if session}
         with self.lock:
             cache = dict(self.previous_close_cache)
@@ -2630,10 +2632,15 @@ class TraderEngine:
             if bars is not None:
                 for symbol in missing:
                     session = sessions[symbol]
-                    earlier = [
-                        bar for bar in bars.get(symbol, []) if daily_bar_session_date(getattr(bar, "timestamp", None)) < session
-                    ]
-                    cache[(symbol, session)] = market_overview.number(getattr(earlier[-1], "close", None)) if earlier else None
+                    dated = [(daily_bar_session_date(getattr(bar, "timestamp", None)), bar) for bar in bars.get(symbol, [])]
+                    earlier = [bar for day, bar in dated if day < session]
+                    today = next((bar for day, bar in dated if day == session), None)
+                    previous = market_overview.number(getattr(earlier[-1], "close", None)) if earlier else None
+                    adjusted_open = market_overview.number(getattr(today, "open", None))
+                    raw_open = market_overview.number(session_bars[symbol].get("open"))
+                    if previous and adjusted_open and raw_open:
+                        previous = previous * raw_open / adjusted_open
+                    cache[(symbol, session)] = previous
                 oldest = min(sessions.values())
                 with self.lock:
                     self.previous_close_cache = {key: value for key, value in cache.items() if key[1] >= oldest}
