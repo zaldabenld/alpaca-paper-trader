@@ -9,6 +9,7 @@ from .helpers import configure_test_environment
 
 configure_test_environment()
 
+from alpaca_desktop import engine as engine_module
 from alpaca_desktop.engine import AppConfig, TraderEngine
 from alpaca_desktop.strategy import StrategyState, opening_range
 
@@ -52,7 +53,7 @@ class OpeningRangeTests(unittest.TestCase):
 class OrbEntryTests(unittest.TestCase):
     def engine_with_range(self, **config: object) -> TraderEngine:
         engine = TraderEngine("orb")
-        engine.config = AppConfig(symbols=["AAA"], use_top_volume_symbols=False, entry_mode="orb", **config)
+        engine.config = AppConfig(symbols=["AAA"], use_top_volume_symbols=False, **{"entry_mode": "orb", **config})
         add_range(engine.strategy_state)
         return engine
 
@@ -96,6 +97,19 @@ class OrbEntryTests(unittest.TestCase):
         engine.strategy_state.add_bar("AAA", 10.55, stamp(16), 1000, 10.55, 10.5)
         engine.entries_today_by_symbol = {"AAA": 1}
         self.assertEqual(self.hold(engine), "Hold (ORB: one entry per day)")
+
+    def test_orb_settings_are_profile_keys_and_presets_default_to_momentum(self) -> None:
+        for key in ("entry_mode", "orb_minutes", "orb_max_breakout_percent"):
+            self.assertIn(key, engine_module.PROFILE_STRATEGY_KEYS)
+        for preset in engine_module.PROFILE_PRESETS.values():
+            self.assertEqual(preset.get("entry_mode"), "momentum")
+
+    def test_momentum_mode_never_calls_the_orb_path(self) -> None:
+        engine = self.engine_with_range(entry_mode="momentum")
+        engine.strategy_state.add_bar("AAA", 10.55, stamp(16), 1000, 10.55, 10.5)
+        with patch.object(engine, "orb_entry_candidate") as orb:
+            engine.entry_candidate("AAA", 0, {}, None, 0, [], True)
+        orb.assert_not_called()
 
     def test_entry_mode_is_validated(self) -> None:
         self.assertEqual(AppConfig(entry_mode=" ORB ").entry_mode, "orb")
