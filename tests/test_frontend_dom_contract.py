@@ -67,6 +67,21 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertIn("universe_mode: fields.universeMode.value", self.app_js)
         self.assertIn('universe_mode: "most_active"', self.app_js)
 
+    def test_orb_entry_controls_are_wired(self) -> None:
+        for element_id in ("entryMode", "orbMinutes", "orbMaxBreakoutPercent"):
+            self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
+        for value in ("momentum", "orb"):
+            self.assertIn(f'<option value="{value}"', self.index_html)
+        config_start = self.app_js.index("const configKeys = [")
+        config_text = self.app_js[config_start : self.app_js.index("];", config_start)]
+        profile_start = self.app_js.index("const strategyProfileKeys = new Set([")
+        profile_text = self.app_js[profile_start : self.app_js.index("]);", profile_start)]
+        for key in ("entry_mode", "orb_minutes", "orb_max_breakout_percent"):
+            self.assertIn(f'"{key}"', config_text)
+            self.assertIn(f'"{key}"', profile_text)
+        self.assertIn("entry_mode: fields.entryMode.value", self.app_js)
+        self.assertIn('entry_mode: "momentum"', self.app_js)
+
     def test_tab_buttons_match_tab_panels(self) -> None:
         buttons = len(
             re.findall(r'<button[^>]*class="tab(?: active)?"', self.index_html)

@@ -544,6 +544,21 @@
                     Min Session Pullback % (0 = off)
                     <input id="minSessionPullbackPercent" type="number" min="0" step="0.05" value="0" />
                   </label>
+                  <label title="Momentum: trend/RSI/VWAP checks and score. Opening-range breakout: buy once per stock per day when it clears the high of its first minutes while above VWAP; the momentum checks are skipped.">
+                    Entry style
+                    <select id="entryMode">
+                      <option value="momentum" selected>Momentum (trend, RSI, VWAP, score)</option>
+                      <option value="orb">Opening-range breakout</option>
+                    </select>
+                  </label>
+                  <label title="Opening-range breakout only: the range is the high/low of this many minutes after 9:30 ET.">
+                    ORB Range Minutes
+                    <input id="orbMinutes" type="number" min="5" max="60" step="5" value="15" />
+                  </label>
+                  <label title="Opening-range breakout only: skip a breakout already this far past the range high (0 = no cap).">
+                    ORB Max Breakout %
+                    <input id="orbMaxBreakoutPercent" type="number" min="0" max="10" step="0.25" value="1" />
+                  </label>
                   <label title="Never buy when RSI is above this.">
                     Max Entry RSI (0 = off)
                     <input id="maxEntryRsi" type="number" min="0" max="100" step="1" value="0" />

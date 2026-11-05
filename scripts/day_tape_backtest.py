@@ -53,6 +53,7 @@ BACKTEST_STRATEGY_KEYS = set(PROFILE_STRATEGY_KEYS) | {
     "score_weight_session_pullback_penalty",
     "score_weight_recent_pullback_penalty",
     "score_weight_smi_overheat_penalty",
+    "extension_atr_reference_percent",
 }
 
 
