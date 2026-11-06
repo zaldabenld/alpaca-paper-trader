@@ -131,6 +131,27 @@ class StopProtectionTests(unittest.TestCase):
         self.assertEqual(client.submitted, [])
         self.assertEqual(client.cancelled, [])
 
+    def test_partly_filled_entry_waits_to_place_the_stop_for_the_full_quantity(self) -> None:
+        # Alpaca rejects a sell stop beside the still-open buy as a potential wash trade (STLA, SQQQ 2026-11-06).
+        entry = {"id": "b1", "symbol": "AAA", "side": "buy", "type": "market", "qty": "0.5",
+                 "status": "partially_filled", "client_order_id": "apt-entry-aaa-1"}
+        for is_open, price in ((True, "100"), (True, "95"), (False, "100")):
+            with self.subTest(is_open=is_open, price=price):
+                client = FakeTradingClient(is_open=is_open, price=price, orders=[entry])
+                engine = connected_engine(client)
+                run_refresh(engine, run_strategy=is_open)
+                self.assertEqual(client.submitted, [])
+                self.assertEqual(client.cancelled, [])
+                self.assertEqual(engine.strategy_state.last_action["AAA"], "Hold (entry still filling)")
+
+        client = FakeTradingClient(is_open=True, orders=[entry])
+        engine = connected_engine(client)
+        run_refresh(engine, run_strategy=True)
+        client.open_orders = []  # the buy finished filling
+        run_refresh(engine, run_strategy=True)
+        self.assertEqual(kinds(client), [("sell", "stop")])
+        self.assertEqual(client.submitted[0].qty, 0.25)
+
     def test_dry_run_account_that_is_stopped_sends_nothing(self) -> None:
         client = FakeTradingClient(is_open=True)
         engine = connected_engine(client, dry_run=True)
