@@ -405,5 +405,56 @@ class DayTapeBacktestTests(unittest.TestCase):
             self.assertEqual(config["universe_mode"], "most_active")
 
 
+
+class EntryGuardReplayTests(unittest.TestCase):
+    """Replay applies the live open/close entry guards (it used to buy from the 09:30 open)."""
+
+    def scan(self, utc: str, display: str, next_close: str = "") -> dict[str, Any]:
+        clock = {"is_open": True, "next_close": next_close} if next_close else {}
+        return {"kind": "strategy_scan", "time": utc, "time_display": display, "payload": {"market_clock": clock}}
+
+    def held(self, backtester: Any, event: dict[str, Any]) -> bool:
+        before = backtester.entry_guard_holds
+        with patch.object(backtester.boundary.strategy, "entry_candidate", return_value=None):
+            backtester.handle_event(event)
+        return backtester.entry_guard_holds > before
+
+    def test_open_and_close_guards_hold_entries_like_live(self) -> None:
+        backtest = load_backtest_module()
+        replay = backtest.DayTapeBacktester(
+            strategy_overrides={"entry_open_guard_minutes": 60, "entry_close_guard_minutes": 30}
+        )
+        # 2026-11-06 is a regular day (EST): open 14:30Z, close 21:00Z; no recorded clock -> 16:00 ET
+        self.assertTrue(self.held(replay, self.scan("2026-11-06T14:45:00+00:00", "08:45:00")))
+        self.assertTrue(self.held(replay, self.scan("2026-11-06T15:29:00+00:00", "09:29:00")))
+        self.assertFalse(self.held(replay, self.scan("2026-11-06T15:31:00+00:00", "09:31:00")))
+        self.assertFalse(self.held(replay, self.scan("2026-11-06T20:29:00+00:00", "14:29:00")))
+        self.assertTrue(self.held(replay, self.scan("2026-11-06T20:31:00+00:00", "14:31:00")))
+        self.assertEqual(replay.summary()["counts"]["entry_guard_holds"], 3)
+        self.assertEqual(replay.summary()["counts"]["evaluations"], 2)
+
+    def test_zero_guards_allow_entries_all_session(self) -> None:
+        backtest = load_backtest_module()
+        replay = backtest.DayTapeBacktester(
+            strategy_overrides={"entry_open_guard_minutes": 0, "entry_close_guard_minutes": 0}
+        )
+        self.assertFalse(self.held(replay, self.scan("2026-11-06T14:31:00+00:00", "08:31:00")))
+        self.assertFalse(self.held(replay, self.scan("2026-11-06T20:59:00+00:00", "14:59:00")))
+
+    def test_half_day_close_comes_from_the_recorded_clock(self) -> None:
+        backtest = load_backtest_module()
+        replay = backtest.DayTapeBacktester(
+            strategy_overrides={"entry_open_guard_minutes": 15, "entry_close_guard_minutes": 30}
+        )
+        # 2026-11-27 closes 13:00 ET (18:00Z), recorded on a CST machine as 12:00 PM
+        half_day = "Nov 27, 12:00 PM CST"
+        self.assertFalse(self.held(replay, self.scan("2026-11-27T17:25:00+00:00", "11:25:00", half_day)))
+        self.assertTrue(self.held(replay, self.scan("2026-11-27T17:35:00+00:00", "11:35:00", half_day)))
+        close = backtest.recorded_session_close(
+            self.scan("2026-11-27T17:35:00+00:00", "11:35:00", half_day),
+            {"market_clock": {"is_open": True, "next_close": half_day}},
+        )
+        self.assertEqual(close.astimezone(backtest.MARKET_TIMEZONE).strftime("%H:%M"), "13:00")
+
 if __name__ == "__main__":
     unittest.main()
