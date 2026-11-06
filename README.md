@@ -141,6 +141,9 @@ Per account (Settings > Advanced, saved with the account and in custom profiles;
 | Inverse ETF set | SQQQ, SPXU, SDS, SH, TZA | The inverse ETFs always scanned in Allow mode |
 | ATR Extension Reference % | 0 (off) | Scales the VWAP/session extension caps by each symbol's own volatility |
 | Score Weights | profile values | How much each signal adds to, or penalty subtracts from, the entry score |
+| Require rising price | On | Buys only while the price is still rising: the last 1-minute bar closed at or above the one before it, and the latest trade is not below that earlier close |
+| Max New Buys per Scan | 2 (0 = off) | Most new positions the bot may open in one 5-second scan, which spreads out the burst of buys when the open guard lifts |
+| Seconds Between New Buys | 0 (off) | After a buy is sent, the bot waits this long before sending another |
 
 App-wide (Settings > Advanced > App-wide, shared by every account):
 
@@ -201,7 +204,7 @@ The included strategy is intentionally conservative and transparent:
 - It requires the configured minimum entry score before a buy can be submitted.
 - It sorts the eligible pool by score and buys the best candidates until max slots or block budget are full.
 - It skips symbols already owned or already pending entry.
-- It blocks same-symbol churn by requiring a higher score after an exit before that symbol can be re-entered.
+- It blocks same-symbol churn by requiring a higher score after a losing exit before that symbol can be re-entered; take-profit winners may come straight back through the normal checks.
 - It has an inverse ETF mode so the bounded inverse set is always scanned with the top-volume list and trades through the normal entry path, inverse ETF entries can be excluded, or an explicit inverse-only profile can use the bounded inverse set. There is no separate SPY/QQQ downturn gate; inverse ETFs pass or fail through the normal entry-quality checks.
 - It uses market orders against the Alpaca paper endpoint.
 - It keeps entries fractional and manages exits with fractional DAY stop/limit orders using the configured take-profit and stop-loss percentages.

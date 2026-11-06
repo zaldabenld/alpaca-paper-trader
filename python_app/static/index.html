@@ -601,6 +601,18 @@
                     Max Buys per Symbol per Day (0 = off)
                     <input id="maxEntriesPerSymbolPerDay" type="number" min="0" step="1" value="0" />
                   </label>
+                  <label class="check-row" title="Buy only while the price is still rising: the last 1-minute bar closed at or above the one before it, and the latest trade is not below that earlier close.">
+                    <input id="requireRisingPrice" type="checkbox" checked />
+                    <span>Require rising price</span>
+                  </label>
+                  <label title="Most new positions the bot may open in one 5-second scan. Spreads out the burst of buys when the open guard lifts.">
+                    Max New Buys per Scan (0 = off)
+                    <input id="maxEntriesPerScan" type="number" min="0" max="50" step="1" value="2" />
+                  </label>
+                  <label title="After a buy is sent, wait this long before sending another.">
+                    Seconds Between New Buys (0 = off)
+                    <input id="entrySpacingSeconds" type="number" min="0" max="600" step="5" value="0" />
+                  </label>
                   <label title="When RSI or SMI is near its top, require at least this much momentum.">
                     Late Momentum Floor %
                     <input id="lateMomentumFloorPercent" type="number" min="0" step="0.05" value="0.5" />

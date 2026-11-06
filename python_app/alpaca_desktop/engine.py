@@ -486,6 +486,7 @@ PROFILE_STRATEGY_KEYS = {
     "min_session_pullback_percent",
     "max_entry_rsi",
     "max_entries_per_symbol_per_day",
+    "require_rising_price",
     "smi_period",
     "min_smi",
     "atr_period",
@@ -585,6 +586,14 @@ class AppConfig(BaseModel):
     orb_minutes: int = 15
     orb_max_breakout_percent: Decimal = Decimal("1.0")
     max_entries_per_symbol_per_day: int = 0
+    # Buy only while the price is still rising: the last completed 1-min bar closed at or above the
+    # bar before it, and the latest streamed trade (when fresh) is not below that earlier close.
+    require_rising_price: bool = True
+    # Entry pacing per account: at most this many new buys per scan, and no new buy within this
+    # many seconds of the last one (0 = off). Spreads the burst that fires the moment a guard lifts.
+    # Spacing is a timed lock on the entry path, so it stays off unless the user turns it on.
+    max_entries_per_scan: int = 2
+    entry_spacing_seconds: int = 0
     flatten_on_daily_loss: bool = False
     # Sell every position this many minutes before the close (0 = off; for pure day trading).
     flatten_before_close_minutes: int = 0
@@ -845,6 +854,11 @@ class AppConfig(BaseModel):
         self.daily_pick_count = min(max(int(self.daily_pick_count), 1), DAILY_LIST_MAX)
         self.daily_max_symbols = min(max(int(self.daily_max_symbols), self.daily_pick_count), DAILY_LIST_MAX)
         self.orb_minutes = min(max(int(self.orb_minutes), 5), 60)
+        self.max_entries_per_scan = min(max(int(self.max_entries_per_scan), 0), 50)
+        self.entry_spacing_seconds = min(max(int(self.entry_spacing_seconds), 0), 600)
+        if self.min_session_pullback_percent > 0 and self.max_session_pullback_percent > 0:
+            # A pullback floor above the cap would block every entry.
+            self.min_session_pullback_percent = min(self.min_session_pullback_percent, self.max_session_pullback_percent)
         self.orb_max_breakout_percent = min(max(self.orb_max_breakout_percent, Decimal("0")), Decimal("10"))
         self.min_buy_volume_ratio = min(self.min_buy_volume_ratio, Decimal("1"))
         if self.volume_multiplier < 0:
@@ -1790,6 +1804,12 @@ def atr_scaled_cap(cap: Decimal, snapshot: Any, config: AppConfig) -> Decimal:
     return cap * atr / reference
 
 
+def floor_hold_reason(label: str, value: Decimal, floor: Decimal) -> str:
+    if value < 0 or floor <= 0:
+        return f"Hold ({label} {value:+.2f}%)"
+    return f"Hold ({label} {value:+.2f}% < {floor:.2f}%)"
+
+
 def below_entry_floor(value: Decimal | None, floor: Decimal) -> bool:
     if value is None:
         return True
@@ -1864,6 +1884,8 @@ class TraderEngine:
         self.order_reject_holds: dict[tuple[str, str], datetime] = {}
         self.protective_order_reject_holds: dict[tuple[str, str], datetime] = {}
         self.last_scan_log_at = 0.0
+        self.last_entry_submitted_at = 0.0
+        self.latest_stream_trades: dict[str, tuple[Decimal, datetime]] = {}
         self.dashboard_cache_last_save = 0.0
         self.daily_pl_history_cache: tuple[float, str, dict[str, Any]] | None = None
         self.last_refresh = ""
@@ -2275,6 +2297,7 @@ class TraderEngine:
             self.processed_reentry_exit_ids = set()
             self.reentry_reset_at = datetime.now(timezone.utc)
             self.last_scan_log_at = 0.0
+            self.last_entry_submitted_at = 0.0
 
     def require_trading_client(self) -> TradingClient:
         if self.trading_client is None:
@@ -2548,6 +2571,7 @@ class TraderEngine:
                         candidates.append(candidate)
 
                 candidates.sort(key=lambda item: (-float(item["score"]), item["rank"], item["symbol"]))
+                entries_this_scan = 0
                 for candidate in candidates:
                     symbol = str(candidate["symbol"])
                     if symbol in position_symbols or symbol in pending_entry_symbols:
@@ -2555,6 +2579,13 @@ class TraderEngine:
                         continue
                     if config.max_open_positions > 0 and potential_position_count >= config.max_open_positions:
                         self.strategy_state.last_action[symbol] = "Hold (max positions)"
+                        continue
+                    spacing_hold = self.entry_spacing_hold_reason(config)
+                    if spacing_hold:
+                        self.strategy_state.last_action[symbol] = spacing_hold
+                        continue
+                    if config.max_entries_per_scan > 0 and entries_this_scan >= config.max_entries_per_scan:
+                        self.strategy_state.last_action[symbol] = f"Hold (entry cap {config.max_entries_per_scan}/scan)"
                         continue
                     symbol_orders = [item for item in flat_orders if str(item.get("symbol", "")).upper() == symbol]
                     risk_account = dict(account_dict)
@@ -2574,6 +2605,8 @@ class TraderEngine:
                         self.log(level, message)
                     stop_now = stop_now or stop_rule
                     if reservation and reservation.get("side") == "buy":
+                        entries_this_scan += 1
+                        self.last_entry_submitted_at = time.monotonic()
                         reserved_symbol = str(reservation.get("symbol") or symbol).upper()
                         reserved_notional = decimal_value(reservation.get("notional"))
                         if reserved_symbol not in position_symbols and reserved_symbol not in pending_entry_symbols:
@@ -3008,6 +3041,8 @@ class TraderEngine:
 
         updated = False
         with self.lock:
+            if count_volume:  # live stream trades only; REST backfills can carry hours-old "latest" trades
+                self.remember_stream_trade(symbol, price, raw.get("timestamp"))
             quote = self.latest_quotes.get(symbol, {})
             for row in self.top_volume_rows:
                 if row.get("symbol") != symbol:
@@ -3344,6 +3379,15 @@ class TraderEngine:
             return ""
         return f"market closes in {max(0, int((seconds_left + 59) // 60))} min; selling everything {minutes} min before the close"
 
+    def entry_spacing_hold_reason(self, config: AppConfig) -> str:
+        seconds = int(config.entry_spacing_seconds or 0)
+        if seconds <= 0 or not self.last_entry_submitted_at:
+            return ""
+        elapsed = time.monotonic() - self.last_entry_submitted_at
+        if elapsed >= seconds:
+            return ""
+        return f"Hold (entry spacing {int(seconds - elapsed) + 1}s)"
+
     def entry_quality_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
         limits = entry_profile_limits(config)
         inverse_reason = self.inverse_etf_hold_reason(symbol, config)
@@ -3358,19 +3402,21 @@ class TraderEngine:
             return f"Hold (RSI {snapshot.rsi:.1f})"
         if config.max_entry_rsi > 0 and snapshot.rsi > config.max_entry_rsi:
             return f"Hold (RSI {snapshot.rsi:.1f} above {config.max_entry_rsi})"
+        if snapshot.rsi > config.buy_rsi_max:
+            return f"Hold (RSI {snapshot.rsi:.1f} above {config.buy_rsi_max})"
         if snapshot.bias == "Waiting":
             return "Hold (trend warming)"
         if snapshot.bias != "Bullish":
             return f"Hold (trend {snapshot.bias})"
         if snapshot.momentum_percent is None:
             return "Hold (momentum warming)"
-        if snapshot.momentum_percent < Decimal("0"):
-            return f"Hold (momentum {snapshot.momentum_percent:+.2f}%)"
+        if below_entry_floor(snapshot.momentum_percent, config.min_momentum_percent):
+            return floor_hold_reason("momentum", snapshot.momentum_percent, config.min_momentum_percent)
         recent_momentum = getattr(snapshot, "recent_momentum_percent", None)
         if recent_momentum is None:
             return "Hold (recent momentum warming)"
-        if recent_momentum < Decimal("0"):
-            return f"Hold (recent momentum {recent_momentum:+.2f}%)"
+        if below_entry_floor(recent_momentum, limits["min_recent_momentum"]):
+            return floor_hold_reason("recent momentum", recent_momentum, limits["min_recent_momentum"])
         late_floor = limits["late_momentum_floor"]
         if late_floor > 0 and snapshot.rsi >= config.buy_rsi_max - Decimal("3") and snapshot.momentum_percent < late_floor:
             return f"Hold (late RSI {snapshot.rsi:.1f}, momentum {snapshot.momentum_percent:+.2f}%)"
@@ -3378,8 +3424,8 @@ class TraderEngine:
             return f"Hold (late SMI {snapshot.smi:.1f}, momentum {snapshot.momentum_percent:+.2f}%)"
         if getattr(snapshot, "long_momentum_percent", None) is None:
             return "Hold (long momentum warming)"
-        if snapshot.long_momentum_percent < Decimal("0"):
-            return f"Hold (long momentum {snapshot.long_momentum_percent:+.2f}%)"
+        if below_entry_floor(snapshot.long_momentum_percent, limits["min_long_momentum"]):
+            return floor_hold_reason("long momentum", snapshot.long_momentum_percent, limits["min_long_momentum"])
         if getattr(snapshot, "session_change_percent", None) is None:
             return "Hold (session trend warming)"
         if below_entry_floor(snapshot.session_change_percent, limits["min_session_change"]):
@@ -3392,6 +3438,20 @@ class TraderEngine:
             return f"Hold (below VWAP {snapshot.vwap_distance_percent:+.2f}%)"
         if snapshot.vwap_distance_percent > atr_scaled_cap(limits["max_vwap_extension"], snapshot, config):
             return f"Hold (extended above VWAP {snapshot.vwap_distance_percent:+.2f}%)"
+        session_pullback = getattr(snapshot, "session_pullback_percent", None)
+        if session_pullback is None:
+            return "Hold (session pullback warming)"
+        if session_pullback > limits["max_session_pullback"]:
+            return f"Hold (pulled back {session_pullback:.2f}% from session high)"
+        recent_pullback = getattr(snapshot, "recent_pullback_percent", None)
+        if recent_pullback is None:
+            return "Hold (recent pullback warming)"
+        if recent_pullback > limits["max_recent_pullback"]:
+            return f"Hold (pulled back {recent_pullback:.2f}% from recent high)"
+        if config.require_rising_price:
+            rising_reason = self.rising_price_hold_reason(symbol, snapshot)
+            if rising_reason:
+                return rising_reason
         if config.min_session_pullback_percent > 0:
             pullback = getattr(snapshot, "session_pullback_percent", None)
             if pullback is None:
@@ -3400,14 +3460,54 @@ class TraderEngine:
                 return f"Hold (no pullback yet {pullback:.2f}%)"
         if snapshot.smi is None:
             return "Hold (SMI warming)"
+        if snapshot.smi < config.min_smi:
+            return f"Hold (SMI {snapshot.smi:.1f} below {config.min_smi})"
         if snapshot.relative_volume is None:
             return "Hold (volume warming)"
+        if not getattr(snapshot, "volume_ok", True):
+            avg_volume = getattr(snapshot, "avg_volume", None)
+            if config.min_avg_volume > 0 and avg_volume is not None and avg_volume < config.min_avg_volume:
+                return f"Hold (avg volume {avg_volume:,.0f} below {config.min_avg_volume:,.0f})"
+            return f"Hold (volume {snapshot.relative_volume:.2f}x of average)"
         flow_reason = self.order_flow_hold_reason(symbol, config)
         if flow_reason:
             return flow_reason
         asset_reason = self.asset_tradeability_hold_reason(symbol)
         if asset_reason:
             return asset_reason
+        return ""
+
+    def remember_stream_trade(self, symbol: str, price: Decimal, timestamp: Any) -> None:
+        """Keep the newest streamed trade per symbol, judged by the trade's own timestamp (lock held)."""
+        traded_at = self.parse_order_datetime(timestamp) or datetime.now(timezone.utc)
+        current = self.latest_stream_trades.get(symbol)
+        if current is None or traded_at >= current[1]:
+            self.latest_stream_trades[symbol] = (price, traded_at)
+
+    def latest_stream_price(self, symbol: str, max_age_seconds: float = 120.0) -> Decimal | None:
+        """The last streamed trade price for symbol when it is fresh; None otherwise (no API call)."""
+        with self.lock:
+            entry = self.latest_stream_trades.get(symbol.strip().upper())
+        if not entry:
+            return None
+        price, traded_at = entry
+        if price <= 0 or (datetime.now(timezone.utc) - traded_at).total_seconds() > max_age_seconds:
+            return None
+        return price
+
+    def rising_price_hold_reason(self, symbol: str, snapshot: Any) -> str:
+        """Hold unless the price is still rising: the last completed bar closed at or above the one
+        before it, and the latest streamed trade (if fresh) has not fallen below that last close."""
+        change = getattr(snapshot, "last_bar_change_percent", None)
+        if change is None:
+            return "Hold (last bar warming)"
+        if change < Decimal("0"):
+            return f"Hold (last bar {change:+.2f}%)"
+        last_close = getattr(snapshot, "price", None)
+        live = self.latest_stream_price(symbol)
+        if live is not None and last_close is not None and last_close > 0 and live < last_close:
+            slip = percent_change(live, last_close)
+            return f"Hold (price slipping {slip:+.2f}% since last bar)"
         return ""
 
     def inverse_etf_hold_reason(self, symbol: str, config: AppConfig) -> str:
@@ -3448,8 +3548,10 @@ class TraderEngine:
         ratio = self.order_flow_ratio(symbol)
         if ratio is None:
             return ""
-        hard_floor = max(Decimal("0.45"), config.min_buy_volume_ratio - Decimal("0.02"))
-        if ratio < hard_floor:
+        floor = config.min_buy_volume_ratio
+        if floor <= 0:
+            return ""
+        if ratio < floor:
             return f"Hold (buy flow {ratio * Decimal('100'):.1f}%)"
         return ""
 
@@ -4442,7 +4544,7 @@ class TraderEngine:
             )
             events.append(("info", f"Dry run: would place take-profit limit for {qty_to_sell} shares of {symbol} at {limit_price}."))
             self.mark_exit_today(symbol)
-            self.record_reentry_floor(symbol, snapshot, reason)
+            self.record_loss_reentry_floor(symbol, snapshot, reason)
             return True, events
         try:
             submitted = self.submit_order_request(order)
@@ -4475,7 +4577,7 @@ class TraderEngine:
         events.append(("success", f"Submitted take-profit limit for {symbol} at {limit_price}: {submitted_id}"))
         self.hold_submitted_order(symbol, OrderSide.SELL)
         self.mark_exit_today(symbol)
-        self.record_reentry_floor(symbol, snapshot, reason)
+        self.record_loss_reentry_floor(symbol, snapshot, reason)
         self.mark_trade(symbol, "Take-profit limit submitted")
         return True, events
 
@@ -4502,7 +4604,7 @@ class TraderEngine:
             )
             events.append(("info", f"Dry run: would sell {qty_to_sell} shares of {symbol}."))
             self.mark_exit_today(symbol)
-            self.record_reentry_floor(symbol, snapshot, reason)
+            self.record_loss_reentry_floor(symbol, snapshot, reason)
         else:
             try:
                 submitted = self.submit_order_request(order)
@@ -4539,7 +4641,7 @@ class TraderEngine:
             events.append(("success", f"Submitted sell order for {symbol}: {submitted_id}"))
             self.hold_submitted_order(symbol, OrderSide.SELL)
             self.mark_exit_today(symbol)
-            self.record_reentry_floor(symbol, snapshot, reason)
+            self.record_loss_reentry_floor(symbol, snapshot, reason)
         self.mark_trade(symbol, "Sell submitted")
         return events
 
@@ -4817,6 +4919,12 @@ class TraderEngine:
     def mark_trade(self, symbol: str, action: str) -> None:
         self.strategy_state.last_trade_at[symbol] = datetime.now(timezone.utc)
         self.strategy_state.last_action[symbol] = action
+
+    def record_loss_reentry_floor(self, symbol: str, snapshot: Any, reason: str = "") -> None:
+        # Only a losing exit raises the re-entry bar; a take-profit winner may come straight back
+        # through the normal entry checks.
+        if self.is_stop_loss_exit_reason(reason):
+            self.record_reentry_floor(symbol, snapshot, reason)
 
     def record_reentry_floor(self, symbol: str, snapshot: Any, reason: str = "") -> None:
         boost = self.config.reentry_score_boost
@@ -5285,14 +5393,12 @@ class TraderEngine:
     ) -> bool:
         if str(item.get("side") or "").lower() != "sell":
             return False
+        # A stop-loss fill always raises the bar (OPERATING.md); otherwise only a losing exit does.
+        if self.is_stop_loss_exit_reason(reason) or self.protective_exit_kind(item) == "stop_loss":
+            return True
         if realized_pl is not None:
-            return True
-        if self.is_stop_loss_exit_reason(reason):
-            return True
-        if self.is_take_profit_exit_reason(reason):
-            return True
-        role = self.order_role(item, {str(item.get("symbol") or "").upper()})
-        return role in {"Strategy Exit", "Protective Exit", "Exit/Protective"}
+            return realized_pl < 0
+        return False
 
     def closed_order_identity(self, item: dict[str, Any]) -> str:
         for key in ("id", "client_order_id"):
