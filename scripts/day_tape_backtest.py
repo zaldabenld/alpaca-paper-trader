@@ -5,8 +5,10 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +20,7 @@ from alpaca_desktop.backtester import StrategyEvaluationContext
 from alpaca_desktop.engine import (
     AppConfig,
     DASHBOARD_TOP_LIMIT,
+    MARKET_TIMEZONE,
     PROFILE_STRATEGY_KEYS,
     TOP_VOLUME_SOURCE,
     TraderEngine,
@@ -54,6 +57,9 @@ BACKTEST_STRATEGY_KEYS = set(PROFILE_STRATEGY_KEYS) | {
     "score_weight_recent_pullback_penalty",
     "score_weight_smi_overheat_penalty",
     "extension_atr_reference_percent",
+    "max_entries_per_scan",
+    "entry_spacing_seconds",
+    "breakeven_at_percent",
 }
 
 
@@ -260,6 +266,9 @@ def replay_config(
 ) -> AppConfig:
     payload = dict(raw_config or {})
     payload.setdefault("symbols", ["SPY", "QQQ"])
+    # Tapes recorded before entry pacing existed replay without it unless an override sets it.
+    payload.setdefault("max_entries_per_scan", 0)
+    payload.setdefault("entry_spacing_seconds", 0)
     payload.update(
         {
             # Replay does not support the daily relative-volume list; always use the recorded most-active universe.
@@ -282,6 +291,42 @@ def replay_config(
         }
     )
     return retune_strategy_config(AppConfig(**payload))
+
+
+def parse_event_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def recorded_session_close(event: dict[str, Any], payload: dict[str, Any]) -> datetime | None:
+    """The session close a scan recorded, e.g. "Nov 06, 03:00 PM CST" (the recorder's local time).
+
+    The recorder's UTC offset comes from the event's UTC "time" and local "time_display"; this keeps
+    half days (13:00 ET close) right instead of assuming 16:00 ET.
+    """
+    clock = payload.get("market_clock") if isinstance(payload.get("market_clock"), dict) else {}
+    event_time = parse_event_time(str(event.get("time") or ""))
+    display = str(event.get("time_display") or "")
+    text = str(clock.get("next_close") or "").strip()
+    if not clock.get("is_open") or event_time is None or not text or display.count(":") != 2:
+        return None
+    try:
+        hours, minutes, _ = (int(part) for part in display.split(":"))
+    except ValueError:
+        return None
+    utc = event_time.astimezone(timezone.utc)
+    offset = (hours * 60 + minutes - (utc.hour * 60 + utc.minute)) % 1440
+    if offset >= 720:
+        offset -= 1440
+    tz = timezone(timedelta(minutes=offset))
+    try:
+        local_close = datetime.strptime(f"{event_time.astimezone(tz).year} {text.rsplit(' ', 1)[0]}", "%Y %b %d, %I:%M %p")
+    except ValueError:
+        return None
+    return local_close.replace(tzinfo=tz)
 
 
 def event_payload(event: dict[str, Any]) -> dict[str, Any]:
@@ -378,6 +423,9 @@ class DayTapeBacktester:
         self.top_volume_contexts = 0
         self.strategy_scan_top_volume_contexts = 0
         self.parse_errors = 0
+        self.entry_guard_holds = 0
+        self.last_entry_at: datetime | None = None
+        self.session_close: datetime | None = None
         self.top_volume_sources: set[str] = set()
         self.current_top_volume_source = ""
         self.evaluations_by_top_volume_source: dict[str, int] = {}
@@ -476,7 +524,22 @@ class DayTapeBacktester:
             return "missing_top_volume", "missing_top_volume"
         return "manual", "manual"
 
+    def entry_guard_detail(self, event_time: str) -> str:
+        """Apply the live open/close entry guards at the event's time (live passes entries_allowed=False)."""
+        now = parse_event_time(event_time)
+        if now is None:
+            return ""
+        close = self.session_close
+        if close is None or close.astimezone(MARKET_TIMEZONE).date() != now.astimezone(MARKET_TIMEZONE).date():
+            close = now.astimezone(MARKET_TIMEZONE).replace(hour=16, minute=0, second=0, microsecond=0)
+        clock = SimpleNamespace(is_open=True, timestamp=now, next_close=close)
+        config = self.engine.config
+        return self.engine.entry_open_guard_message(clock, config) or self.engine.entry_close_guard_message(clock, config)
+
     def evaluate_entries(self, event_time: str = "") -> None:
+        if self.entry_guard_detail(event_time):
+            self.entry_guard_holds += 1
+            return
         self.evaluations += 1
         universe_source, evaluation_source = self.evaluation_universe()
         self.evaluations_by_top_volume_source[evaluation_source] = (
@@ -511,6 +574,10 @@ class DayTapeBacktester:
             )
 
         candidates.sort(key=lambda item: (-float(item["score"]), item["rank"], item["symbol"]))
+        accepted_this_scan = 0
+        entry_cap = int(self.engine.config.max_entries_per_scan or 0)
+        spacing = int(self.engine.config.entry_spacing_seconds or 0)
+        now = parse_event_time(event_time)
         for candidate in candidates:
             symbol = str(candidate.get("symbol") or "").strip().upper()
             if not symbol or symbol in self.positions:
@@ -518,6 +585,16 @@ class DayTapeBacktester:
             if len(self.positions) >= self.engine.config.max_open_positions:
                 self.rejected_candidates.append(
                     {"time": event_time, "symbol": symbol, "reason": "Hold (max positions)", "indicators": {}}
+                )
+                continue
+            if spacing > 0 and now is not None and self.last_entry_at is not None and (now - self.last_entry_at).total_seconds() < spacing:
+                self.rejected_candidates.append(
+                    {"time": event_time, "symbol": symbol, "reason": f"Hold (entry spacing {spacing}s)", "indicators": {}}
+                )
+                continue
+            if entry_cap > 0 and accepted_this_scan >= entry_cap:
+                self.rejected_candidates.append(
+                    {"time": event_time, "symbol": symbol, "reason": f"Hold (entry cap {entry_cap}/scan)", "indicators": {}}
                 )
                 continue
             snapshot = self.boundary.strategy.snapshot(symbol)
@@ -553,8 +630,11 @@ class DayTapeBacktester:
                 "top_volume_source": evaluation_source if universe_source == "top_volume" else "",
                 "entry_indicators": entry_indicators(snapshot.as_dict()),
             }
+            self.engine.position_peak_prices.pop(symbol, None)  # a fresh position starts its own peak
             self.positions[symbol] = ReplayPosition(symbol, qty, snapshot.price, entry_event)
             self.accepted_trades.append(entry_event)
+            accepted_this_scan += 1
+            self.last_entry_at = now
             self.account["buying_power"] = str(decimal_value(self.account["buying_power"]) - notional)
 
     def handle_event(self, event: dict[str, Any]) -> None:
@@ -567,6 +647,7 @@ class DayTapeBacktester:
         elif kind == "market_bar":
             self.ingest_bar(payload)
         elif kind == "strategy_scan":
+            self.session_close = recorded_session_close(event, payload) or self.session_close
             self.update_config(payload)
             self.apply_strategy_scan_top_volume(payload)
             self.evaluate_entries(str(event.get("time") or ""))
@@ -585,6 +666,7 @@ class DayTapeBacktester:
                 "strategy_scan_top_volume_contexts": self.strategy_scan_top_volume_contexts,
                 "market_bars": self.market_bars,
                 "evaluations": self.evaluations,
+                "entry_guard_holds": self.entry_guard_holds,
                 "accepted_trades": len(self.accepted_trades),
                 "closed_trades": len(self.closed_trades),
                 "open_positions": len(self.positions),
@@ -634,6 +716,7 @@ def print_summary(summary: dict[str, Any]) -> None:
     if isinstance(evaluations_by_source, dict):
         print(f"  {expected_source} evaluations: {int(evaluations_by_source.get(expected_source) or 0):,}")
     print(f"  evaluations: {counts['evaluations']:,}")
+    print(f"  scans held by entry guards: {counts.get('entry_guard_holds', 0):,}")
     print(f"  top-volume contexts: {counts.get('top_volume_contexts', 0):,}")
     print(f"  scan-embedded top-volume contexts: {counts.get('strategy_scan_top_volume_contexts', 0):,}")
     print(f"  accepted trades: {counts['accepted_trades']:,}")

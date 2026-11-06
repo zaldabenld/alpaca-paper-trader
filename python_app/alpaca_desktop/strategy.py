@@ -99,6 +99,8 @@ class StrategySnapshot:
     volume_ok: bool
     bias: str
     bars: int
+    previous_close: Decimal | None = None
+    last_bar_change_percent: Decimal | None = None
     last_action: str = ""
     entry_score: Decimal | None = None
 
@@ -133,6 +135,8 @@ class StrategySnapshot:
             "smi_raw": float(self.smi) if self.smi is not None else 0,
             "atr": f"{self.atr_percent:.2f}%" if self.atr_percent is not None else "-",
             "atr_raw": float(self.atr_percent) if self.atr_percent is not None else 0,
+            "last_bar_change": f"{self.last_bar_change_percent:+.2f}%" if self.last_bar_change_percent is not None else "-",
+            "last_bar_change_raw": float(self.last_bar_change_percent) if self.last_bar_change_percent is not None else 0,
             "volume_ok": "Yes" if self.volume_ok else "No",
             "bias": self.bias,
             "bars": self.bars,
@@ -221,8 +225,16 @@ class StrategyState:
         volatility_percent = _average_abs_percent_change(closes, rsi_period)
         momentum_percent = _percent_change_over(closes, momentum_period)
         recent_momentum_percent = _percent_change_over(closes, 3)
+        # Longer momentum over the regular session. Until the full window exists it is measured from
+        # the first session bar (so it equals the session change), and it is "warming" until the
+        # session is clearly longer than the short momentum window (it used to fall back silently).
         long_momentum_period = max(30, long_period * 3, momentum_period * 5)
-        long_momentum_percent = _percent_change_over(session_closes, long_momentum_period)
+        long_momentum_window = min(long_momentum_period, len(session_closes) - 1)
+        long_momentum_percent = None
+        if long_momentum_window >= max(momentum_period * 2, 10):
+            long_momentum_percent = _percent_change_over(session_closes, long_momentum_window)
+        previous_close = closes[-2] if len(closes) >= 2 else None
+        last_bar_change_percent = _percent_change_over(closes, 1)
         smi = _smi(closes, highs, lows, smi_period)
         atr_percent = _atr_percent(highs, lows, closes, atr_period)
         session_change_percent = None
@@ -233,8 +245,6 @@ class StrategyState:
         recent_points = history[-5:]
         recent_high = max((point.high for point in recent_points), default=None)
         recent_pullback_percent = _pullback_from_high_percent(price, recent_high)
-        if long_momentum_percent is None:
-            long_momentum_percent = session_change_percent
         vwap = _vwap(session_points)
         vwap_distance_percent = _percent_change(price, vwap) if price is not None and vwap is not None else None
         current_volume = volumes[-1] if volumes else None
@@ -277,6 +287,8 @@ class StrategyState:
             volume_ok=volume_ok,
             bias=bias,
             bars=len(closes),
+            previous_close=previous_close,
+            last_bar_change_percent=last_bar_change_percent,
             last_action=self.last_action.get(clean, ""),
             entry_score=self.entry_score.get(clean),
         )
