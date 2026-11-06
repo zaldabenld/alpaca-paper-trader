@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .app_settings import AppWideSettings
 from .currentness import currentness_payload
 from .engine import (
     CONFIG_VERSION,
@@ -365,6 +366,15 @@ async def post_settings(payload: SettingsPayload) -> dict[str, str]:
     manager.replace_from_settings(preserve_credentials(accounts), payload.selected_account_id)
     save_manager_settings()
     return {"status": "saved"}
+
+
+@app.post("/api/app-settings")
+async def post_app_settings(payload: AppWideSettings) -> dict[str, Any]:
+    stream_limit_changed = manager.set_app_settings(payload)
+    save_manager_settings()
+    if stream_limit_changed:
+        await asyncio.to_thread(manager.ensure_market_data_stream, False, True)
+    return {"app_settings": manager.app_settings_payload()}
 
 
 @app.post("/api/profile")
@@ -736,6 +746,7 @@ def load_saved_settings_to_manager() -> None:
             source="settings_file",
         )
     selected_account_id = str(raw.get("selected_account_id") or "")
+    load_app_settings(raw)
     if isinstance(raw.get("custom_profiles"), dict):
         manager.set_custom_profiles(raw.get("custom_profiles") or {})
     account_settings: list[AccountSettings] = []
@@ -915,6 +926,19 @@ def preserve_credentials(accounts: list[AccountSettings]) -> list[AccountSetting
     return preserved
 
 
+def load_app_settings(raw: dict[str, Any]) -> None:
+    saved = raw.get("app_settings")
+    if saved is None:
+        manager.set_app_settings(AppWideSettings())
+        return
+    try:
+        manager.set_app_settings(AppWideSettings.model_validate(saved))
+    except Exception as exc:
+        # Run on the defaults, but keep the saved value on disk so a later save does not erase it.
+        manager.set_app_settings(AppWideSettings(), load_failed=True)
+        manager.record_settings_load_error(f"App-wide settings could not be loaded; using defaults: {exc}", source="app_settings")
+
+
 def save_manager_settings() -> None:
     snapshot = manager.settings(include_keys=True)
     existing_raw = load_settings()
@@ -943,10 +967,14 @@ def save_manager_settings() -> None:
                 "config": item.get("config", AppConfig().model_dump(mode="json")),
             }
         )
+    app_settings = snapshot.get("app_settings", AppWideSettings().model_dump(mode="json"))
+    if manager.app_settings_load_failed and "app_settings" in existing_raw:
+        app_settings = existing_raw["app_settings"]
     save_settings(
         {
             "selected_account_id": snapshot.get("selected_account_id", ""),
             "accounts": accounts,
             "custom_profiles": snapshot.get("custom_profiles", {}),
+            "app_settings": app_settings,
         }
     )

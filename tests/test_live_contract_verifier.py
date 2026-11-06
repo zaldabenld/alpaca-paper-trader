@@ -364,6 +364,35 @@ class LiveContractVerifierTests(unittest.TestCase):
         failed = {item["name"] for item in module.verify_payload(payload)["checks"] if not item["ok"]}
         self.assertNotIn("account_1.top_volume_universe", failed)
 
+    def test_account_settings_set_the_expected_list_and_inverse_set(self) -> None:
+        module = load_verifier_module()
+        payload = deepcopy(passing_payload())
+        selected = payload["account_states"][0]["selected"]
+        selected["config"]["most_active_count"] = 10
+        selected["config"]["inverse_etf_symbols"] = ["SH"]
+        selected["trading_symbols"] = top_volume_symbols()[:10] + ["SH"]
+        selected["trading_symbol_count"] = 11
+        payload["state"]["accounts"][0]["trading_symbol_count"] = 11
+        failed = {item["name"] for item in module.verify_payload(payload)["checks"] if not item["ok"]}
+        self.assertNotIn("account_1.top_volume_universe", failed)
+
+        # Still trading the whole list breaks the account's own settings.
+        selected["trading_symbols"] = allow_mode_symbols()
+        selected["trading_symbol_count"] = len(allow_mode_symbols())
+        payload["state"]["accounts"][0]["trading_symbol_count"] = len(allow_mode_symbols())
+        failed = {item["name"] for item in module.verify_payload(payload)["checks"] if not item["ok"]}
+        self.assertIn("account_1.top_volume_universe", failed)
+
+    def test_stream_limit_comes_from_the_stream_health(self) -> None:
+        module = load_verifier_module()
+        payload = deepcopy(passing_payload())
+        stream = payload["dashboard"]["market_stream"]
+        stream["symbol_limit"] = 10
+        stream["dashboard_symbols"] = 10
+        stream["bar_symbols"] = 10
+        failed = {item["name"] for item in module.verify_payload(payload)["checks"] if not item["ok"]}
+        self.assertNotIn("market_stream.dashboard_symbols", failed)
+
     def daily_rvol_payload(self) -> dict[str, object]:
         """Account 1 switched to the daily RVOL universe with a picked set."""
         payload = deepcopy(passing_payload())

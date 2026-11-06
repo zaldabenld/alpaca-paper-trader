@@ -535,6 +535,10 @@ select {
   margin-top: 8px;
 }
 
+.compact-section > h3 + .helper-text {
+  margin: 0 0 10px;
+}
+
 .credential-status {
   background: var(--surface-2);
   border: 1px solid var(--line);

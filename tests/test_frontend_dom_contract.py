@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 import unittest
 
-from .helpers import REPO_ROOT
+from .helpers import REPO_ROOT, configure_test_environment
+
+configure_test_environment()
+
+from alpaca_desktop import engine as engine_module
 
 APP_JS = REPO_ROOT / "python_app" / "static" / "app.js"
 INDEX_HTML = REPO_ROOT / "python_app" / "static" / "index.html"
@@ -19,7 +23,7 @@ class FrontendDomContractTests(unittest.TestCase):
         for match in re.finditer(r'querySelector\("#([A-Za-z0-9_-]+)"\)', self.app_js):
             ids_from_js.add(match.group(1))
         for match in re.finditer(
-            r'\b(readNumber|readInt|backtestNumber|backtestString)\("([A-Za-z0-9_-]+)"',
+            r'\b(readNumber|readInt|backtestNumber|backtestString|readAppInt)\("([A-Za-z0-9_-]+)"',
             self.app_js,
         ):
             ids_from_js.add(match.group(2))
@@ -110,6 +114,33 @@ class FrontendDomContractTests(unittest.TestCase):
         columns = re.findall(r'"([a-z_]+)"', self.app_js[columns_start:self.app_js.index("],", columns_start)])
         self.assertEqual(len(headers), len(columns))
         self.assertIn("protection", columns)
+
+    def test_js_strategy_profile_keys_match_python(self) -> None:
+        profile_start = self.app_js.index("const strategyProfileKeys = new Set([")
+        profile_text = self.app_js[profile_start : self.app_js.index("]);", profile_start)]
+        js_keys = set(re.findall(r'"([a-z0-9_]+)"', profile_text))
+        python_keys = set(engine_module.PROFILE_STRATEGY_KEYS)
+        only_js = sorted(js_keys - python_keys)
+        only_python = sorted(python_keys - js_keys)
+        self.assertEqual(
+            python_keys,
+            js_keys,
+            f"only in js strategyProfileKeys: {only_js}; only in python PROFILE_STRATEGY_KEYS: {only_python}",
+        )
+
+    def test_read_config_covers_every_appconfig_field(self) -> None:
+        start = self.app_js.index("function readConfig() {")
+        body = self.app_js[start : self.app_js.index("\n  };", start)]
+        js_keys = set(re.findall(r"^\s{4}([a-z_0-9]+):", body, re.MULTILINE))
+        required = set(engine_module.AppConfig.model_fields) - {"trade_size_migration", "config_version"}
+        missing = sorted(required - js_keys)
+        self.assertEqual([], missing, f"readConfig() is missing AppConfig fields: {missing}")
+
+    def test_app_settings_are_wired(self) -> None:
+        self.assertIn('postJson("/api/app-settings", readAppSettings())', self.app_js)
+        self.assertIn('els.saveAppSettingsButton.addEventListener("click", saveAppSettings);', self.app_js)
+        for element_id in ("saveAppSettingsButton", "appSettingsStatus"):
+            self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
 
 
 if __name__ == "__main__":

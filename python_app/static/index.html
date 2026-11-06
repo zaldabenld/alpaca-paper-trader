@@ -645,6 +645,87 @@
                     Min Avg Vol
                     <input id="minAvgVolume" type="number" min="0" step="1000" value="0" />
                   </label>
+                  <label title="A stock with this 1-minute ATR% gets the flat VWAP and session caps; one twice as volatile gets twice the room (0 = off).">
+                    ATR Extension Reference % (0 = off)
+                    <input id="extensionAtrReferencePercent" type="number" min="0" max="5" step="0.05" value="0" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="compact-section">
+                <h3>Score Weights</h3>
+                <small class="helper-text">How much each signal adds to the entry score. Penalties subtract. 0 turns a signal off.</small>
+                <input id="scoreWeightPullbackPenalty" type="hidden" value="0" />
+                <input id="scoreWeightOverboughtPenalty" type="hidden" value="0" />
+                <div class="strategy-grid">
+                  <label title="Score points added when RSI is in the buy range.">
+                    RSI
+                    <input id="scoreWeightRsi" type="number" min="0" max="100" step="0.5" value="5" />
+                  </label>
+                  <label title="Score points added for today's volume versus its recent average.">
+                    Relative volume
+                    <input id="scoreWeightRelativeVolume" type="number" min="0" max="100" step="0.5" value="13" />
+                  </label>
+                  <label title="Score points added for the short-term momentum check.">
+                    Momentum
+                    <input id="scoreWeightMomentum" type="number" min="0" max="100" step="0.5" value="14" />
+                  </label>
+                  <label title="Score points added for momentum over the last few bars.">
+                    Recent momentum
+                    <input id="scoreWeightRecentMomentum" type="number" min="0" max="100" step="0.5" value="8" />
+                  </label>
+                  <label title="Score points added for momentum over the longer lookback.">
+                    Long momentum
+                    <input id="scoreWeightLongMomentum" type="number" min="0" max="100" step="0.5" value="14" />
+                  </label>
+                  <label title="Score points added for the gain since today's open.">
+                    Session change
+                    <input id="scoreWeightSessionChange" type="number" min="0" max="100" step="0.5" value="16" />
+                  </label>
+                  <label title="Score points added for trading above VWAP.">
+                    VWAP
+                    <input id="scoreWeightVwap" type="number" min="0" max="100" step="0.5" value="14" />
+                  </label>
+                  <label title="Score points added for the SMI momentum reading.">
+                    SMI
+                    <input id="scoreWeightSmi" type="number" min="0" max="100" step="0.5" value="7" />
+                  </label>
+                  <label title="Score points added as the 1-minute ATR rises toward 2% of price.">
+                    Volatility
+                    <input id="scoreWeightVolatility" type="number" min="0" max="100" step="0.5" value="0" />
+                  </label>
+                  <label title="Flat points added in place of buy/sell flow when there is no flow reading yet.">
+                    Liquidity bonus
+                    <input id="scoreWeightLiquidityBonus" type="number" min="0" max="100" step="0.5" value="1.5" />
+                  </label>
+                  <label title="Score points added when more of the volume was buying than selling.">
+                    Buy/sell flow
+                    <input id="scoreWeightFlow" type="number" min="0" max="100" step="0.5" value="3" />
+                  </label>
+                  <label title="Score points subtracted as the 1-minute ATR rises toward 2% of price.">
+                    Volatility penalty
+                    <input id="scoreWeightVolatilityPenalty" type="number" min="0" max="100" step="0.5" value="4" />
+                  </label>
+                  <label title="Score points subtracted for being stretched from today's open.">
+                    Session extension penalty
+                    <input id="scoreWeightSessionExtensionPenalty" type="number" min="0" max="100" step="0.5" value="4" />
+                  </label>
+                  <label title="Score points subtracted for being stretched far above VWAP.">
+                    VWAP extension penalty
+                    <input id="scoreWeightVwapExtensionPenalty" type="number" min="0" max="100" step="0.5" value="10" />
+                  </label>
+                  <label title="Score points subtracted for a drop from the day's high.">
+                    Session pullback penalty
+                    <input id="scoreWeightSessionPullbackPenalty" type="number" min="0" max="100" step="0.5" value="9" />
+                  </label>
+                  <label title="Score points subtracted for a drop over the last few bars.">
+                    Recent pullback penalty
+                    <input id="scoreWeightRecentPullbackPenalty" type="number" min="0" max="100" step="0.5" value="6" />
+                  </label>
+                  <label title="Score points subtracted when SMI runs hot.">
+                    SMI overheat penalty
+                    <input id="scoreWeightSmiOverheatPenalty" type="number" min="0" max="100" step="0.5" value="4" />
+                  </label>
                 </div>
               </div>
 
@@ -653,11 +734,27 @@
                 <label title="How the stock list is chosen.">
                   Stock list
                   <select id="universeMode">
-                    <option value="most_active" selected>Top 100 most active (live)</option>
-                    <option value="daily_rvol">Daily top 25 by relative volume</option>
+                    <option value="most_active" selected>Most active (live)</option>
+                    <option value="daily_rvol">Daily list by relative volume</option>
                   </select>
                 </label>
                 <small id="dailyUniverseStatus" hidden></small>
+                <label title="How many of the most-active stocks to trade.">
+                  Most-active stocks to trade
+                  <input id="mostActiveCount" type="number" min="1" max="100" step="1" value="100" />
+                </label>
+                <label title="How many stocks make the daily list.">
+                  Daily list size
+                  <input id="dailyPickCount" type="number" min="1" max="100" step="1" value="25" />
+                </label>
+                <label title="Daily list cap once added symbols are counted.">
+                  Daily list max (with additions)
+                  <input id="dailyMaxSymbols" type="number" min="1" max="100" step="1" value="40" />
+                </label>
+                <label title="Allowed symbols: DOG, PSQ, QID, REK, RWM, SARK, SBB, SDD, SDS, SH, SOXS, SPDN, SPXU, SQQQ, TBF, TBT, TZA, YANG.">
+                  Inverse ETF set
+                  <input id="inverseEtfSymbols" value="SQQQ, SPXU, SDS, SH, TZA" spellcheck="false" autocomplete="off" />
+                </label>
                 <label class="check-row">
                   <input id="useTopVolumeSymbols" type="checkbox" checked />
                   <span>Trade Alpaca's most-active stocks</span>
@@ -703,6 +800,35 @@
                   <input id="useBracketOrders" type="checkbox" checked />
                   <span>Manual exit orders</span>
                 </label>
+              </div>
+
+              <div class="compact-section">
+                <h3>App-wide (all accounts)</h3>
+                <small class="helper-text">Shared by every account. List timing and lookback apply from the next daily pick. Changing the stream limit reconnects the market-data stream.</small>
+                <div class="strategy-grid">
+                  <label title="Minutes after the open when the daily pick runs.">
+                    Daily pick (minutes after open)
+                    <input id="appDailyPickMinutes" type="number" min="1" max="120" step="1" value="15" />
+                  </label>
+                  <label title="How often the daily list is rechecked during the session.">
+                    Daily recheck (minutes)
+                    <input id="appDailyRecheckMinutes" type="number" min="5" max="240" step="1" value="30" />
+                  </label>
+                  <label title="Sessions of history used for the relative volume calculation.">
+                    Relative volume lookback (sessions)
+                    <input id="appRvolLookbackSessions" type="number" min="5" max="60" step="1" value="20" />
+                  </label>
+                  <label title="Fewest sessions of history a stock needs to make the daily list.">
+                    Minimum sessions of history
+                    <input id="appRvolMinSessions" type="number" min="1" max="60" step="1" value="5" />
+                  </label>
+                  <label title="How many symbols the market-data stream tracks (stay within your plan limit).">
+                    Streamed symbols (plan limit)
+                    <input id="appMarketStreamSymbolLimit" type="number" min="1" max="500" step="1" value="30" />
+                  </label>
+                </div>
+                <div class="button-row"><button id="saveAppSettingsButton" type="button" class="secondary align-input">Save App Settings</button></div>
+                <small id="appSettingsStatus" class="helper-text"></small>
               </div>
             </details>
 
