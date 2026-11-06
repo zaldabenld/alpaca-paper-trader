@@ -8,8 +8,14 @@ the free plan) so a partial feed does not skew one side. Share price is never an
 
 The list is picked once a session, PICK_AFTER_OPEN_MINUTES after the open, then rechecked every
 RECHECK_SECONDS: symbols newly in the current top PICK_COUNT are added, and nothing is removed
-until the next session. This module is pure logic plus the date-stamped file; the TraderManager
-owns fetching and sharing the list.
+until the next session. (Those are the defaults; the timing and lookback are app-wide settings,
+snapshotted into the day's `params` at the pick.) This module is pure logic plus the date-stamped
+file; the TraderManager owns fetching and sharing the list.
+
+Every check's full ranking is kept, so each account can take its own list size from the same
+rankings: `list_for(pick_count, max_symbols)` replays the pick and the additions for that size.
+The top-level `symbols`/`picked`/`added` hold the default (PICK_COUNT, MAX_SYMBOLS) list, so a file
+written here still loads in older builds.
 """
 
 from __future__ import annotations
@@ -31,6 +37,52 @@ MARKET_OPEN_ET = dtime(9, 30)
 FILE_VERSION = 1
 
 
+def default_list_params() -> dict[str, int]:
+    return {
+        "pick_minutes_after_open": PICK_AFTER_OPEN_MINUTES,
+        "recheck_seconds": RECHECK_SECONDS,
+        "lookback_sessions": LOOKBACK_SESSIONS,
+        "min_sessions": MIN_SESSIONS,
+    }
+
+
+def daily_bars_lookback_days(lookback_sessions: int) -> int:
+    # Calendar days that cover the sessions plus weekends and holidays (20 sessions -> 45 days).
+    return int(lookback_sessions) * 3 // 2 + 15
+
+
+def replay_list(rankings: list[dict[str, Any]], pick_count: int, max_symbols: int) -> list[str]:
+    """The list one account gets: the first ranking's top `pick_count`, then each later ranking's
+    top `pick_count` symbols not already in it, up to `max_symbols`. Nothing is ever removed."""
+    if not rankings:
+        return []
+    cap = max(int(max_symbols), int(pick_count))
+    members = list(rankings[0].get("symbols", [])[:pick_count])
+    seen = set(members)
+    for ranking in rankings[1:]:
+        for symbol in ranking.get("symbols", [])[:pick_count]:
+            if symbol in seen or len(members) >= cap:
+                continue
+            seen.add(symbol)
+            members.append(symbol)
+    return members
+
+
+def legacy_rankings(picked: list[str], added: list[dict[str, str]], picked_at: str) -> list[dict[str, Any]]:
+    # Files written before rankings were kept: the pick, then one ranking per addition time. Replaying
+    # them at the default size reproduces the stored list exactly; other sizes are approximate that day.
+    rankings: list[dict[str, Any]] = [{"at": picked_at, "symbols": list(picked)}]
+    for item in added:
+        symbol = str(item.get("symbol") or "").upper()
+        at = str(item.get("at") or "")
+        if not symbol:
+            continue
+        if rankings[-1]["at"] != at or len(rankings) == 1:
+            rankings.append({"at": at, "symbols": []})
+        rankings[-1]["symbols"].append(symbol)
+    return rankings
+
+
 @dataclass
 class DailyUniverse:
     session_date: str
@@ -41,9 +93,27 @@ class DailyUniverse:
     picked: list[str] = field(default_factory=list)
     added: list[dict[str, str]] = field(default_factory=list)  # {"symbol", "at"}
     ranks: dict[str, dict[str, Any]] = field(default_factory=dict)  # rvol, today_volume, avg_volume, sessions
+    rankings: list[dict[str, Any]] = field(default_factory=list)  # {"at", "symbols": every ranked symbol, best first}
+    params: dict[str, int] = field(default_factory=default_list_params)  # app-wide list settings at the pick
 
-    def stream_symbols(self) -> list[str]:
-        return list(self.symbols[:PICK_COUNT])
+    def list_for(self, pick_count: int = PICK_COUNT, max_symbols: int = MAX_SYMBOLS) -> list[str]:
+        if not self.rankings:
+            return list(self.symbols)
+        return replay_list(self.rankings, pick_count, max_symbols)
+
+    def picked_for(self, pick_count: int = PICK_COUNT) -> list[str]:
+        if not self.rankings:
+            return list(self.picked[:pick_count])
+        return list(self.rankings[0].get("symbols", [])[:pick_count])
+
+    def stream_symbols(self, pick_count: int = PICK_COUNT) -> list[str]:
+        # The pick is fixed all day, so streaming it never forces a websocket reconnect.
+        if not self.rankings:
+            return list(self.symbols[:pick_count])
+        return self.picked_for(pick_count)
+
+    def recheck_seconds(self) -> int:
+        return int(self.params.get("recheck_seconds") or RECHECK_SECONDS)
 
 
 def bar_value(bar: Any, name: str) -> Any:
@@ -66,8 +136,8 @@ def bar_session_date(timestamp: Any, market_tz: tzinfo) -> date | None:
     return timestamp.date()
 
 
-def pick_time(session: date, market_tz: tzinfo) -> datetime:
-    return datetime.combine(session, MARKET_OPEN_ET, tzinfo=market_tz) + timedelta(minutes=PICK_AFTER_OPEN_MINUTES)
+def pick_time(session: date, market_tz: tzinfo, minutes_after_open: int = PICK_AFTER_OPEN_MINUTES) -> datetime:
+    return datetime.combine(session, MARKET_OPEN_ET, tzinfo=market_tz) + timedelta(minutes=minutes_after_open)
 
 
 def average_daily_volumes(
@@ -125,8 +195,14 @@ def rank_by_rvol(
     return rows
 
 
-def pick_due(universe: DailyUniverse | None, now_et: datetime, is_open: bool) -> bool:
-    if not is_open or now_et < pick_time(now_et.date(), now_et.tzinfo or now_et.astimezone().tzinfo):
+def pick_due(
+    universe: DailyUniverse | None,
+    now_et: datetime,
+    is_open: bool,
+    minutes_after_open: int = PICK_AFTER_OPEN_MINUTES,
+) -> bool:
+    market_tz = now_et.tzinfo or now_et.astimezone().tzinfo
+    if not is_open or now_et < pick_time(now_et.date(), market_tz, minutes_after_open):
         return False
     return universe is None or universe.session_date != now_et.date().isoformat()
 
@@ -140,7 +216,7 @@ def recheck_due(universe: DailyUniverse | None, now_et: datetime, is_open: bool)
         return True
     if last_check.tzinfo is None:
         return True
-    return (now_et - last_check).total_seconds() >= RECHECK_SECONDS
+    return (now_et - last_check).total_seconds() >= universe.recheck_seconds()
 
 
 def rank_entry(row: dict[str, Any]) -> dict[str, Any]:
@@ -153,7 +229,12 @@ def rank_entry(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def new_universe(ranked: list[dict[str, Any]], now_et: datetime, feed: str) -> DailyUniverse:
+def new_universe(
+    ranked: list[dict[str, Any]],
+    now_et: datetime,
+    feed: str,
+    params: dict[str, int] | None = None,
+) -> DailyUniverse:
     picked = [row["symbol"] for row in ranked[:PICK_COUNT]]
     stamp = now_et.isoformat(timespec="seconds")
     return DailyUniverse(
@@ -163,36 +244,29 @@ def new_universe(ranked: list[dict[str, Any]], now_et: datetime, feed: str) -> D
         last_check_at=stamp,
         symbols=list(picked),
         picked=list(picked),
-        ranks={row["symbol"]: rank_entry(row) for row in ranked if row["symbol"] in picked},
+        ranks={row["symbol"]: rank_entry(row) for row in ranked},
+        rankings=[{"at": stamp, "symbols": [row["symbol"] for row in ranked]}],
+        params=dict(params or default_list_params()),
     )
 
 
-def merge_additions(
-    universe: DailyUniverse,
-    ranked: list[dict[str, Any]],
-    now_et: datetime,
-    max_symbols: int = MAX_SYMBOLS,
-) -> list[str]:
-    """Add symbols newly in the current top PICK_COUNT; never remove any. Returns the symbols added.
+def merge_additions(universe: DailyUniverse, ranked: list[dict[str, Any]], now_et: datetime) -> list[str]:
+    """Record this check's ranking; returns the symbols it adds to the default-size list.
 
-    The order stays picked-then-added, so the streamed first PICK_COUNT (the 9:45 pick) is stable all
-    day: rank shuffles never force a websocket reconnect. Additions are scanned through REST bars.
+    Each list keeps its picked-then-added order, so the streamed pick is stable all day: rank
+    shuffles never force a websocket reconnect. Additions are scanned through REST bars.
     """
-    members = set(universe.symbols)
-    added: list[str] = []
-    for row in ranked[:PICK_COUNT]:
-        symbol = row["symbol"]
-        if symbol in members or len(members) >= max_symbols:
-            continue
-        members.add(symbol)
-        added.append(symbol)
     stamp = now_et.isoformat(timespec="seconds")
+    if not universe.rankings:
+        universe.rankings = legacy_rankings(universe.picked, universe.added, universe.picked_at)
+    universe.rankings.append({"at": stamp, "symbols": [row["symbol"] for row in ranked]})
+    before = set(universe.symbols)
+    universe.symbols = universe.list_for()
+    universe.picked = universe.picked_for()
+    added = [symbol for symbol in universe.symbols if symbol not in before]
     universe.added.extend({"symbol": symbol, "at": stamp} for symbol in added)
-    current = {row["symbol"]: row for row in ranked}
-    for symbol in members:
-        if symbol in current:
-            universe.ranks[symbol] = rank_entry(current[symbol])
-    universe.symbols = universe.symbols + added
+    for row in ranked:
+        universe.ranks[row["symbol"]] = rank_entry(row)
     universe.last_check_at = stamp
     return added
 
@@ -220,7 +294,18 @@ def load_daily_universe(path: Path, session_date: str, feed: str) -> DailyUniver
             picked=[str(symbol).upper() for symbol in raw.get("picked") or []],
             added=[dict(item) for item in raw.get("added") or [] if isinstance(item, dict)],
             ranks={str(key).upper(): dict(value) for key, value in (raw.get("ranks") or {}).items() if isinstance(value, dict)},
+            params=default_list_params() | {
+                str(key): int(value) for key, value in (raw.get("params") or {}).items() if str(key) in default_list_params()
+            },
         )
+        if "rankings" in raw:
+            universe.rankings = [
+                {"at": str(item.get("at") or ""), "symbols": [str(symbol).upper() for symbol in item.get("symbols") or []]}
+                for item in raw.get("rankings") or []
+                if isinstance(item, dict)
+            ]
+        else:
+            universe.rankings = legacy_rankings(universe.picked, universe.added, universe.picked_at)
     except (AttributeError, KeyError, TypeError, ValueError):
         return None
     return universe if universe.symbols else None

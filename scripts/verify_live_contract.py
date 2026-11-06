@@ -23,8 +23,8 @@ def expected_top_volume_count() -> int:
     return max(1, min(100, count))
 
 
-MARKET_STREAM_SYMBOL_LIMIT = 30  # free-plan websocket limit; engine.MARKET_STREAM_SYMBOL_LIMIT
-INVERSE_SCAN_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")  # engine.TOP_VOLUME_INVERSE_ETF_SYMBOLS
+MARKET_STREAM_SYMBOL_LIMIT = 30  # default when the stream health has no symbol_limit (app-wide setting)
+INVERSE_SCAN_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")  # default when a config has no inverse_etf_symbols
 
 
 def top_volume_count_ok(count: int) -> bool:
@@ -523,12 +523,34 @@ def verify_payload(
     settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
     instance = payload.get("instance") if isinstance(payload.get("instance"), dict) else {}
     top_rows = dashboard.get("top_volume") if isinstance(dashboard.get("top_volume"), list) else []
-    top_symbols = {
-        str(row.get("symbol") or "").strip().upper()
-        for row in top_rows
-        if isinstance(row, dict) and str(row.get("symbol") or "").strip()
-    }
+    ordered_top_symbols = list(
+        dict.fromkeys(
+            str(row.get("symbol") or "").strip().upper()
+            for row in top_rows
+            if isinstance(row, dict) and str(row.get("symbol") or "").strip()
+        )
+    )
+    top_symbols = set(ordered_top_symbols)
     market_stream = dashboard.get("market_stream") if isinstance(dashboard.get("market_stream"), dict) else {}
+    try:
+        stream_limit = int(market_stream.get("symbol_limit") or MARKET_STREAM_SYMBOL_LIMIT)
+    except (TypeError, ValueError):
+        stream_limit = MARKET_STREAM_SYMBOL_LIMIT
+    # An account trading fewer than the whole most-active list leaves the shared source's
+    # dashboard list shorter than the rows, so the exact dashboard count is only checked without one.
+    def trims_most_active_list(config: dict[str, Any]) -> bool:
+        return (
+            bool(config.get("use_top_volume_symbols", True))
+            and str(config.get("universe_mode") or "most_active").strip().lower() == "most_active"
+            and str(config.get("inverse_etf_mode") or "allow").strip().lower() != "inverse_only"
+            and int(config.get("most_active_count") or 100) < len(top_rows)
+        )
+
+    trims_most_active = any(
+        isinstance(summary, dict)
+        and trims_most_active_list((selected_from_detail(account_state_for_index(payload, index)) or summary).get("config") or {})
+        for index, summary in enumerate(state.get("accounts") if isinstance(state.get("accounts"), list) else [])
+    )
 
     add_check(checks, "shortcut.path", bool(payload.get("shortcut_ok")), "desktop shortcut points to wscript/VBS path")
     if payload.get("shortcut_issues"):
@@ -657,12 +679,13 @@ def verify_payload(
         checks,
         "market_stream.dashboard_symbols",
         top_volume_count_ok(len(top_rows))
-        and 0 < dashboard_symbol_count <= min(len(top_rows), MARKET_STREAM_SYMBOL_LIMIT)
+        and 0 < dashboard_symbol_count <= min(len(top_rows), stream_limit)
         # With free stream slots every listed symbol must be streamed; once all slots are used
         # (positions first), the rest of the list is scanned through REST bars instead.
         and (
-            bar_symbol_count >= MARKET_STREAM_SYMBOL_LIMIT
-            or dashboard_symbol_count == min(len(top_rows), MARKET_STREAM_SYMBOL_LIMIT)
+            bar_symbol_count >= stream_limit
+            or trims_most_active
+            or dashboard_symbol_count == min(len(top_rows), stream_limit)
         ),
         f"market stream dashboard_symbols={dashboard_symbol_count}, top_volume_rows={len(top_rows)}",
     )
@@ -696,6 +719,11 @@ def verify_payload(
             count = int(selected.get("trading_symbol_count") or summary.get("trading_symbol_count") or 0)
             inverse_mode = str(config.get("inverse_etf_mode") or "allow").strip().lower()
             trading_symbols = selected.get("trading_symbols") if isinstance(selected.get("trading_symbols"), list) else []
+            inverse_set = {
+                str(symbol or "").strip().upper()
+                for symbol in (config.get("inverse_etf_symbols") if isinstance(config.get("inverse_etf_symbols"), list) else INVERSE_SCAN_SYMBOLS)
+                if str(symbol or "").strip()
+            }
             # Same condition as engine.trading_symbols(): inverse_only overrides the daily list.
             if (
                 str(config.get("universe_mode") or "most_active").strip().lower() == "daily_rvol"
@@ -707,8 +735,8 @@ def verify_payload(
                     for symbol in (daily.get("symbols") if isinstance(daily.get("symbols"), list) else [])
                     if str(symbol or "").strip()
                 }
-                # Allow mode also scans the bounded inverse set (engine.TOP_VOLUME_INVERSE_ETF_SYMBOLS).
-                expected_symbols = daily_symbols | (set(INVERSE_SCAN_SYMBOLS) if inverse_mode == "allow" else set())
+                # Allow mode also scans the account's bounded inverse set (config.inverse_etf_symbols).
+                expected_symbols = daily_symbols | (inverse_set if inverse_mode == "allow" else set())
                 listed_symbols = {
                     str(symbol or "").strip().upper()
                     for symbol in trading_symbols
@@ -738,8 +766,9 @@ def verify_payload(
                     for symbol in trading_symbols
                     if str(symbol or "").strip()
                 }
-                # Allow mode also scans the bounded inverse set (engine.TOP_VOLUME_INVERSE_ETF_SYMBOLS).
-                expected_symbols = top_symbols | (set(INVERSE_SCAN_SYMBOLS) if inverse_mode == "allow" else set())
+                # The account trades the first most_active_count rows, plus its inverse set in allow mode.
+                most_active_count = int(config.get("most_active_count") or len(ordered_top_symbols) or 100)
+                expected_symbols = set(ordered_top_symbols[:most_active_count]) | (inverse_set if inverse_mode == "allow" else set())
                 exact_count_ok = top_volume_count_ok(len(top_rows)) and count == len(expected_symbols)
                 if listed_symbols:
                     universe_ok = (

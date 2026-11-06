@@ -126,7 +126,33 @@ The **Dashboard** is the landing page. Once any account is connected, it shows A
 
 The top-volume list is pulled from Alpaca's most-actives screener and enriched with Alpaca snapshots, then refreshed on a short one-minute operational cache before account strategy scans. After the list is seeded, the app subscribes to the source dashboard symbols for trades and to a capped union of every connected market-stream account's scan and held-position symbols for bars and trading statuses. Buy/sell volume is classified live from trade price versus the latest quote; trades that cannot be classified land in **Other Vol**. Ticker lookup snapshots are fetched only when you press **Fetch** and are cached briefly.
 
-By default, each account trades the dashboard Alpaca most-active volume symbols (top 100; set `ALPACA_TRADER_TOP_SYMBOLS` to change). In **Allow** mode, the bounded inverse ETF set (`SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`) is always scanned alongside that list, so a down day cannot hide them when Alpaca's list skips them; inverse ETFs must still pass the same direction, VWAP, volume, score, and tradeability checks as any other symbol. **Exclude inverse ETFs** blocks inverse ETF entries and drops the added set, and **Inverse set only** scans only the bounded inverse set. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when top-volume trading is unchecked (the inverse set is not added to a manual list).
+By default, each account trades the dashboard Alpaca most-active volume symbols (top 100; **Most-active stocks to trade** trades fewer, and `ALPACA_TRADER_TOP_SYMBOLS` caps the shared fetch). In **Allow** mode, the account's bounded inverse ETF set (default `SQQQ`, `SPXU`, `SDS`, `SH`, `TZA`; **Inverse ETF set** takes only known inverse ETFs) is always scanned alongside that list, so a down day cannot hide them when Alpaca's list skips them; inverse ETFs must still pass the same direction, VWAP, volume, score, and tradeability checks as any other symbol. **Exclude inverse ETFs** blocks inverse ETF entries and drops the added set, and **Inverse set only** scans only the bounded inverse set. The manual ticker list on the Accounts page is used as a fallback, or as the active universe when top-volume trading is unchecked (the inverse set is not added to a manual list).
+
+### Stock-selection settings
+
+Per account (Settings > Advanced, saved with the account and in custom profiles; a built-in profile resets them to these defaults):
+
+| Setting | Default | What it does |
+|---|---|---|
+| Stock list | Most active (live) | The live most-active list, or the daily list by relative volume |
+| Most-active stocks to trade | 100 | How many of the most-active list the account trades |
+| Daily list size | 25 | How many of the daily ranking the account picks, and adds from on each recheck |
+| Daily list max (with additions) | 40 | How far rechecks can grow the account's daily list; nothing is removed intraday |
+| Inverse ETF set | SQQQ, SPXU, SDS, SH, TZA | The inverse ETFs always scanned in Allow mode |
+| ATR Extension Reference % | 0 (off) | Scales the VWAP/session extension caps by each symbol's own volatility |
+| Score Weights | profile values | How much each signal adds to, or penalty subtracts from, the entry score |
+
+App-wide (Settings > Advanced > App-wide, shared by every account):
+
+| Setting | Default | What it does |
+|---|---|---|
+| Daily pick (minutes after open) | 15 | When the daily list is picked (9:45 ET by default) |
+| Daily recheck (minutes) | 30 | How often the daily ranking is rechecked for newcomers |
+| Relative volume lookback (sessions) | 20 | Sessions averaged for normal daily volume |
+| Minimum sessions of history | 5 | Symbols with less history are not ranked |
+| Streamed symbols (plan limit) | 30 | Websocket symbol limit; the free IEX plan allows 30 |
+
+The daily ranking is fetched once per check for all accounts; each account's list replays the same rankings at its own size, so different sizes cost no extra API calls. Timing and lookback changes apply from the next day's pick. The day-tape backtester does not model the daily list, so the daily-list settings do nothing there.
 
 ## Operating Rules
 

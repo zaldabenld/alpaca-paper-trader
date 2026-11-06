@@ -49,11 +49,13 @@ class FakeDataClient:
         self.avg = avg
         self.today = today
         self.bar_requests: list[list[str]] = []
+        self.bar_starts: list[Any] = []
         self.snapshot_requests: list[list[str]] = []
 
     def get_stock_bars(self, request: Any) -> Any:
         symbols = list(request.symbol_or_symbols)
         self.bar_requests.append(symbols)
+        self.bar_starts.append(request.start)
         days = prior_sessions(20)
         return SimpleNamespace(
             data={symbol: [daily_bar(day, self.avg[symbol]) for day in days] for symbol in symbols if symbol in self.avg}
@@ -151,6 +153,66 @@ class RankingTests(unittest.TestCase):
             self.assertIsNone(rvol.load_daily_universe(path, SESSION.isoformat(), "sip"))
             path.write_text("{not json", encoding="utf-8")
             self.assertIsNone(rvol.load_daily_universe(path, SESSION.isoformat(), "iex"))
+
+
+def ranked_rows(names: list[str]) -> list[dict[str, Any]]:
+    return [{"symbol": name, "rvol": 1000 - i, "today_volume": 1, "avg_volume": 1, "sessions": 20, "rank": i + 1} for i, name in enumerate(names)]
+
+
+class ListSizeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.universe = rvol.new_universe(ranked_rows([f"S{i:02d}" for i in range(60)]), et(9, 45), "iex")
+        rvol.merge_additions(self.universe, ranked_rows([f"N{i}" for i in range(12)] + [f"S{i:02d}" for i in range(60)]), et(10, 15))
+
+    def test_default_size_replays_the_stored_list(self) -> None:
+        self.assertEqual(self.universe.list_for(), self.universe.symbols)
+        self.assertEqual(self.universe.list_for(rvol.PICK_COUNT, rvol.MAX_SYMBOLS), self.universe.symbols)
+        self.assertEqual(self.universe.picked, [f"S{i:02d}" for i in range(25)])
+
+    def test_each_size_is_its_own_pick_plus_its_own_additions(self) -> None:
+        # A 10-name list adds the ten newcomers in its top 10; a 5-name list only the top 5.
+        self.assertEqual(self.universe.list_for(10, 40), [f"S{i:02d}" for i in range(10)] + [f"N{i}" for i in range(10)])
+        self.assertEqual(self.universe.list_for(5, 8), [f"S{i:02d}" for i in range(5)] + ["N0", "N1", "N2"])
+        self.assertEqual(self.universe.picked_for(10), [f"S{i:02d}" for i in range(10)])
+        self.assertEqual(self.universe.stream_symbols(10), [f"S{i:02d}" for i in range(10)])
+        # The list never shrinks below its own pick, even with a lower cap.
+        self.assertEqual(len(self.universe.list_for(50, 10)), 50)
+
+    def test_legacy_file_without_rankings_loads_the_same_list(self) -> None:
+        legacy = {
+            "version": 1, "session_date": SESSION.isoformat(), "feed": "iex",
+            "picked_at": et(9, 45).isoformat(timespec="seconds"), "last_check_at": et(10, 15).isoformat(timespec="seconds"),
+            "symbols": ["A", "B", "C", "D"], "picked": ["A", "B"],
+            "added": [{"symbol": "C", "at": "t1"}, {"symbol": "D", "at": "t2"}], "ranks": {},
+        }
+        with tempfile.TemporaryDirectory() as raw_dir:
+            path = Path(raw_dir) / "daily-universe.json"
+            path.write_text(__import__("json").dumps(legacy), encoding="utf-8")
+            universe = rvol.load_daily_universe(path, SESSION.isoformat(), "iex")
+        assert universe is not None
+        self.assertEqual(universe.list_for(), ["A", "B", "C", "D"])
+        self.assertEqual(universe.params, rvol.default_list_params())
+        # A recheck after loading keeps the old list and adds on top of it.
+        added = rvol.merge_additions(universe, ranked_rows(["E", "A"]), et(10, 45))
+        self.assertEqual(added, ["E"])
+        self.assertEqual(universe.symbols, ["A", "B", "C", "D", "E"])
+
+    def test_saved_file_stays_version_one_with_the_default_list_on_top(self) -> None:
+        payload = rvol.universe_payload(self.universe)
+        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["symbols"], self.universe.list_for())
+        with tempfile.TemporaryDirectory() as raw_dir:
+            path = Path(raw_dir) / "daily-universe.json"
+            engine_module.write_private_json(path, payload)
+            self.assertEqual(rvol.load_daily_universe(path, SESSION.isoformat(), "iex"), self.universe)
+
+    def test_pick_time_and_recheck_follow_the_settings(self) -> None:
+        self.assertFalse(rvol.pick_due(None, et(9, 59), True, minutes_after_open=30))
+        self.assertTrue(rvol.pick_due(None, et(10, 0), True, minutes_after_open=30))
+        universe = rvol.new_universe(ranked_rows(["A"]), et(10, 0), "iex", params=rvol.default_list_params() | {"recheck_seconds": 600})
+        self.assertFalse(rvol.recheck_due(universe, et(10, 9), True))
+        self.assertTrue(rvol.recheck_due(universe, et(10, 10), True))
+        self.assertEqual(rvol.daily_bars_lookback_days(rvol.LOOKBACK_SESSIONS), rvol.DAILY_BARS_LOOKBACK_DAYS)
 
 
 class ManagerTests(unittest.TestCase):
@@ -302,6 +364,96 @@ class ManagerTests(unittest.TestCase):
         self.daily.positions = [{"symbol": "HELD", "qty_raw": "1"}]
         _dashboard, bar_symbols = self.manager.market_data_symbols()
         self.assertEqual(bar_symbols[0], "HELD")
+
+
+class SelectionSettingsManagerTests(ManagerTests):
+    """Per-account list sizes and app-wide list settings, on the ManagerTests fixture."""
+
+    def set_config(self, engine: Any, **changes: Any) -> None:
+        engine.config = AppConfig.model_validate(engine.config.model_dump() | changes)
+
+    def test_each_account_gets_its_own_list_size_from_one_ranking(self) -> None:
+        small = self.add_account("Small", "daily_rvol")
+        large = self.add_account("Large", "daily_rvol")
+        self.set_config(small, daily_pick_count=10)
+        self.set_config(large, daily_pick_count=28, daily_max_symbols=60)
+        self.manager.update_daily_universe(self.daily, et(9, 45))
+        self.assertEqual(len(self.client.bar_requests), 1)
+        self.assertEqual(self.daily.trading_symbols(), [f"B{i:02d}" for i in range(25)] + INVERSE)
+        self.assertEqual(small.trading_symbols(), [f"B{i:02d}" for i in range(10)] + INVERSE)
+        self.assertEqual(large.trading_symbols(), [f"B{i:02d}" for i in range(28)] + INVERSE)
+        state = small.state()["daily_universe"]
+        self.assertEqual((state["pick_count"], state["picked_count"], state["added_count"]), (10, 10, 0))
+
+        # A newcomer ranked 1st joins every list on the recheck.
+        self.avg["NEWS"] = 100.0
+        self.today["NEWS"] = 1_000_000.0
+        for engine in (self.daily, self.live, small, large):
+            engine.top_volume_rows = top_rows(self.today)
+        self.manager.update_daily_universe(self.daily, et(10, 15))
+        self.assertEqual(small.trading_symbols()[10], "NEWS")
+        self.assertEqual(large.trading_symbols()[28], "NEWS")
+        self.assertEqual(small.state()["daily_universe"]["added_count"], 1)
+
+    def test_pick_time_comes_from_the_app_settings(self) -> None:
+        self.manager.set_app_settings(engine_module.app_settings.AppWideSettings(daily_pick_minutes_after_open=30))
+        self.manager.update_daily_universe(self.daily, et(9, 45))
+        state = self.daily.state()["daily_universe"]
+        self.assertEqual((state["status"], state["pick_time"]), ("pending", "10:00 AM ET"))
+        self.manager.update_daily_universe(self.daily, et(10, 0))
+        self.assertEqual(self.daily.state()["daily_universe"]["status"], "picked")
+
+    def test_settings_changed_after_the_pick_wait_for_the_next_day(self) -> None:
+        self.manager.update_daily_universe(self.daily, et(9, 45))
+        self.manager.set_app_settings(engine_module.app_settings.AppWideSettings(daily_recheck_minutes=5, rvol_lookback_sessions=10))
+        self.avg["NEWS"] = 100.0
+        self.today["NEWS"] = 1_000_000.0
+        for engine in (self.daily, self.live):
+            engine.top_volume_rows = top_rows(self.today)
+        self.manager.update_daily_universe(self.daily, et(9, 55))  # today's recheck is still every 30 minutes
+        self.assertNotIn("NEWS", self.daily.trading_symbols())
+        self.manager.update_daily_universe(self.daily, et(10, 15))
+        self.assertIn("NEWS", self.daily.trading_symbols())
+        # The recheck's daily bars still use the pick's 20-session lookback (45 days).
+        self.assertEqual(self.manager.daily_universe.params["lookback_sessions"], 20)
+        self.assertLess(abs((self.client.bar_starts[-1] - self.client.bar_starts[0]).total_seconds()), 60)
+
+    def test_lookback_sets_the_daily_bars_window(self) -> None:
+        self.manager.set_app_settings(engine_module.app_settings.AppWideSettings(rvol_lookback_sessions=10, rvol_min_sessions=5))
+        before = datetime.now(timezone.utc)
+        self.manager.update_daily_universe(self.daily, et(9, 45))
+        start = self.client.bar_starts[0]
+        start = start if start.tzinfo else start.replace(tzinfo=timezone.utc)
+        self.assertAlmostEqual((before - start).total_seconds(), timedelta(days=rvol.daily_bars_lookback_days(10)).total_seconds(), delta=60)
+        self.assertEqual(self.manager.daily_universe.params["lookback_sessions"], 10)
+
+    def test_stream_limit_is_an_app_setting(self) -> None:
+        self.today_universe()
+        self.daily.positions = [{"symbol": "HELD", "qty_raw": "1"}]
+        self.manager.set_app_settings(engine_module.app_settings.AppWideSettings(market_stream_symbol_limit=40))
+        _dashboard, bar_symbols = self.manager.market_data_symbols()
+        self.assertGreater(len(bar_symbols), engine_module.MARKET_STREAM_SYMBOL_LIMIT)
+        self.assertIn("HELD", bar_symbols)
+        self.assertEqual(self.manager.market_stream_state()["symbol_limit"], 40)
+
+    def test_a_pick_larger_than_the_stream_limit_does_not_resubscribe_every_refresh(self) -> None:
+        self.manager.set_app_settings(engine_module.app_settings.AppWideSettings(market_stream_symbol_limit=20))
+        self.today_universe()
+        _dashboard, bar_symbols = self.manager.market_data_symbols()
+        self.assertEqual(bar_symbols, [f"B{i:02d}" for i in range(20)])
+        self.fake_stream(bar_symbols)
+        self.manager.sync_daily_universe_stream()
+        self.manager.sync_daily_universe_stream()
+        self.ensure_stream.assert_not_called()
+
+    def test_stream_carries_every_daily_accounts_inverse_set(self) -> None:
+        other = self.add_account("Other", "daily_rvol")
+        self.set_config(self.daily, inverse_etf_symbols=["SH"])
+        self.set_config(other, inverse_etf_symbols=["SQQQ", "PSQ"])
+        self.today_universe()
+        _dashboard, bar_symbols = self.manager.market_data_symbols()
+        self.assertEqual(bar_symbols[25:28], ["SH", "SQQQ", "PSQ"])
+        self.assertEqual(self.daily.trading_symbols()[25:], ["SH"])
 
 
 class ConfigTests(unittest.TestCase):
