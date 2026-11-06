@@ -152,6 +152,28 @@ class StopProtectionTests(unittest.TestCase):
         self.assertEqual(kinds(client), [("sell", "stop")])
         self.assertEqual(client.submitted[0].qty, 0.25)
 
+    def test_backup_sell_uses_only_the_shares_alpaca_has_available(self) -> None:
+        # U on 2026-11-06: the broker stop was filling in pieces, the app saw "stop missing" and sold the
+        # full position; Alpaca rejected it (requested 32.7446, available 12.7446).
+        engine = connected_engine(FakeTradingClient(is_open=True, price="95"))
+        position = {"symbol": "AAA", "qty": "32.7446", "qty_available": "12.7446", "avg_entry_price": "100",
+                    "current_price": "95"}
+        snapshot = engine.snapshot("AAA")
+        with patch.object(engine, "submit_exit_order", return_value=[]) as sell:
+            events, exit_submitted, protection_active, placed = engine.ensure_position_exit_orders("AAA", position, snapshot, [])
+        self.assertTrue(exit_submitted)
+        self.assertEqual(sell.call_args.args[1], Decimal("12.7446"))
+
+        position["qty_available"] = "0"
+        with patch.object(engine, "submit_exit_order", return_value=[]) as sell:
+            events, exit_submitted, protection_active, placed = engine.ensure_position_exit_orders("AAA", position, snapshot, [])
+        self.assertFalse(exit_submitted)
+        self.assertEqual(sell.call_count, 0)
+        self.assertEqual(engine.strategy_state.last_action["AAA"], "Hold (shares held by a working order)")
+
+        del position["qty_available"]  # replay positions: sell the whole quantity
+        self.assertEqual(engine.sellable_qty(position), Decimal("32.7446"))
+
     def test_dry_run_account_that_is_stopped_sends_nothing(self) -> None:
         client = FakeTradingClient(is_open=True)
         engine = connected_engine(client, dry_run=True)
