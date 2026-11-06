@@ -3693,6 +3693,12 @@ class TraderEngine:
         sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
 
         protection_active = bool(protective_orders)
+        if has_long and any(self.is_app_entry_order(order) for order in open_orders):
+            # The app's market buy has partly filled and is still open. Alpaca rejects a sell stop
+            # (or sell) beside an open buy as a potential wash trade, so protect the full quantity
+            # once it fills.
+            self.strategy_state.last_action[symbol] = "Hold (entry still filling)"
+            return events, False, None
         if has_long and config.use_bracket_orders and pending_strategy_exit:
             downgrade_events = self.downgrade_stale_take_profit(
                 symbol, position, snapshot, open_orders, order_roles, opening_guard_detail
@@ -4014,6 +4020,10 @@ class TraderEngine:
             return []
         roles = [self.order_role(order, {symbol}) for order in symbol_orders]
         if "Strategy Exit" in roles:
+            return []
+        if any(self.is_app_entry_order(order) for order in symbol_orders):
+            # A sell stop beside the app's open buy is rejected as a potential wash trade.
+            self.strategy_state.last_action[symbol] = "Hold (entry still filling)"
             return []
         protective = [order for order, role in zip(symbol_orders, roles) if role == "Protective Exit"]
         active = [
@@ -4990,6 +5000,9 @@ class TraderEngine:
         ):
             return "Protective Exit"
         return "Manual/Unknown"
+
+    def is_app_entry_order(self, item: dict[str, Any]) -> bool:
+        return str(item.get("client_order_id") or "").startswith("apt-entry-")
 
     def is_app_protective_order(self, item: dict[str, Any]) -> bool:
         return str(item.get("client_order_id") or "").startswith("apt-protect-")
