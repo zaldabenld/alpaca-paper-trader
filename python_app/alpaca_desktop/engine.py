@@ -501,6 +501,7 @@ PROFILE_STRATEGY_KEYS = {
     "volume_multiplier",
     "min_avg_volume",
     "take_profit_percent",
+    "breakeven_at_percent",
     "profit_trail_start_percent",
     "profit_trail_drop_percent",
     "stop_loss_percent",
@@ -617,6 +618,10 @@ class AppConfig(BaseModel):
     volume_multiplier: Decimal = Decimal("1.0")
     min_avg_volume: Decimal = Decimal("0")
     take_profit_percent: Decimal = Decimal("2.5")
+    # Exit management for held positions (0 = off). Once a position has gained breakeven_at_percent
+    # its stop moves up to the entry price; once it has gained profit_trail_start_percent the stop
+    # trails profit_trail_drop_percent below the peak, in 0.25% steps, and is never lowered.
+    breakeven_at_percent: Decimal = Decimal("0")
     profit_trail_start_percent: Decimal = Decimal("0")
     profit_trail_drop_percent: Decimal = Decimal("0")
     stop_loss_percent: Decimal = Decimal("1.25")
@@ -718,6 +723,7 @@ class AppConfig(BaseModel):
         "min_buy_volume_ratio",
         "reentry_score_boost",
         "take_profit_percent",
+        "breakeven_at_percent",
         "profit_trail_start_percent",
         "profit_trail_drop_percent",
         "stop_loss_percent",
@@ -871,8 +877,9 @@ class AppConfig(BaseModel):
         if self.flatten_before_close_minutes:
             self.flatten_before_close_minutes = max(2, min(390, self.flatten_before_close_minutes))
         self.risk_per_trade_percent = Decimal("0")
-        self.profit_trail_start_percent = Decimal("0")
-        self.profit_trail_drop_percent = Decimal("0")
+        self.profit_trail_drop_percent = min(self.profit_trail_drop_percent, Decimal("50"))
+        if self.profit_trail_start_percent > 0 and self.profit_trail_drop_percent <= 0:
+            self.profit_trail_start_percent = Decimal("0")  # a trail needs a drop distance
         self.stop_loss_grace_minutes = 0
         self.cooldown_minutes = 0
         self.exit_time_in_force = "day"
@@ -4117,7 +4124,9 @@ class TraderEngine:
         current_price = decimal_value(position.get("current_price"))
         if qty <= 0 or entry_price <= 0:
             return []
-        take_profit_price, stop_loss_price = self.exit_prices(entry_price, self.config)
+        take_profit_price, _ = self.exit_prices(entry_price, self.config)
+        self.seed_peak_from_live_stops(symbol, entry_price, symbol_orders, self.config)
+        stop_loss_price = self.position_stop_price(symbol, entry_price, current_price, self.config)
         if stop_loss_price <= 0:
             return []
         roles = [self.order_role(order, {symbol}) for order in symbol_orders]
@@ -4130,7 +4139,7 @@ class TraderEngine:
         protective = [order for order, role in zip(symbol_orders, roles) if role == "Protective Exit"]
         active = [
             order for order in protective
-            if not self.cancel_stale_protective_order(order, qty, take_profit_price, stop_loss_price)
+            if not self.cancel_stale_protective_order(order, qty, take_profit_price, stop_loss_price, entry_price)
         ]
         if len(active) < len(protective):
             # A stale stop was just cancelled; place the replacement on the next pass once Alpaca
@@ -4170,7 +4179,7 @@ class TraderEngine:
         """A pending take-profit limit has no stop behind it; if price falls to the stop, sell."""
         entry_price = decimal_value(position.get("avg_entry_price"))
         current_price = decimal_value(position.get("current_price")) or (snapshot.price or Decimal("0"))
-        _, stop_loss_price = self.exit_prices(entry_price, self.config)
+        stop_loss_price = self.position_stop_price(symbol, entry_price, current_price, self.config)
         if stop_loss_price <= 0 or current_price <= 0 or current_price > stop_loss_price:
             return None
         limit_exits = [
@@ -4203,7 +4212,11 @@ class TraderEngine:
                 symbol,
                 qty,
                 snapshot,
-                f"stop-loss {self.config.stop_loss_percent}% (take-profit limit unfilled, price fell back)",
+                (
+                    f"trailing stop {money(stop_loss_price)} (take-profit limit unfilled, price fell back)"
+                    if stop_loss_price >= entry_price
+                    else f"stop-loss {self.config.stop_loss_percent}% (take-profit limit unfilled, price fell back)"
+                ),
             )
         )
         return events
@@ -4240,6 +4253,58 @@ class TraderEngine:
         if planned_cap < MIN_ENTRY_NOTIONAL:
             return Decimal("0")
         return planned_cap
+
+    def position_stop_price(
+        self, symbol: str, entry_price: Decimal, current_price: Decimal, config: AppConfig
+    ) -> Decimal:
+        """The protective stop for a held position.
+
+        Starts at the stop-loss percent below entry. Once the position's peak gain reaches
+        breakeven_at_percent the stop rises to the entry price; once it reaches
+        profit_trail_start_percent the stop trails profit_trail_drop_percent below the peak, floored
+        to 0.25%-of-entry steps so the broker order is only replaced every quarter percent. The
+        result only ever rises for a position (callers never lower a live stop below it).
+        """
+        _, stop = self.exit_prices(entry_price, config)
+        if entry_price <= 0:
+            return stop
+        peak = self.update_position_peak(symbol, entry_price, current_price if current_price > 0 else entry_price)
+        peak_gain = percent_change(peak, entry_price)
+        if config.breakeven_at_percent > 0 and peak_gain >= config.breakeven_at_percent:
+            stop = max(stop, entry_price)
+        if (
+            config.profit_trail_start_percent > 0
+            and config.profit_trail_drop_percent > 0
+            and peak_gain >= config.profit_trail_start_percent
+        ):
+            trailed = peak * (Decimal("1") - config.profit_trail_drop_percent / Decimal("100"))
+            step = entry_price * Decimal("0.0025")
+            if trailed > entry_price and step > 0:
+                trailed = entry_price + ((trailed - entry_price) // step) * step
+            stop = max(stop, trailed)
+        if stop <= 0:
+            return Decimal("0")
+        return self.round_exit_price(stop, ROUND_DOWN)
+
+    def seed_peak_from_live_stops(
+        self, symbol: str, entry_price: Decimal, orders: list[dict[str, Any]], config: AppConfig
+    ) -> None:
+        """After a restart the in-memory peak is gone; a live app stop at or above entry says how
+        far the position had run, so the computed stop agrees with it instead of falling back."""
+        if entry_price <= 0:
+            return
+        for order in orders:
+            if not self.is_app_protective_order(order) or self.protective_exit_kind(order) != "stop_loss":
+                continue
+            stop_price = decimal_value(order.get("stop_price"))
+            if stop_price < entry_price or stop_price <= 0:
+                continue
+            implied_peak = entry_price
+            if config.profit_trail_drop_percent > 0 and stop_price > entry_price:
+                implied_peak = stop_price / (Decimal("1") - config.profit_trail_drop_percent / Decimal("100"))
+            elif config.breakeven_at_percent > 0:
+                implied_peak = entry_price * (Decimal("1") + config.breakeven_at_percent / Decimal("100"))
+            self.update_position_peak(symbol, entry_price, implied_peak)
 
     def exit_prices(self, entry_price: Decimal, config: AppConfig) -> tuple[Decimal, Decimal]:
         take_profit = Decimal("0")
@@ -4281,14 +4346,22 @@ class TraderEngine:
         if qty <= 0 or entry_price <= 0 or current_price <= 0:
             return events, False, bool(protective_orders), False
 
-        take_profit_price, stop_loss_price = self.exit_prices(entry_price, self.config)
+        take_profit_price, _ = self.exit_prices(entry_price, self.config)
+        self.seed_peak_from_live_stops(symbol, entry_price, protective_orders, self.config)
+        stop_loss_price = self.position_stop_price(symbol, entry_price, current_price, self.config)
         if take_profit_price <= 0 and stop_loss_price <= 0:
             return events, False, bool(protective_orders), False
 
         active_orders = [
             order for order in protective_orders
-            if not self.cancel_stale_protective_order(order, qty, take_profit_price, stop_loss_price)
+            if not self.cancel_stale_protective_order(order, qty, take_profit_price, stop_loss_price, entry_price)
         ]
+        if len(active_orders) < len(protective_orders):
+            # A stale stop was just cancelled (quantity, price or a trail ratchet); place the
+            # replacement next pass once Alpaca has released the quantity. The local stop covers
+            # the gap.
+            self.strategy_state.last_action[symbol] = "Replacing protective order"
+            return events, False, True, False
         take_profit_orders = [
             order for order in active_orders if self.protective_exit_kind(order) == "take_profit"
         ]
@@ -4307,10 +4380,13 @@ class TraderEngine:
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 events.append(("warn", f"Waiting for existing exit order cancellation before selling {symbol}."))
                 return events, False, True, False
-            reason = (
-                f"local stop-loss {self.config.stop_loss_percent}%"
-                f" (gain {current_gain:.2f}%, manual stop missing)"
-            )
+            if stop_loss_price >= entry_price:
+                reason = f"local trailing stop {money(stop_loss_price)} (gain {current_gain:.2f}%, manual stop missing)"
+            else:
+                reason = (
+                    f"local stop-loss {self.config.stop_loss_percent}%"
+                    f" (gain {current_gain:.2f}%, manual stop missing)"
+                )
             events.extend(self.submit_exit_order(symbol, qty, snapshot, reason))
             return events, True, False, False
 
@@ -4370,6 +4446,7 @@ class TraderEngine:
         qty: Decimal,
         take_profit_price: Decimal,
         stop_loss_price: Decimal,
+        entry_price: Decimal = Decimal("0"),
     ) -> bool:
         if not self.is_app_protective_order(order):
             return False
@@ -4383,7 +4460,12 @@ class TraderEngine:
                 return self.cancel_open_order(order)
         if kind == "stop_loss" and stop_loss_price > 0:
             stop_price = decimal_value(order.get("stop_price"))
-            if stop_price > 0 and abs(stop_price - stop_loss_price) >= self.price_increment_for(stop_loss_price):
+            increment = self.price_increment_for(stop_loss_price)
+            if stop_price > 0 and stop_loss_price - stop_price >= increment:
+                return self.cancel_open_order(order)  # raise the stop (trail ratchet or config change)
+            # Lower a stop only when it is a plain base stop below entry (a settings change). A stop
+            # at or above entry came from break-even/trailing and is never lowered, restart or not.
+            if stop_price > 0 and stop_price < entry_price and stop_price - stop_loss_price >= increment:
                 return self.cancel_open_order(order)
         return False
 
@@ -4497,14 +4579,16 @@ class TraderEngine:
                 "",
             )
 
-        if config.stop_loss_percent > 0:
-            stop_price = entry_price * (Decimal("1") - config.stop_loss_percent / Decimal("100"))
-            if current_price <= stop_price and not has_stop_loss_order:
-                return f"local stop-loss {config.stop_loss_percent}% (gain {current_gain:.2f}%)", ""
+        stop_price = self.position_stop_price(symbol, entry_price, current_price, config)
+        if stop_price > 0 and current_price <= stop_price and not has_stop_loss_order:
+            if stop_price >= entry_price:
+                return f"local trailing stop {money(stop_price)} (gain {current_gain:.2f}%)", ""
+            return f"local stop-loss {config.stop_loss_percent}% (gain {current_gain:.2f}%)", ""
         return "", ""
 
     def is_stop_loss_exit_reason(self, reason: str) -> bool:
-        return "stop-loss" in str(reason or "").lower()
+        text = str(reason or "").lower()
+        return "stop-loss" in text or "trailing stop" in text
 
     def is_take_profit_exit_reason(self, reason: str) -> bool:
         return "take-profit" in str(reason or "").lower()
@@ -4921,9 +5005,9 @@ class TraderEngine:
         self.strategy_state.last_action[symbol] = action
 
     def record_loss_reentry_floor(self, symbol: str, snapshot: Any, reason: str = "") -> None:
-        # Only a losing exit raises the re-entry bar; a take-profit winner may come straight back
-        # through the normal entry checks.
-        if self.is_stop_loss_exit_reason(reason):
+        # Only a losing exit raises the re-entry bar; a winner (take-profit, or a stop that fired
+        # above entry) may come straight back through the normal entry checks.
+        if self.is_stop_loss_exit_reason(reason) and "trailing stop" not in str(reason or "").lower():
             self.record_reentry_floor(symbol, snapshot, reason)
 
     def record_reentry_floor(self, symbol: str, snapshot: Any, reason: str = "") -> None:
@@ -5393,12 +5477,11 @@ class TraderEngine:
     ) -> bool:
         if str(item.get("side") or "").lower() != "sell":
             return False
-        # A stop-loss fill always raises the bar (OPERATING.md); otherwise only a losing exit does.
-        if self.is_stop_loss_exit_reason(reason) or self.protective_exit_kind(item) == "stop_loss":
-            return True
+        # Only a losing exit raises the bar. A stop (or trailing stop) that fills in profit is a
+        # winner; a stop fill with unknown cost basis is assumed to be a loss.
         if realized_pl is not None:
             return realized_pl < 0
-        return False
+        return self.is_stop_loss_exit_reason(reason) or self.protective_exit_kind(item) == "stop_loss"
 
     def closed_order_identity(self, item: dict[str, Any]) -> str:
         for key in ("id", "client_order_id"):

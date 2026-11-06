@@ -173,6 +173,67 @@ class EntryPacingTests(unittest.TestCase):
         self.assertEqual(engine.entry_spacing_hold_reason(engine.config), "")
 
 
+class TrailingStopTests(unittest.TestCase):
+    def engine(self, **config: Any) -> TraderEngine:
+        engine = TraderEngine("trail")
+        engine.config = experiment_config(stop_loss_percent="1.25", take_profit_percent="0", **config)
+        return engine
+
+    def test_stop_rises_to_breakeven_then_trails_the_peak_in_steps_and_never_falls(self) -> None:
+        engine = self.engine(breakeven_at_percent="1", profit_trail_start_percent="2.5", profit_trail_drop_percent="1")
+        entry = Decimal("100")
+        self.assertEqual(engine.position_stop_price("AAA", entry, Decimal("100.5"), engine.config), Decimal("98.75"))
+        self.assertEqual(engine.position_stop_price("AAA", entry, Decimal("101.0"), engine.config), Decimal("100.00"))
+        self.assertEqual(engine.position_stop_price("AAA", entry, Decimal("102.4"), engine.config), Decimal("100.00"))
+        # peak 103 -> trail 101.97 -> floored to a 0.25 step above entry: 101.75
+        self.assertEqual(engine.position_stop_price("AAA", entry, Decimal("103.0"), engine.config), Decimal("101.75"))
+        # price falls back: the peak (103) still rules, the stop does not drop
+        self.assertEqual(engine.position_stop_price("AAA", entry, Decimal("102.0"), engine.config), Decimal("101.75"))
+        self.assertEqual(engine.position_stop_price("AAA", entry, Decimal("105.0"), engine.config), Decimal("103.75"))
+
+    def test_off_by_default_keeps_the_plain_stop(self) -> None:
+        engine = self.engine()
+        self.assertEqual(engine.position_stop_price("AAA", Decimal("100"), Decimal("110"), engine.config), Decimal("98.75"))
+
+    def test_local_exit_uses_the_trailed_stop_and_labels_a_profitable_exit(self) -> None:
+        engine = self.engine(breakeven_at_percent="1", profit_trail_start_percent="2.5", profit_trail_drop_percent="1")
+        position = {"symbol": "AAA", "qty": "1", "avg_entry_price": "100", "current_price": "103"}
+        self.assertEqual(engine.local_protection_exit_decision("AAA", engine.config, position, None, False, False), ("", ""))
+        position["current_price"] = "101.5"
+        reason, hold = engine.local_protection_exit_decision("AAA", engine.config, position, None, False, False)
+        self.assertIn("local trailing stop $101.75", reason)
+        self.assertTrue(engine.is_stop_loss_exit_reason(reason))  # quick retry on rejection
+        engine.record_loss_reentry_floor("AAA", entry_ready_snapshot(), reason)
+        self.assertNotIn("AAA", engine.reentry_score_floors)  # a winner may come straight back
+
+    def test_live_stop_is_raised_but_never_lowered_once_above_entry(self) -> None:
+        engine = self.engine()
+        entry = Decimal("100")
+        order = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "1", "stop_price": "101.75",
+                 "client_order_id": "apt-protect-sl-aaa-1"}
+        base = dict(order, stop_price="98.75")
+        with patch.object(engine, "cancel_open_order", return_value=True) as cancel:
+            self.assertTrue(engine.cancel_stale_protective_order(order, Decimal("1"), Decimal("0"), Decimal("102.50"), entry))
+            self.assertFalse(engine.cancel_stale_protective_order(order, Decimal("1"), Decimal("0"), Decimal("98.75"), entry))
+            self.assertTrue(engine.cancel_stale_protective_order(base, Decimal("1"), Decimal("0"), Decimal("98.00"), entry))  # settings change
+            self.assertEqual(cancel.call_count, 2)
+
+    def test_restart_keeps_a_trailed_stop_and_rebuilds_the_peak_from_it(self) -> None:
+        # After a restart the in-memory peak is gone; the live 101.75 stop must not be replaced by 98.75.
+        engine = self.engine(profit_trail_start_percent="2.5", profit_trail_drop_percent="1")
+        engine.config = engine.config.model_copy(update={"use_bracket_orders": True})
+        position = {"symbol": "AAA", "qty": "1", "avg_entry_price": "100", "current_price": "101.90"}
+        stop = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "1", "stop_price": "101.75",
+                "client_order_id": "apt-protect-sl-aaa-1"}
+        snapshot = entry_ready_snapshot("101.90")
+        with patch.object(engine, "cancel_open_order", return_value=True) as cancel, patch.object(engine, "submit_protective_exit_order") as submit:
+            events, exit_submitted, protection_active, placed = engine.ensure_position_exit_orders("AAA", position, snapshot, [stop])
+        self.assertEqual(cancel.call_count, 0)
+        self.assertEqual(submit.call_count, 0)
+        self.assertTrue(protection_active)
+        self.assertEqual(engine.position_stop_price("AAA", Decimal("100"), Decimal("101.90"), engine.config), Decimal("101.75"))
+
+
 class LossOnlyReentryTests(unittest.TestCase):
     def closed(self, realized: Decimal | None, reason: str = "", client_id: str = "apt-exit-aaa-1") -> bool:
         engine = TraderEngine("reentry")
@@ -182,7 +243,7 @@ class LossOnlyReentryTests(unittest.TestCase):
     def test_only_losing_or_stop_exits_raise_the_bar(self) -> None:
         self.assertTrue(self.closed(Decimal("-0.30")))
         self.assertFalse(self.closed(Decimal("0.65")))
-        self.assertTrue(self.closed(Decimal("0.10"), "local stop-loss 1.25% (gain 0.1%)"))  # a stop fill always counts
+        self.assertFalse(self.closed(Decimal("0.10"), "local trailing stop $10.10 (gain 0.1%)"))  # a stop in profit is a winner
         self.assertFalse(self.closed(Decimal("0.65"), "local take-profit 2.5% (gain 2.6%)"))
         self.assertTrue(self.closed(None, "local stop-loss 1.25% (gain -1.3%)"))
         self.assertFalse(self.closed(None, "local take-profit 2.5% (gain 2.6%)"))

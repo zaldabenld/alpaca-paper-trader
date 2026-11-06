@@ -443,9 +443,21 @@
                   Stop-loss %
                   <input id="stopLossPercent" type="number" min="0" step="0.05" value="1.25" />
                 </label>
-                <label title="Sell once a position gains this much.">
+                <label title="Sell once a position gains this much (0 = no fixed target; let the trailing stop decide).">
                   Take-profit %
                   <input id="takeProfitPercent" type="number" min="0" step="0.05" value="2.5" />
+                </label>
+                <label title="Once a position has gained this much, move its stop up to the entry price (0 = off).">
+                  Break-even at %
+                  <input id="breakevenAtPercent" type="number" min="0" step="0.05" value="0" />
+                </label>
+                <label title="Once a position has gained this much, its stop trails the peak price (0 = off).">
+                  Trail from %
+                  <input id="profitTrailStartPercent" type="number" min="0" step="0.05" value="0" />
+                </label>
+                <label title="How far below the peak price the trailing stop sits, in 0.25% steps; it is never lowered.">
+                  Trail drop %
+                  <input id="profitTrailDropPercent" type="number" min="0" max="50" step="0.05" value="0" />
                 </label>
               </div>
               <div class="two-col">
@@ -518,8 +530,6 @@
                 <input id="longPeriod" type="hidden" value="21" />
                 <input id="sellRsi" type="hidden" value="72" />
                 <input id="cooldownMinutes" type="hidden" value="0" />
-                <input id="profitTrailStartPercent" type="hidden" value="0" />
-                <input id="profitTrailDropPercent" type="hidden" value="0" />
                 <input id="stopLossGraceMinutes" type="hidden" value="0" />
                 <div class="strategy-grid">
                   <label title="Number of bars used to calculate RSI (a 0-100 overbought/oversold gauge).">

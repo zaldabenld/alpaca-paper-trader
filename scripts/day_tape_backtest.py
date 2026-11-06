@@ -59,6 +59,7 @@ BACKTEST_STRATEGY_KEYS = set(PROFILE_STRATEGY_KEYS) | {
     "extension_atr_reference_percent",
     "max_entries_per_scan",
     "entry_spacing_seconds",
+    "breakeven_at_percent",
 }
 
 
@@ -629,6 +630,7 @@ class DayTapeBacktester:
                 "top_volume_source": evaluation_source if universe_source == "top_volume" else "",
                 "entry_indicators": entry_indicators(snapshot.as_dict()),
             }
+            self.engine.position_peak_prices.pop(symbol, None)  # a fresh position starts its own peak
             self.positions[symbol] = ReplayPosition(symbol, qty, snapshot.price, entry_event)
             self.accepted_trades.append(entry_event)
             accepted_this_scan += 1

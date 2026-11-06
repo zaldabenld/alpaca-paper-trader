@@ -141,6 +141,8 @@ Per account (Settings > Advanced, saved with the account and in custom profiles;
 | Inverse ETF set | SQQQ, SPXU, SDS, SH, TZA | The inverse ETFs always scanned in Allow mode |
 | ATR Extension Reference % | 0 (off) | Scales the VWAP/session extension caps by each symbol's own volatility |
 | Score Weights | profile values | How much each signal adds to, or penalty subtracts from, the entry score |
+| Break-even at % | 0 (off) | Once a position has gained this much, its stop moves up to the entry price |
+| Trail from % / Trail drop % | 0 (off) | Once a position has gained "trail from", its stop trails "trail drop" below the peak in 0.25% steps and is never lowered; set Take-profit to 0 to let winners run |
 | Require rising price | On | Buys only while the price is still rising: the last 1-minute bar closed at or above the one before it, and the latest trade is not below that earlier close |
 | Max New Buys per Scan | 2 (0 = off) | Most new positions the bot may open in one 5-second scan, which spreads out the burst of buys when the open guard lifts |
 | Seconds Between New Buys | 0 (off) | After a buy is sent, the bot waits this long before sending another |
