@@ -198,6 +198,7 @@ DOM_SNAPSHOT_SCRIPT = r"""
     realizedPlDetail: text("#realizedPlDetail"),
     buyingPower: text("#buyingPower"),
     cash: text("#cash"),
+    cashDetail: text("#cashDetail"),
     lastRefresh: text("#lastRefresh"),
     accountCards: document.querySelectorAll("#accountCards .account-card").length,
     activeCardDailyPl: text("#accountCards .account-card.active em"),
@@ -224,6 +225,7 @@ def expected_from_state(state: dict[str, Any]) -> dict[str, Any]:
         "realizedPlDetail": f"Session {realized_session}" if realized_session else "",
         "buyingPower": str(account.get("buying_power_display") or "$0.00"),
         "cash": str(account.get("cash_display") or "$0.00"),
+        "cashDetail": f"{account.get('cash_percent_display')} of equity liquid" if account.get("cash_percent_display") else "",
         "lastRefresh": str(selected.get("last_refresh") or "-"),
     }
 
@@ -251,7 +253,7 @@ def verify_rendered_payload(state: dict[str, Any], rendered: dict[str, Any], exp
         int(rendered.get("accountCards") or 0) >= expected_accounts,
         f"UI rendered {int(rendered.get('accountCards') or 0)} account card(s)",
     )
-    for key in ("equity", "dailyPl", "dailyPlDetail", "realizedPl", "realizedPlDetail", "buyingPower", "cash", "lastRefresh"):
+    for key in ("equity", "dailyPl", "dailyPlDetail", "realizedPl", "realizedPlDetail", "buyingPower", "cash", "cashDetail", "lastRefresh"):
         add(f"ui.{key}", rendered.get(key) == expected[key], f"{key} matches /api/state")
     add(
         "ui.active_card_daily_pl",

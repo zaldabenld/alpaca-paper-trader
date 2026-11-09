@@ -47,6 +47,7 @@ def state_payload() -> dict[str, object]:
                 "realized_pl_session_date": "2026-06-25",
                 "buying_power_display": "$500.00",
                 "cash_display": "$250.00",
+                "cash_percent_display": "24.8%",
             },
         },
     }
@@ -61,6 +62,7 @@ def rendered_payload() -> dict[str, object]:
         "realizedPlDetail": "Session 2026-06-25",
         "buyingPower": "$500.00",
         "cash": "$250.00",
+        "cashDetail": "24.8% of equity liquid",
         "lastRefresh": "09:32:45 AM",
         "accountCards": 3,
         "activeCardDailyPl": "$10.00 (+1.00%)",

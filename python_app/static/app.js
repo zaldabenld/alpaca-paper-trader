@@ -166,6 +166,7 @@ const els = {
   realizedPlDetail: document.querySelector("#realizedPlDetail"),
   buyingPower: document.querySelector("#buyingPower"),
   cash: document.querySelector("#cash"),
+  cashDetail: document.querySelector("#cashDetail"),
   lastRefresh: document.querySelector("#lastRefresh"),
   strategyRows: document.querySelector("#strategyRows"),
   positionRows: document.querySelector("#positionRows"),
@@ -2405,6 +2406,9 @@ function renderState(state, context) {
   renderRealizedPlMetric(account);
   els.buyingPower.textContent = account.buying_power_display || "$0.00";
   els.cash.textContent = account.cash_display || "$0.00";
+  if (els.cashDetail) {
+    els.cashDetail.textContent = account.cash_percent_display ? `${account.cash_percent_display} of equity liquid` : "";
+  }
   els.lastRefresh.textContent = selected.last_refresh || "-";
 
   renderRows(els.strategyRows, selected.strategy || [], [
