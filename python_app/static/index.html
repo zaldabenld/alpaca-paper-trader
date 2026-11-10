@@ -655,7 +655,7 @@
                       <option value="inverse_only">Inverse set only</option>
                     </select>
                   </label>
-                  <label class="check-row" title="On a falling market, buy an inverse ETF once it is above its session VWAP in an uptrend and keep it until it closes back under VWAP. No take-profit, breakeven or trailing stop cuts the hold short.">
+                  <label class="check-row" title="On a falling market, buy an inverse ETF once it is above its session VWAP in an uptrend and keep it until it closes back under VWAP. The profile's take-profit and tight trailing stop do not apply; the lock and trail below take their place.">
                     <input id="inverseTrendHold" type="checkbox" />
                     <span>Hold inverse ETFs while the market falls</span>
                   </label>
@@ -666,6 +666,14 @@
                   <label title="Inverse trend hold only: hard stop this far below the entry price, in place of the normal stop.">
                     Trend Hold Stop %
                     <input id="inverseTrendStopPercent" type="number" min="0.5" max="20" step="0.25" value="3" />
+                  </label>
+                  <label title="Inverse trend hold only: once the fund has been up this much, the profit is locked and the stop starts trailing (0 = never lock).">
+                    Trend Hold Lock Profit at %
+                    <input id="inverseTrendLockAtPercent" type="number" min="0" max="50" step="0.25" value="3" />
+                  </label>
+                  <label title="Inverse trend hold only: after the lock, the stop follows this far below the highest price and never under the entry price.">
+                    Trend Hold Trail % after Lock
+                    <input id="inverseTrendTrailPercent" type="number" min="0" max="20" step="0.25" value="2" />
                   </label>
                   <label title="Inverse trend hold only: most times one inverse ETF may be bought in a day (0 = no cap).">
                     Trend Hold Buys per Fund per Day

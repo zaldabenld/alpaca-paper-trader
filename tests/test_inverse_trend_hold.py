@@ -32,9 +32,11 @@ def snap(vwap: str = "1.5", change: str = "2", bias: str = "Bullish", rsi: str =
     )
 
 
-def engine_with(**config: Any) -> TraderEngine:
+def engine_with(session_ready: bool = True, **config: Any) -> TraderEngine:
     engine = TraderEngine("trend")
     engine.config = AppConfig(symbols=["SQQQ", "AAA"], use_top_volume_symbols=False, **config)
+    if session_ready:  # these tests feed snapshots directly; the bar-count guard has its own tests
+        engine.inverse_trend_session_ready = lambda symbol: True  # type: ignore[method-assign]
     return engine
 
 
@@ -93,10 +95,59 @@ class TrendHoldEntryTests(unittest.TestCase):
 
     def test_settings_are_clamped_and_off_by_default(self) -> None:
         self.assertFalse(AppConfig().inverse_trend_hold)
-        config = AppConfig(inverse_trend_stop_percent="0", inverse_trend_exit_percent="50", inverse_trend_max_entries=99)
+        config = AppConfig(inverse_trend_stop_percent="0", inverse_trend_exit_percent="50", inverse_trend_max_entries=99,
+                           inverse_trend_lock_at_percent="90", inverse_trend_trail_percent="-1")
         self.assertEqual(config.inverse_trend_stop_percent, Decimal("0.5"))
         self.assertEqual(config.inverse_trend_exit_percent, Decimal("5"))
         self.assertEqual(config.inverse_trend_max_entries, 10)
+        self.assertEqual(config.inverse_trend_lock_at_percent, Decimal("50"))
+        self.assertEqual(config.inverse_trend_trail_percent, Decimal("0"))
+
+    def test_a_stop_earlier_today_does_not_block_the_rebuy_with_a_score_floor(self) -> None:
+        # A trend candidate carries an ordering number, not a score: a 100-point re-entry floor left
+        # by an earlier stop, or a 100 minimum score, must not hold it.
+        client = FakeTradingClient(is_open=True)
+        client.get_all_positions = lambda: []  # type: ignore[method-assign]
+        engine = engine_with(inverse_trend_hold=True, min_entry_score="100", dry_run=True)
+        engine.reentry_score_floors["SQQQ"] = Decimal("100")
+        with (
+            patch.object(engine, "snapshot", return_value=snap()),
+            patch.object(engine, "asset_tradeability_hold_reason", return_value=""),
+            patch.object(engine, "current_trade_price", return_value=Decimal("44")),
+            patch.object(engine, "intent_reason", return_value="test"),
+        ):
+            engine.entry_candidate("SQQQ", 3, {"equity": "1000"}, None, 0, [], True)
+            events, _, reservation = engine.apply_strategy(
+                "SQQQ", {"equity": "1000", "buying_power": "1000"}, None, 0, [], Decimal("0")
+            )
+        self.assertIsNotNone(reservation, engine.strategy_state.last_action.get("SQQQ"))
+        self.assertEqual(reservation["side"], "buy")
+
+
+class TrendHoldSessionDataTests(unittest.TestCase):
+    def engine(self, bars: int, day_offset: int = 0, clock_date: str = "2026-11-04") -> TraderEngine:
+        engine = engine_with(session_ready=False, inverse_trend_hold=True)
+        engine.market_clock = {"session_date": clock_date}
+        for index in range(bars):
+            stamp = NOW + timedelta(days=day_offset, minutes=index)
+            engine.strategy_state.add_bar("SQQQ", 44 - index * 0.01, stamp, 1000, 44, 43)
+        return engine
+
+    def test_vwap_from_a_handful_of_bars_is_not_acted_on(self) -> None:
+        self.assertFalse(self.engine(bars=4).inverse_trend_session_ready("SQQQ"))
+        self.assertTrue(self.engine(bars=5).inverse_trend_session_ready("SQQQ"))
+
+    def test_yesterdays_bars_are_not_todays_vwap(self) -> None:
+        self.assertFalse(self.engine(bars=30, day_offset=-1).inverse_trend_session_ready("SQQQ"))
+        # The replay has no market clock; it judges the tape's own session.
+        self.assertTrue(self.engine(bars=30, day_offset=-1, clock_date="").inverse_trend_session_ready("SQQQ"))
+
+    def test_no_exit_and_no_entry_until_the_session_is_ready(self) -> None:
+        engine = self.engine(bars=3)
+        with patch.object(engine, "snapshot", return_value=snap(vwap="-2")):
+            self.assertEqual(engine.inverse_trend_exit_reason("SQQQ", engine.config, Decimal("1")), "")
+        with patch.object(engine, "asset_tradeability_hold_reason", return_value=""):
+            self.assertEqual(engine.entry_quality_hold_reason("SQQQ", snap(), engine.config), "Hold (trend hold warming)")
 
 
 class TrendHoldExitTests(unittest.TestCase):
@@ -109,12 +160,19 @@ class TrendHoldExitTests(unittest.TestCase):
             )
         return reason
 
-    def test_a_big_winner_above_vwap_is_held_past_take_profit_and_trailing(self) -> None:
+    def test_a_big_winner_above_vwap_rides_past_take_profit_and_the_tight_trail(self) -> None:
         engine = engine_with(inverse_trend_hold=True, take_profit_percent="2.5", profit_trail_start_percent="3",
                              profit_trail_drop_percent="1")
-        self.assertEqual(self.decide(engine, "44", "1.5"), "")  # +10%: no take-profit
-        self.assertEqual(self.decide(engine, "43", "0.4"), "")  # gave back 2.3% from the peak: no trail
-        self.assertEqual(self.decide(engine, "43", "-0.2"), "")  # inside the exit buffer
+        self.assertEqual(self.decide(engine, "44", "1.5", has_stop=False), "")  # +10%: no take-profit
+        self.assertEqual(self.decide(engine, "43.3", "0.4", has_stop=False), "")  # 1.6% off the peak: the 1% trail is not used
+        self.assertEqual(self.decide(engine, "43.3", "-0.2", has_stop=False), "")  # inside the exit buffer
+
+    def test_locked_profit_is_taken_when_the_fund_gives_back_the_trail(self) -> None:
+        engine = engine_with(inverse_trend_hold=True)
+        self.assertEqual(self.decide(engine, "44", "1.5", has_stop=False), "")  # peak 44 locks the stop at 43.10
+        reason = self.decide(engine, "43.05", "0.4", has_stop=False)
+        self.assertEqual(reason, "local trailing stop $43.10 (gain 7.62%)")
+        self.assertEqual(self.decide(engine, "43.05", "0.4", has_stop=True), "")  # the broker stop handles it
 
     def test_the_same_winner_is_sold_by_the_profile_rules_without_trend_hold(self) -> None:
         engine = engine_with(take_profit_percent="2.5")
@@ -127,12 +185,28 @@ class TrendHoldExitTests(unittest.TestCase):
         self.assertTrue(engine.is_trend_hold_exit_reason(reason))
         self.assertEqual(engine.exit_reason_label("sell", "Strategy Exit", reason), "Trend Hold Ended")
 
-    def test_stop_is_one_wide_level_from_entry_that_never_ratchets(self) -> None:
-        engine = engine_with(inverse_trend_hold=True, inverse_trend_stop_percent="3", breakeven_at_percent="1",
-                             profit_trail_start_percent="3", profit_trail_drop_percent="1")
-        self.assertEqual(engine.position_stop_price("SQQQ", Decimal("40"), Decimal("44"), engine.config), Decimal("38.80"))
-        self.assertEqual(engine.position_stop_price("SQQQ", Decimal("40"), Decimal("41"), engine.config), Decimal("38.80"))
+    def test_stop_stays_wide_until_the_lock_then_trails_and_never_drops_under_entry(self) -> None:
+        engine = engine_with(inverse_trend_hold=True, breakeven_at_percent="1", profit_trail_start_percent="3",
+                             profit_trail_drop_percent="1")
+        stop = lambda price: engine.position_stop_price("SQQQ", Decimal("40"), Decimal(price), engine.config)  # noqa: E731
+        self.assertEqual(stop("40.40"), Decimal("38.80"))  # +1%: the profile's breakeven does not apply
+        self.assertEqual(stop("41.10"), Decimal("38.80"))  # +2.75%: still the wide stop
+        self.assertEqual(stop("41.20"), Decimal("40.30"))  # +3%: locked, 2% under the peak in 0.25% steps
+        self.assertEqual(stop("44.00"), Decimal("43.10"))  # trails the peak
+        self.assertEqual(stop("42.00"), Decimal("43.10"))  # and never comes back down
         self.assertEqual(engine.position_take_profit_price("SQQQ", Decimal("40"), engine.config), Decimal("0"))
+
+    def test_a_trail_wider_than_the_gain_still_locks_the_entry_price(self) -> None:
+        engine = engine_with(inverse_trend_hold=True, inverse_trend_trail_percent="5")
+        self.assertEqual(engine.position_stop_price("SQQQ", Decimal("40"), Decimal("41.20"), engine.config), Decimal("40.00"))
+
+    def test_lock_can_be_switched_off_for_a_stop_that_never_moves(self) -> None:
+        engine = engine_with(inverse_trend_hold=True, inverse_trend_lock_at_percent="0")
+        self.assertEqual(engine.position_stop_price("SQQQ", Decimal("40"), Decimal("44"), engine.config), Decimal("38.80"))
+
+    def test_other_symbols_keep_their_own_stop_and_target(self) -> None:
+        engine = engine_with(inverse_trend_hold=True, breakeven_at_percent="1", profit_trail_start_percent="3",
+                             profit_trail_drop_percent="1")
         # An ordinary stock on the same profile still ratchets and keeps its target.
         self.assertGreater(engine.position_stop_price("AAA", Decimal("40"), Decimal("44"), engine.config), Decimal("40"))
         self.assertGreater(engine.position_take_profit_price("AAA", Decimal("40"), engine.config), Decimal("40"))
@@ -142,16 +216,26 @@ class TrendHoldExitTests(unittest.TestCase):
         self.assertIn("local stop-loss 3%", self.decide(engine, "38.7", "0.5", has_stop=False))
         self.assertEqual(self.decide(engine, "38.7", "0.5", has_stop=True), "")  # the broker stop handles it
 
+    def test_restart_recovers_the_locked_peak_from_the_live_stop(self) -> None:
+        engine = engine_with(inverse_trend_hold=True)
+        live_stop = {"symbol": "SQQQ", "side": "sell", "type": "stop", "qty": "1", "stop_price": "43.10",
+                     "client_order_id": "apt-protect-sl-sqqq-1"}
+        engine.seed_peak_from_live_stops("SQQQ", Decimal("40"), [live_stop], engine.config)
+        # Price is now lower than the old peak; the stop must not fall back to the wide level.
+        self.assertGreaterEqual(engine.position_stop_price("SQQQ", Decimal("40"), Decimal("43.5"), engine.config), Decimal("43.00"))
+
 
 class SqqqClient(FakeTradingClient):
     """One long SQQQ position whose shares are all held by the app's own stop."""
+
+    qty = "0.5"
 
     def get_all_positions(self) -> list[dict[str, Any]]:
         return [
             {
                 "symbol": "SQQQ",
-                "qty": "0.5",
-                "qty_available": "0" if self.open_orders else "0.5",
+                "qty": self.qty,
+                "qty_available": "0" if self.open_orders else self.qty,
                 "avg_entry_price": self.entry,
                 "current_price": self.price,
                 "market_value": str(Decimal(self.price) * Decimal("0.5")),
@@ -193,18 +277,28 @@ STOP = {"id": "s1", "symbol": "SQQQ", "side": "sell", "type": "stop", "qty": "0.
 
 class TrendHoldLiveOrderTests(unittest.TestCase):
     def test_new_position_gets_the_wide_stop_and_no_profit_target(self) -> None:
-        client = SqqqClient(is_open=True, price="44", entry="40")
-        engine = live_engine(client, [40 + step * 0.1 for step in range(41)])
+        client = SqqqClient(is_open=True, price="41", entry="40")
+        engine = live_engine(client, [40 + step * 0.025 for step in range(41)])
         refresh(engine)
         self.assertEqual(kinds(client), [("sell", "stop")])
         self.assertEqual(str(client.submitted[0].stop_price), "38.8")
 
     def test_held_above_vwap_nothing_is_sent(self) -> None:
-        client = SqqqClient(is_open=True, price="44", entry="40", orders=[dict(STOP)])
-        engine = live_engine(client, [40 + step * 0.1 for step in range(41)])
+        client = SqqqClient(is_open=True, price="41", entry="40", orders=[dict(STOP)])
+        engine = live_engine(client, [40 + step * 0.025 for step in range(41)])
         refresh(engine)
         self.assertEqual(client.cancelled, [])
         self.assertEqual(client.submitted, [])
+
+    def test_past_the_lock_the_broker_stop_is_raised_and_nothing_is_sold(self) -> None:
+        client = SqqqClient(is_open=True, price="44", entry="40", orders=[dict(STOP)])
+        engine = live_engine(client, [40 + step * 0.1 for step in range(41)])
+        refresh(engine)  # the 38.80 stop is stale: cancelled for a replacement
+        self.assertEqual(client.cancelled, ["s1"])
+        self.assertEqual(client.submitted, [])
+        refresh(engine)  # replacement at 2% under the 44 peak
+        self.assertEqual(kinds(client), [("sell", "stop")])
+        self.assertEqual(str(client.submitted[0].stop_price), "43.1")
 
     def test_under_vwap_cancels_its_stop_and_sells_every_share_in_one_pass(self) -> None:
         # qty_available is 0 because the stop holds the shares; the sell must still be for all 0.5.
@@ -214,6 +308,29 @@ class TrendHoldLiveOrderTests(unittest.TestCase):
         self.assertEqual(client.cancelled, ["s1"])
         self.assertEqual(kinds(client), [("sell", "market")])
         self.assertEqual(str(client.submitted[0].qty), "0.5")
+
+    def test_sell_is_sized_from_a_fresh_position_when_the_stop_partly_filled(self) -> None:
+        # The stop sold 0.2 between the order read and the cancel; only 0.3 is left to sell.
+        client = SqqqClient(is_open=True, price="42", entry="40", orders=[dict(STOP)])
+        client.get_open_position = lambda symbol: {"symbol": symbol, "qty": "0.3", "qty_available": "0.3"}  # type: ignore[attr-defined]
+        engine = live_engine(client, [44.0] * 30 + [43.5, 43.0, 42.5, 42.0])
+        refresh(engine)
+        self.assertEqual(kinds(client), [("sell", "market")])
+        self.assertEqual(str(client.submitted[0].qty), "0.3")
+
+    def test_nothing_is_sold_when_the_stop_filled_completely_first(self) -> None:
+        client = SqqqClient(is_open=True, price="42", entry="40", orders=[dict(STOP)])
+        client.get_open_position = lambda symbol: {"symbol": symbol, "qty": "0", "qty_available": "0"}  # type: ignore[attr-defined]
+        engine = live_engine(client, [44.0] * 30 + [43.5, 43.0, 42.5, 42.0])
+        refresh(engine)
+        self.assertEqual(client.submitted, [])
+
+    def test_a_refused_cancel_sells_nothing(self) -> None:
+        client = SqqqClient(is_open=True, price="42", entry="40", orders=[dict(STOP)])
+        engine = live_engine(client, [44.0] * 30 + [43.5, 43.0, 42.5, 42.0])
+        with patch.object(engine, "cancel_open_order", return_value=False):
+            refresh(engine)
+        self.assertEqual(client.submitted, [])
 
     def test_trend_exit_waits_out_the_opening_guard(self) -> None:
         client = SqqqClient(is_open=True, price="42", entry="40", orders=[dict(STOP)])
@@ -228,6 +345,23 @@ class TrendHoldLiveOrderTests(unittest.TestCase):
         self.assertEqual(client.cancelled, [])
         self.assertEqual(client.submitted, [])
         self.assertEqual(engine.strategy_state.last_action["SQQQ"], "Hold (open guard trend exit)")
+
+
+class DailyBuyCountTests(unittest.TestCase):
+    def test_a_buy_that_scrolled_out_of_the_order_window_still_counts_today(self) -> None:
+        from datetime import datetime
+        from alpaca_desktop.engine import MARKET_TIMEZONE
+
+        engine = engine_with()
+        now = datetime.now(MARKET_TIMEZONE).isoformat()
+        buy = {"id": "b1", "symbol": "SQQQ", "side": "buy", "filled_qty": "1", "filled_at": now}
+        engine.sync_entries_today_from_orders([buy, dict(buy, id="b2")])
+        self.assertEqual(engine.entries_today_by_symbol, {"SQQQ": 2})
+        engine.sync_entries_today_from_orders([dict(buy, id="b2")])  # b1 no longer in the newest 100
+        self.assertEqual(engine.entries_today_by_symbol, {"SQQQ": 2})
+        engine.entries_today_date = None  # a new trading day starts from the broker's orders again
+        engine.sync_entries_today_from_orders([])
+        self.assertEqual(engine.entries_today_by_symbol, {})
 
 
 class ReplayEntryCountTests(unittest.TestCase):
