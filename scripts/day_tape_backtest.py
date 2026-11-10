@@ -425,6 +425,7 @@ class DayTapeBacktester:
         self.parse_errors = 0
         self.entry_guard_holds = 0
         self.last_entry_at: datetime | None = None
+        self.entry_count_session = ""
         self.session_close: datetime | None = None
         self.top_volume_sources: set[str] = set()
         self.current_top_volume_source = ""
@@ -536,7 +537,16 @@ class DayTapeBacktester:
         config = self.engine.config
         return self.engine.entry_open_guard_message(clock, config) or self.engine.entry_close_guard_message(clock, config)
 
+    def reset_entry_counts_for_session(self, event_time: str) -> None:
+        """Per-symbol buy counts are per trading day, as the live engine rebuilds them from fills."""
+        now = parse_event_time(event_time)
+        session = now.astimezone(MARKET_TIMEZONE).date().isoformat() if now else ""
+        if session and session != self.entry_count_session:
+            self.entry_count_session = session
+            self.engine.entries_today_by_symbol = {}
+
     def evaluate_entries(self, event_time: str = "") -> None:
+        self.reset_entry_counts_for_session(event_time)
         if self.entry_guard_detail(event_time):
             self.entry_guard_holds += 1
             return
@@ -632,6 +642,9 @@ class DayTapeBacktester:
             }
             self.engine.position_peak_prices.pop(symbol, None)  # a fresh position starts its own peak
             self.positions[symbol] = ReplayPosition(symbol, qty, snapshot.price, entry_event)
+            # The live engine counts today's buys per symbol (ORB once a day, the per-symbol cap,
+            # the trend-hold re-entry cap); the replay has to keep the same count.
+            self.engine.entries_today_by_symbol[symbol] = self.engine.entries_today_by_symbol.get(symbol, 0) + 1
             self.accepted_trades.append(entry_event)
             accepted_this_scan += 1
             self.last_entry_at = now

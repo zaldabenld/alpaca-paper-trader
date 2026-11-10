@@ -199,6 +199,8 @@ INVERSE_ETF_SYMBOLS = {
 }
 
 MARKET_PROXY_SYMBOLS = ("SPY", "QQQ")
+# Inverse trend hold buys only once the fund is clearly above its session VWAP, not on a touch.
+INVERSE_TREND_ENTRY_VWAP_PERCENT = Decimal("0.1")
 TOP_VOLUME_INVERSE_ETF_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")
 
 LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
@@ -320,6 +322,10 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_buy_volume_ratio": "0.50",
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
+        "inverse_trend_hold": False,
+        "inverse_trend_exit_percent": "0.3",
+        "inverse_trend_stop_percent": "3",
+        "inverse_trend_max_entries": 2,
         "universe_mode": "most_active",
         "entry_mode": "momentum",
         "orb_minutes": 15,
@@ -383,6 +389,10 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_buy_volume_ratio": "0.50",
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
+        "inverse_trend_hold": False,
+        "inverse_trend_exit_percent": "0.3",
+        "inverse_trend_stop_percent": "3",
+        "inverse_trend_max_entries": 2,
         "universe_mode": "most_active",
         "entry_mode": "momentum",
         "orb_minutes": 15,
@@ -446,6 +456,10 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "min_buy_volume_ratio": "0.50",
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
+        "inverse_trend_hold": False,
+        "inverse_trend_exit_percent": "0.3",
+        "inverse_trend_stop_percent": "3",
+        "inverse_trend_max_entries": 2,
         "universe_mode": "most_active",
         "entry_mode": "momentum",
         "orb_minutes": 15,
@@ -494,6 +508,10 @@ PROFILE_STRATEGY_KEYS = {
     "min_buy_volume_ratio",
     "reentry_score_boost",
     "inverse_etf_mode",
+    "inverse_trend_hold",
+    "inverse_trend_exit_percent",
+    "inverse_trend_stop_percent",
+    "inverse_trend_max_entries",
     "universe_mode",
     "entry_mode",
     "orb_minutes",
@@ -610,6 +628,17 @@ class AppConfig(BaseModel):
     min_buy_volume_ratio: Decimal = Decimal("0.50")
     reentry_score_boost: Decimal = Decimal("10")
     inverse_etf_mode: str = "allow"
+    # Inverse ETF trend hold. On a falling market the inverse funds climb steadily: RSI sits above
+    # the entry window and a tight stop is shaken out by ordinary noise (a 1.25% stop on a 3x fund
+    # is a 0.4% wiggle in the index). With this on, an inverse ETF is bought when it is above its
+    # session VWAP in an uptrend and up on the session, and held until it closes
+    # inverse_trend_exit_percent under VWAP or falls inverse_trend_stop_percent from entry; no
+    # take-profit, breakeven or trailing stop cuts it short. Being above VWAP is the downturn signal:
+    # there is no separate market detector, and nothing else is blocked. Sizing is unchanged.
+    inverse_trend_hold: bool = False
+    inverse_trend_exit_percent: Decimal = Decimal("0.3")
+    inverse_trend_stop_percent: Decimal = Decimal("3")
+    inverse_trend_max_entries: int = 2
     universe_mode: str = "most_active"
     most_active_count: int = MOST_ACTIVES_MAX
     daily_pick_count: int = rvol_universe.PICK_COUNT
@@ -723,6 +752,8 @@ class AppConfig(BaseModel):
         "max_entry_rsi",
         "min_buy_volume_ratio",
         "reentry_score_boost",
+        "inverse_trend_exit_percent",
+        "inverse_trend_stop_percent",
         "take_profit_percent",
         "breakeven_at_percent",
         "profit_trail_start_percent",
@@ -867,6 +898,9 @@ class AppConfig(BaseModel):
             # A pullback floor above the cap would block every entry.
             self.min_session_pullback_percent = min(self.min_session_pullback_percent, self.max_session_pullback_percent)
         self.orb_max_breakout_percent = min(max(self.orb_max_breakout_percent, Decimal("0")), Decimal("10"))
+        self.inverse_trend_exit_percent = min(self.inverse_trend_exit_percent, Decimal("5"))
+        self.inverse_trend_stop_percent = min(max(self.inverse_trend_stop_percent, Decimal("0.5")), Decimal("20"))
+        self.inverse_trend_max_entries = min(max(int(self.inverse_trend_max_entries), 0), 10)
         self.min_buy_volume_ratio = min(self.min_buy_volume_ratio, Decimal("1"))
         if self.volume_multiplier < 0:
             raise ValueError("Volume multiplier cannot be negative.")
@@ -3407,6 +3441,8 @@ class TraderEngine:
         return f"Hold (entry spacing {int(seconds - elapsed) + 1}s)"
 
     def entry_quality_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
+        if self.inverse_trend_active(symbol, config):
+            return self.inverse_trend_entry_hold_reason(symbol, snapshot, config)
         limits = entry_profile_limits(config)
         inverse_reason = self.inverse_etf_hold_reason(symbol, config)
         if inverse_reason:
@@ -3649,6 +3685,8 @@ class TraderEngine:
             if entries_today >= config.max_entries_per_symbol_per_day:
                 self.strategy_state.last_action[symbol] = f"Hold (bought {entries_today}x today)"
                 return None
+        if self.inverse_trend_active(symbol, config):
+            return self.inverse_trend_entry_candidate(symbol, rank, snapshot, config)
         if config.entry_mode == "orb":
             return self.orb_entry_candidate(symbol, rank, snapshot, config)
         quality_hold = self.entry_quality_hold_reason(symbol, snapshot, config)
@@ -3667,6 +3705,54 @@ class TraderEngine:
             return None
         self.strategy_state.last_action[symbol] = f"Candidate score {score:.1f}"
         return {"symbol": symbol, "rank": rank, "score": score}
+
+    def inverse_trend_active(self, symbol: str, config: AppConfig) -> bool:
+        """True when this symbol trades by the inverse trend-hold rules instead of the profile's own."""
+        return (
+            bool(config.inverse_trend_hold)
+            and config.inverse_etf_mode != "exclude"
+            and symbol.strip().upper() in INVERSE_ETF_SYMBOLS
+        )
+
+    def inverse_trend_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
+        halt_reason = self.halt_hold_reason(symbol)
+        if halt_reason:
+            return halt_reason
+        with self.lock:
+            entries_today = self.entries_today_by_symbol.get(symbol.strip().upper(), 0)
+        if config.inverse_trend_max_entries > 0 and entries_today >= config.inverse_trend_max_entries:
+            return f"Hold (trend hold: bought {entries_today}x today)"
+        vwap_distance = getattr(snapshot, "vwap_distance_percent", None)
+        session_change = getattr(snapshot, "session_change_percent", None)
+        if vwap_distance is None or session_change is None or snapshot.bias == "Waiting":
+            return "Hold (trend hold warming)"
+        if vwap_distance <= INVERSE_TREND_ENTRY_VWAP_PERCENT:
+            return f"Hold (trend hold: {vwap_distance:+.2f}% vs VWAP)"
+        if snapshot.bias != "Bullish":
+            return f"Hold (trend {snapshot.bias})"
+        if session_change <= 0:
+            return f"Hold (trend hold: session {session_change:+.2f}%)"
+        return self.asset_tradeability_hold_reason(symbol)
+
+    def inverse_trend_entry_candidate(
+        self, symbol: str, rank: int, snapshot: Any, config: AppConfig
+    ) -> dict[str, Any] | None:
+        hold = self.inverse_trend_entry_hold_reason(symbol, snapshot, config)
+        if hold:
+            self.strategy_state.last_action[symbol] = hold
+            return None
+        # A fund that passes is the downturn signal, so it ranks ahead of ordinary candidates.
+        score = Decimal("100") - Decimal(rank) / Decimal("100")
+        self.set_entry_score(symbol, score)
+        self.strategy_state.last_action[symbol] = "Candidate trend hold"
+        return {"symbol": symbol, "rank": rank, "score": score}
+
+    def inverse_trend_exit_reason(self, symbol: str, config: AppConfig, current_gain: Decimal) -> str:
+        """The trend is over once the fund is back under its session VWAP by the exit buffer."""
+        vwap_distance = getattr(self.snapshot(symbol), "vwap_distance_percent", None)
+        if vwap_distance is None or vwap_distance >= -config.inverse_trend_exit_percent:
+            return ""
+        return f"trend hold ended: {vwap_distance:+.2f}% under VWAP (gain {current_gain:.2f}%)"
 
     def orb_entry_candidate(self, symbol: str, rank: int, snapshot: Any, config: AppConfig) -> dict[str, Any] | None:
         hold = self.orb_entry_hold_reason(symbol, snapshot, config)
@@ -3852,6 +3938,10 @@ class TraderEngine:
             if opening_guard_detail and self.is_stop_loss_exit_reason(local_exit_reason):
                 self.strategy_state.last_action[symbol] = "Hold (open guard stop-loss)"
                 return events, False, None
+            if opening_guard_detail and self.is_trend_hold_exit_reason(local_exit_reason):
+                # VWAP is a handful of bars old right after the open; let it settle first.
+                self.strategy_state.last_action[symbol] = "Hold (open guard trend exit)"
+                return events, False, None
             if sell_hold:
                 self.strategy_state.last_action[symbol] = sell_hold
                 return events, False, None
@@ -3859,12 +3949,25 @@ class TraderEngine:
             if cancelled is None or (cancelled and not self.wait_for_symbol_app_orders_cleared(symbol)):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 return events, False, None
-            qty_to_sell = self.sellable_qty(position)
+            # The position snapshot predates the cancel, so its qty_available still leaves out the
+            # shares the app's own stop was holding. A trend-hold exit always fires beside a live
+            # stop; without adding them back it would re-place the stop and never sell.
+            released = sum(
+                (
+                    max(Decimal("0"), abs(decimal_value(order.get("qty"))) - abs(decimal_value(order.get("filled_qty"))))
+                    for order in protective_orders
+                    if self.is_app_protective_order(order)
+                ),
+                Decimal("0"),
+            )
+            qty_to_sell = min(abs(qty), self.sellable_qty(position) + released)
             if qty_to_sell <= 0:
                 self.strategy_state.last_action[symbol] = "Hold (shares held by a working order)"
                 return events, False, None
             if self.is_take_profit_exit_reason(local_exit_reason):
-                take_profit_price, _ = self.exit_prices(decimal_value(position.get("avg_entry_price")), config)
+                take_profit_price = self.position_take_profit_price(
+                    symbol, decimal_value(position.get("avg_entry_price")), config
+                )
                 _, limit_events = self.submit_limit_exit_order(
                     symbol,
                     qty_to_sell,
@@ -4152,7 +4255,7 @@ class TraderEngine:
         current_price = decimal_value(position.get("current_price"))
         if qty <= 0 or entry_price <= 0:
             return []
-        take_profit_price, _ = self.exit_prices(entry_price, self.config)
+        take_profit_price = self.position_take_profit_price(symbol, entry_price, self.config)
         self.seed_peak_from_live_stops(symbol, entry_price, symbol_orders, self.config)
         stop_loss_price = self.position_stop_price(symbol, entry_price, current_price, self.config)
         if stop_loss_price <= 0:
@@ -4188,7 +4291,7 @@ class TraderEngine:
             "stop_loss",
             stop_loss_price,
             self.snapshot(symbol),
-            f"off-hours stop-loss {self.config.stop_loss_percent}% queued for next open",
+            f"off-hours stop-loss {self.position_stop_percent(symbol, self.config)}% queued for next open",
             reject_hold_until=next_open,
         )
         if submitted:
@@ -4246,7 +4349,7 @@ class TraderEngine:
                 (
                     f"trailing stop {money(stop_loss_price)} (take-profit limit unfilled, price fell back)"
                     if stop_loss_price >= entry_price
-                    else f"stop-loss {self.config.stop_loss_percent}% (take-profit limit unfilled, price fell back)"
+                    else f"stop-loss {self.position_stop_percent(symbol, self.config)}% (take-profit limit unfilled, price fell back)"
                 ),
             )
         )
@@ -4296,6 +4399,15 @@ class TraderEngine:
         to 0.25%-of-entry steps so the broker order is only replaced every quarter percent. The
         result only ever rises for a position (callers never lower a live stop below it).
         """
+        if self.inverse_trend_active(symbol, config):
+            # One wide stop from entry and nothing that ratchets: the VWAP exit ends the hold.
+            if entry_price <= 0:
+                return Decimal("0")
+            offset = max(
+                entry_price * config.inverse_trend_stop_percent / Decimal("100"),
+                self.minimum_exit_offset(entry_price),
+            )
+            return max(Decimal("0"), self.round_exit_price(entry_price - offset, ROUND_DOWN))
         _, stop = self.exit_prices(entry_price, config)
         if entry_price <= 0:
             return stop
@@ -4337,6 +4449,18 @@ class TraderEngine:
                 implied_peak = entry_price * (Decimal("1") + config.breakeven_at_percent / Decimal("100"))
             self.update_position_peak(symbol, entry_price, implied_peak)
 
+    def position_take_profit_price(self, symbol: str, entry_price: Decimal, config: AppConfig) -> Decimal:
+        """The profit target for a held position; none while an inverse fund is on trend hold."""
+        if self.inverse_trend_active(symbol, config):
+            return Decimal("0")
+        return self.exit_prices(entry_price, config)[0]
+
+    def position_stop_percent(self, symbol: str, config: AppConfig) -> Decimal:
+        """The stop distance from entry that applies to this position, for log and order notes."""
+        if self.inverse_trend_active(symbol, config):
+            return config.inverse_trend_stop_percent
+        return config.stop_loss_percent
+
     def exit_prices(self, entry_price: Decimal, config: AppConfig) -> tuple[Decimal, Decimal]:
         take_profit = Decimal("0")
         stop_loss = Decimal("0")
@@ -4377,7 +4501,7 @@ class TraderEngine:
         if qty <= 0 or entry_price <= 0 or current_price <= 0:
             return events, False, bool(protective_orders), False
 
-        take_profit_price, _ = self.exit_prices(entry_price, self.config)
+        take_profit_price = self.position_take_profit_price(symbol, entry_price, self.config)
         self.seed_peak_from_live_stops(symbol, entry_price, protective_orders, self.config)
         stop_loss_price = self.position_stop_price(symbol, entry_price, current_price, self.config)
         if take_profit_price <= 0 and stop_loss_price <= 0:
@@ -4415,7 +4539,7 @@ class TraderEngine:
                 reason = f"local trailing stop {money(stop_loss_price)} (gain {current_gain:.2f}%, manual stop missing)"
             else:
                 reason = (
-                    f"local stop-loss {self.config.stop_loss_percent}%"
+                    f"local stop-loss {self.position_stop_percent(symbol, self.config)}%"
                     f" (gain {current_gain:.2f}%, manual stop missing)"
                 )
             qty_to_sell = self.sellable_qty(position)
@@ -4453,7 +4577,7 @@ class TraderEngine:
                 "stop_loss",
                 stop_loss_price,
                 snapshot,
-                f"manual stop-loss {self.config.stop_loss_percent}%",
+                f"manual stop-loss {self.position_stop_percent(symbol, self.config)}%",
             )
             events.extend(submit_events)
             protection_active = protection_active or submitted
@@ -4607,6 +4731,15 @@ class TraderEngine:
 
         current_gain = percent_change(current_price, entry_price)
 
+        if self.inverse_trend_active(symbol, config):
+            trend_exit = self.inverse_trend_exit_reason(symbol, config, current_gain)
+            if trend_exit:
+                return trend_exit, ""
+            stop_price = self.position_stop_price(symbol, entry_price, current_price, config)
+            if stop_price > 0 and current_price <= stop_price and not has_stop_loss_order:
+                return f"local stop-loss {config.inverse_trend_stop_percent}% (gain {current_gain:.2f}%)", ""
+            return "", ""
+
         if config.take_profit_percent > 0 and current_gain >= config.take_profit_percent and not has_take_profit_order:
             return (
                 f"local take-profit {config.take_profit_percent}%"
@@ -4624,6 +4757,9 @@ class TraderEngine:
     def is_stop_loss_exit_reason(self, reason: str) -> bool:
         text = str(reason or "").lower()
         return "stop-loss" in text or "trailing stop" in text
+
+    def is_trend_hold_exit_reason(self, reason: str) -> bool:
+        return str(reason or "").lower().startswith("trend hold ended")
 
     def is_take_profit_exit_reason(self, reason: str) -> bool:
         return "take-profit" in str(reason or "").lower()
@@ -5681,6 +5817,8 @@ class TraderEngine:
             return "Gain Realized (Trail)"
         if "stop-loss" in clean:
             return "Loss Protection"
+        if "trend hold ended" in clean:
+            return "Trend Hold Ended"
         order_type = str((item or {}).get("type") or (item or {}).get("order_type") or "").lower()
         order_class = str((item or {}).get("order_class") or "").lower()
         if role == "Exit/Protective" or order_class in {"bracket", "oco", "oto"}:
@@ -5774,6 +5912,10 @@ class TraderEngine:
                     details.append("stop live")
                 if "take_profit" in protective_kinds:
                     details.append("profit limit live")
+                elif self.inverse_trend_active(symbol, self.config):
+                    details.append(
+                        f"trend hold: exits {self.config.inverse_trend_exit_percent}% under VWAP"
+                    )
                 elif self.config.take_profit_percent > 0:
                     take_profit_price, _ = self.exit_prices(decimal_value(position.get("avg_entry_price")), self.config)
                     if take_profit_price > 0:

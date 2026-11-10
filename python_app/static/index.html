@@ -655,6 +655,22 @@
                       <option value="inverse_only">Inverse set only</option>
                     </select>
                   </label>
+                  <label class="check-row" title="On a falling market, buy an inverse ETF once it is above its session VWAP in an uptrend and keep it until it closes back under VWAP. No take-profit, breakeven or trailing stop cuts the hold short.">
+                    <input id="inverseTrendHold" type="checkbox" />
+                    <span>Hold inverse ETFs while the market falls</span>
+                  </label>
+                  <label title="Inverse trend hold only: sell once the fund is this far under its session VWAP.">
+                    Trend Hold Exit % under VWAP
+                    <input id="inverseTrendExitPercent" type="number" min="0" max="5" step="0.05" value="0.3" />
+                  </label>
+                  <label title="Inverse trend hold only: hard stop this far below the entry price, in place of the normal stop.">
+                    Trend Hold Stop %
+                    <input id="inverseTrendStopPercent" type="number" min="0.5" max="20" step="0.25" value="3" />
+                  </label>
+                  <label title="Inverse trend hold only: most times one inverse ETF may be bought in a day (0 = no cap).">
+                    Trend Hold Buys per Fund per Day
+                    <input id="inverseTrendMaxEntries" type="number" min="0" max="10" step="1" value="2" />
+                  </label>
                   <label title="Bars used for the average-volume baseline.">
                     Vol Period
                     <input id="volumePeriod" type="number" min="1" step="1" value="20" />
