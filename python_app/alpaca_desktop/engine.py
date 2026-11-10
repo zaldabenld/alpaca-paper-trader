@@ -78,6 +78,7 @@ from .storage import write_private_json
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
 from . import app_settings
 from . import market_overview
+from . import symbol_info as symbol_info_logic
 from . import universe as rvol_universe
 
 
@@ -5994,6 +5995,7 @@ class TraderManager:
         self.daily_volume_averages: dict[tuple[str, str], dict[str, tuple[float, int] | None]] = {}
         self.market_overview_lock = threading.Lock()
         self.market_overview_cache: tuple[float, dict[str, Any]] | None = None
+        self.symbol_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.create_account("Account 1", AppConfig())
 
     def reset_settings_load_errors(self) -> None:
@@ -6572,7 +6574,38 @@ class TraderManager:
         self.ensure_market_data_stream()
 
     def lookup_symbol(self, symbol: str, account_id: str | None = None) -> dict[str, Any]:
-        return self.dashboard_engine(account_id).lookup_symbol(symbol)
+        payload = self.dashboard_engine(account_id).lookup_symbol(symbol)
+        # A copy: the engine caches (and has already taped) the snapshot payload.
+        return {**payload, "asset": self.symbol_info(str(payload.get("symbol") or symbol), account_id)}
+
+    def symbol_info(self, symbol: str, account_id: str | None = None) -> dict[str, Any]:
+        """Company name, exchange and trading flags for one ticker, from the broker's asset record.
+
+        One trading-API call per symbol, then cached for hours; an unknown ticker or a failed call is
+        cached briefly so resting the mouse on it does not keep calling. Never raises.
+        """
+        cleaned = clean_symbols([symbol])
+        if not cleaned:
+            return symbol_info_logic.missing(str(symbol or "").strip().upper())
+        target = cleaned[0]
+        now = time.monotonic()
+        with self.lock:
+            cached = self.symbol_info_cache.get(target)
+        if cached and now < cached[0]:
+            return cached[1]
+        client = self.dashboard_engine(account_id).trading_client
+        if client is None:
+            return symbol_info_logic.missing(target)
+        try:
+            info = symbol_info_logic.asset_summary(target, model_dict(client.get_asset(target)))
+        except Exception:
+            info = symbol_info_logic.missing(target)
+        ttl = symbol_info_logic.FOUND_CACHE_SECONDS if info["found"] else symbol_info_logic.MISSING_CACHE_SECONDS
+        with self.lock:
+            if len(self.symbol_info_cache) >= symbol_info_logic.CACHE_LIMIT:
+                self.symbol_info_cache.clear()
+            self.symbol_info_cache[target] = (now + ttl, info)
+        return info
 
     def list_engines(self) -> list[TraderEngine]:
         with self.lock:

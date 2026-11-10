@@ -144,6 +144,7 @@ const els = {
   lookupButton: document.querySelector("#lookupButton"),
   marketOverviewToggle: document.querySelector("#marketOverviewToggle"),
   tickerTrack: document.querySelector("#tickerTrack"),
+  symbolTip: document.querySelector("#symbolTip"),
   indexCharts: document.querySelector("#indexCharts"),
   indexBoxUpdated: document.querySelector("#indexBoxUpdated"),
   newsUpdated: document.querySelector("#newsUpdated"),
@@ -1979,6 +1980,7 @@ function renderTopVolumeRows(rows) {
     ].forEach((value, index) => {
       const td = document.createElement("td");
       td.textContent = value ?? "";
+      if (index === 1) markSymbolCell(td, value);
       if (index === 2) td.className = "positive";
       if (index === 3) td.className = "negative";
       if (index === 11) td.className = row.halted ? "negative" : "positive";
@@ -2019,6 +2021,7 @@ function renderPositionRows() {
     columns.forEach((key) => {
       const td = document.createElement("td");
       td.textContent = row[key] ?? "";
+      if (key === "symbol") markSymbolCell(td, row[key]);
       if (key === "unrealized_pl" || key === "unrealized_pl_pct") {
         td.className = Number(row.unrealized_pl_raw || 0) >= 0 ? "positive" : "negative";
       }
@@ -2070,6 +2073,7 @@ function renderTradeHistoryRows(rows) {
     columns.forEach((key) => {
       const td = document.createElement("td");
       td.textContent = row[key] ?? "";
+      if (key === "symbol") markSymbolCell(td, row[key]);
       if (key === "realized_pl" || key === "realized_pl_pct") {
         const value = Number(row.realized_pl_raw || 0);
         if (row.side === "sell") td.className = value >= 0 ? "positive" : "negative";
@@ -2324,17 +2328,21 @@ function renderLookup(payload) {
   const quote = payload.latest_quote || {};
   const minute = payload.minute_bar || {};
   const daily = payload.daily_bar || {};
+  const asset = payload.asset || {};
+  const about = [asset.summary, ...(asset.tags || [])].filter(Boolean).join(" · ");
   els.lookupResult.innerHTML = `
     <div class="lookup-heading">
       <strong>${escapeHtml(payload.symbol || "")}</strong>
-      <span>${escapeHtml(payload.feed || "")} | ${escapeHtml(payload.fetched_at || "")}</span>
+      <span class="lookup-name">${escapeHtml(asset.name || "Company name unavailable")}</span>
     </div>
+    <p class="lookup-about">${escapeHtml(about)}</p>
     <div class="lookup-metrics">
       <div><span>Last Trade</span><strong>${escapeHtml(trade.price || "-")}</strong><small>${escapeHtml(trade.size || "-")} shares</small></div>
       <div><span>Bid / Ask</span><strong>${escapeHtml(quote.bid || "-")} / ${escapeHtml(quote.ask || "-")}</strong><small>Spread ${escapeHtml(quote.spread || "-")}</small></div>
       <div><span>Minute Vol</span><strong>${escapeHtml(minute.volume || "-")}</strong><small>Close ${escapeHtml(minute.close || "-")}</small></div>
       <div><span>Daily Vol</span><strong>${escapeHtml(daily.volume || "-")}</strong><small>${escapeHtml(payload.daily_change || "-")}</small></div>
     </div>
+    <small class="lookup-stamp">${escapeHtml(payload.feed || "")} feed · ${escapeHtml(payload.fetched_at || "")}</small>
   `;
 }
 
@@ -2781,11 +2789,106 @@ function renderRows(tbody, rows, keys) {
     keys.forEach((key) => {
       const td = document.createElement("td");
       td.textContent = row[key] ?? "";
+      if (key === "symbol") markSymbolCell(td, row[key]);
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
   });
 }
+
+// Symbol info: resting the mouse on any ticker shows what it is (company name, exchange, flags).
+// One floating tip for the whole page, because the tables are rebuilt on every poll.
+const SYMBOL_TIP_DELAY_MS = 250;
+const symbolInfoRequests = new Map();
+let symbolTipSymbol = "";
+let symbolTipAnchor = null;
+let symbolTipTimer = null;
+
+function markSymbolCell(cell, symbol) {
+  const clean = String(symbol || "").trim().toUpperCase();
+  if (!clean) return;
+  cell.dataset.symbol = clean;
+  cell.classList.add("symbol-cell");
+}
+
+function fetchSymbolInfo(symbol) {
+  if (!symbolInfoRequests.has(symbol)) {
+    const account = selectedAccountId ? `&account_id=${encodeURIComponent(selectedAccountId)}` : "";
+    const request = fetch(`/api/symbol-info?symbol=${encodeURIComponent(symbol)}${account}`)
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null)
+      .then((info) => {
+        // Keep a name for the session; ask again later for a ticker that had no answer.
+        if (!info || !info.found) setTimeout(() => symbolInfoRequests.delete(symbol), 60000);
+        return info;
+      });
+    symbolInfoRequests.set(symbol, request);
+  }
+  return symbolInfoRequests.get(symbol);
+}
+
+function renderSymbolTip(symbol, info, rect) {
+  const tip = els.symbolTip;
+  tip.replaceChildren();
+  if (info === undefined) {
+    tip.append(makeEl("strong", "", symbol), makeEl("span", "", "Loading..."));
+  } else if (!info || !info.found) {
+    tip.append(makeEl("strong", "", symbol), makeEl("span", "", "No company details available."));
+  } else {
+    tip.append(
+      makeEl("strong", "", info.name || symbol),
+      makeEl("span", "", [symbol, info.summary].filter(Boolean).join(" · "))
+    );
+    if ((info.tags || []).length) tip.appendChild(makeEl("small", "", info.tags.join(" · ")));
+  }
+  tip.hidden = false;
+  const box = tip.getBoundingClientRect();
+  const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - box.width - 8));
+  const below = rect.bottom + 6;
+  const top = below + box.height > window.innerHeight - 8 ? Math.max(8, rect.top - box.height - 6) : below;
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
+}
+
+function showSymbolTip(anchor, symbol) {
+  symbolTipSymbol = symbol;
+  symbolTipAnchor = anchor;
+  const rect = anchor.getBoundingClientRect();
+  clearTimeout(symbolTipTimer);
+  symbolTipTimer = setTimeout(async () => {
+    renderSymbolTip(symbol, undefined, rect);
+    const info = await fetchSymbolInfo(symbol);
+    if (symbolTipSymbol === symbol) renderSymbolTip(symbol, info, rect);
+  }, SYMBOL_TIP_DELAY_MS);
+}
+
+function hideSymbolTip() {
+  symbolTipSymbol = "";
+  symbolTipAnchor = null;
+  clearTimeout(symbolTipTimer);
+  els.symbolTip.hidden = true;
+}
+
+function symbolTipTarget(event) {
+  const anchor = event.target instanceof Element ? event.target.closest("[data-symbol]") : null;
+  const symbol = anchor?.dataset.symbol || "";
+  if (!symbol) {
+    if (symbolTipSymbol) hideSymbolTip();
+    return;
+  }
+  // The same ticker redrawn under the mouse by a poll keeps its tip where it is.
+  if (symbol === symbolTipSymbol && (anchor === symbolTipAnchor || !symbolTipAnchor?.isConnected)) {
+    symbolTipAnchor = anchor;
+    return;
+  }
+  showSymbolTip(anchor, symbol);
+}
+
+document.addEventListener("mouseover", symbolTipTarget);
+document.addEventListener("focusin", symbolTipTarget);
+document.addEventListener("focusout", hideSymbolTip);
+document.documentElement.addEventListener("mouseleave", hideSymbolTip);
+window.addEventListener("scroll", hideSymbolTip, true);
 
 function escapeHtml(value) {
   return String(value)
@@ -3009,7 +3112,7 @@ function tickerItem(item) {
   const button = makeEl("button", `ticker-item ${direction}`);
   button.type = "button";
   button.dataset.symbol = item.symbol;
-  button.title = `Look up ${item.symbol}`;
+  button.setAttribute("aria-label", `Look up ${item.symbol}`);
   button.append(
     makeEl("strong", "", item.symbol),
     makeEl("span", "ticker-price", formatQuotePrice(item.price)),
@@ -3088,7 +3191,8 @@ function renderNews(items) {
     (item.symbols || []).forEach((symbol) => {
       const chip = makeEl("button", "news-symbol", symbol);
       chip.type = "button";
-      chip.title = `Look up ${symbol}`;
+      chip.dataset.symbol = String(symbol).toUpperCase();
+      chip.setAttribute("aria-label", `Look up ${symbol}`);
       chip.addEventListener("click", () => openSymbolLookup(symbol));
       meta.appendChild(chip);
     });
@@ -3116,9 +3220,19 @@ function flashNews(item) {
   }, NEWS_FLASH_MS);
 }
 
+// The button names what a click does, so a hidden overview is never a mystery.
+function syncMarketOverviewToggle(hidden) {
+  els.marketOverviewToggle.setAttribute("aria-pressed", String(!hidden));
+  els.marketOverviewToggle.title = hidden
+    ? "Show the ticker tape, index charts and news"
+    : "Hide the ticker tape, index charts and news";
+  const label = els.marketOverviewToggle.querySelector("span");
+  if (label) label.textContent = hidden ? "Show markets" : "Hide markets";
+}
+
 function setMarketOverviewHidden(hidden) {
   document.body.classList.toggle("market-overview-hidden", hidden);
-  els.marketOverviewToggle.setAttribute("aria-pressed", String(!hidden));
+  syncMarketOverviewToggle(hidden);
   try {
     if (hidden) localStorage.setItem("apt-market-overview", "hidden");
     else localStorage.removeItem("apt-market-overview");
@@ -3135,7 +3249,7 @@ try {
   marketOverviewHidden = false;
 }
 document.body.classList.toggle("market-overview-hidden", marketOverviewHidden);
-els.marketOverviewToggle.setAttribute("aria-pressed", String(!marketOverviewHidden));
+syncMarketOverviewToggle(marketOverviewHidden);
 els.marketOverviewToggle.addEventListener("click", () =>
   setMarketOverviewHidden(!document.body.classList.contains("market-overview-hidden"))
 );

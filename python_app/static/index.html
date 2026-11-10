@@ -41,7 +41,7 @@
           <p id="statusText">Not connected</p>
         </div>
         <div class="topbar-actions">
-          <button id="marketOverviewToggle" class="secondary ghost-button" type="button" aria-controls="tickerTape marketOverview" aria-pressed="true" title="Show or hide the market overview"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="m7 15 4-5 3 3 5-6"/></svg><span>Markets</span></button>
+          <button id="marketOverviewToggle" class="secondary ghost-button" type="button" aria-controls="tickerTape marketOverview" aria-pressed="true" title="Hide the ticker tape, index charts and news"><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="m7 15 4-5 3 3 5-6"/></svg><span>Hide markets</span></button>
           <div class="mode-pill">Paper API</div>
         </div>
       </header>
@@ -1082,6 +1082,7 @@
       </section>
       </div>
     </main>
+    <div id="symbolTip" class="symbol-tip" role="tooltip" hidden></div>
     <script src="/static/app.js"></script>
   </body>
 </html>
