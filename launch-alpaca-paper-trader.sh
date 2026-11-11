@@ -5,6 +5,8 @@
 #   launch-alpaca-paper-trader.sh --install-desktop  add the app-menu entry pointing at this checkout
 #   launch-alpaca-paper-trader.sh --install-protect-timer  install the user timer that runs stop protection
 #   launch-alpaca-paper-trader.sh --remove-protect-timer   remove that stop-protection timer
+#   launch-alpaca-paper-trader.sh --install-service  start the backend at boot/login (systemd user service)
+#   launch-alpaca-paper-trader.sh --remove-service   remove that service
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -83,6 +85,23 @@ remove_protect_timer() {
     echo "Removed alpaca-protect.timer."
 }
 
+install_service() {
+    local units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$units"
+    sed "s|@ROOT@|$ROOT|g" "$ROOT/deploy/systemd/alpaca-paper-trader.service" >"$units/alpaca-paper-trader.service"
+    systemctl --user daemon-reload
+    systemctl --user enable alpaca-paper-trader.service
+    echo "Installed alpaca-paper-trader.service (starts the backend at boot/login; with loginctl linger it needs no login). Open the window with the app-menu entry or this launcher."
+}
+
+remove_service() {
+    local units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    systemctl --user disable alpaca-paper-trader.service 2>/dev/null || true
+    rm -f "$units/alpaca-paper-trader.service"
+    systemctl --user daemon-reload
+    echo "Removed alpaca-paper-trader.service (a running backend is left alone)."
+}
+
 open_window() {
     local browser
     for browser in google-chrome chromium chromium-browser brave-browser microsoft-edge; do
@@ -102,6 +121,8 @@ case "${1:-}" in
     --stop) stop_backend; exit 0 ;;
     --install-desktop) install_desktop; exit 0 ;;
     --install-protect-timer) install_protect_timer; exit 0 ;;
+    --install-service) install_service; exit 0 ;;
+    --remove-service) remove_service; exit 0 ;;
     --remove-protect-timer) remove_protect_timer; exit 0 ;;
     "") ;;
     *) fail "Unknown option: $1" ;;

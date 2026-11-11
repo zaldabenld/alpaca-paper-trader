@@ -1,0 +1,16 @@
+[Unit]
+Description=Alpaca Paper Trader backend
+Documentation=file://@ROOT@/OPERATING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# run.py reuses a backend that is already running (exit 0) or starts one in the foreground.
+ExecStart=@ROOT@/.venv/bin/python @ROOT@/python_app/run.py --no-browser
+Restart=on-failure
+RestartSec=15
+Nice=5
+
+[Install]
+WantedBy=default.target
