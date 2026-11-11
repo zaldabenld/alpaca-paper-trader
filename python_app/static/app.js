@@ -677,6 +677,8 @@ let accountFieldsDirty = false;
 let mirroredAccount = null;
 // The backend process this page was loaded from; a restart means the page code may be out of date.
 let loadedBackendStamp = "";
+// Counts edits, so a save can tell whether the user kept typing while it was in flight.
+let pendingEditCount = 0;
 
 setupSortableTables();
 
@@ -777,8 +779,8 @@ fields.profile.addEventListener("change", async () => {
 fields.remember.addEventListener("change", syncAutoConnectControl);
 fields.autoConnect.addEventListener("change", syncAutoConnectControl);
 [fields.accountName, fields.remember, fields.autoConnect, fields.autoStartTrading].forEach((field) => {
-  field.addEventListener("input", () => { accountFieldsDirty = true; });
-  field.addEventListener("change", () => { accountFieldsDirty = true; });
+  field.addEventListener("input", markAccountFieldsPending);
+  field.addEventListener("change", markAccountFieldsPending);
 });
 
 els.saveCustomProfileButton.addEventListener("click", saveCustomProfile);
@@ -793,6 +795,8 @@ configKeys
     field.addEventListener("change", () => handleConfigFieldChange(key));
   });
 
+fields.symbols.addEventListener("input", () => handleConfigFieldChange("symbols"));
+fields.symbols.addEventListener("change", () => handleConfigFieldChange("symbols"));
 fields.inverseEtfSymbols.addEventListener("input", () => handleConfigFieldChange("inverse_etf_symbols"));
 fields.inverseEtfSymbols.addEventListener("change", () => handleConfigFieldChange("inverse_etf_symbols"));
 
@@ -1029,11 +1033,12 @@ async function switchToAccount(nextAccountId) {
 }
 
 async function saveCurrentAccountDraft(applySavedAccount = true, options = {}) {
+  const editsAtSave = pendingEditCount;
   const state = await postJson("/api/accounts", readAccountPayload());
   if (options.guard && !options.guard()) return state;
   selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
   isDraftAccount = false;
-  clearPendingEdits();
+  clearPendingEditsSince(editsAtSave);
   await loadSettings({ applySelected: applySavedAccount, guard: options.guard });
   return state;
 }
@@ -1332,9 +1337,19 @@ async function applyProfilePreset() {
     current: readConfig(),
   });
   if (!isCurrentAccountContext(context)) return;
-  applyConfig(config);
-  markConfigPending(Object.keys(config));
+  applyConfigAsPendingEdit(config);
+  markConfigPending(["profile"]);
   renderParameterStatus(null);
+}
+
+// Puts a preset in the form as an unapplied edit. Only the settings it actually changed become
+// pending, so the rest of the form keeps following the live account.
+function applyConfigAsPendingEdit(config) {
+  const before = readConfig();
+  applyConfig(config);
+  const after = readConfig();
+  const changed = Object.keys(after).filter((key) => !sameSettingValue(before[key], after[key]));
+  if (changed.length) markConfigPending(changed);
 }
 
 async function applyCurrentParameters() {
@@ -1346,10 +1361,11 @@ async function applyCurrentParameters() {
     const context = makeRenderContext(selectedAccountId, {
       allowSelectedAccountChange: !selectedAccountId || isDraftAccount,
     });
+    const editsAtSave = pendingEditCount;
     const state = await postJson("/api/apply-parameters", readAccountPayload());
     selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
     isDraftAccount = false;
-    clearPendingEdits();
+    clearPendingEditsSince(editsAtSave);
     await loadSettings({ applySelected: false, guard: () => isCurrentAccountContext(context) });
     if (renderState(state, context)) {
       await loadDashboard({ accountId: selectedAccountId, source: "apply-parameters" });
@@ -1372,12 +1388,13 @@ async function saveCustomProfile() {
   if (!isCurrentAccountContext(context)) return;
   profiles = payload.profiles || profiles;
   renderProfileSelect(payload.profile);
-  applyConfig(payload.config);
   // The profile is saved. Putting it on this account is still a pending change until Apply Changes.
-  markConfigPending(Object.keys(payload.config || {}));
+  applyConfigAsPendingEdit(payload.config);
   renderParameterStatus(null);
   els.profileStatus.textContent = `Saved ${profileLabel(payload.profile, payload.config)}. Click Apply Changes to use it on this account.`;
 }
+
+const tradeSizeKeys = ["trade_size_mode", "max_trade_notional", "max_trade_percent"];
 
 function clearPendingEdits() {
   parameterDirty = false;
@@ -1385,9 +1402,24 @@ function clearPendingEdits() {
   dirtyConfigKeys.clear();
 }
 
+// After a save: clear the pending marks unless the user kept editing while the save was in flight.
+function clearPendingEditsSince(editsAtSave) {
+  if (pendingEditCount === editsAtSave) clearPendingEdits();
+}
+
 function markConfigPending(keys) {
-  keys.forEach((key) => dirtyConfigKeys.add(key));
+  keys.forEach((key) => {
+    dirtyConfigKeys.add(key);
+    // The size mode decides which of the two size fields the form sends, so the three move together.
+    if (tradeSizeKeys.includes(key)) tradeSizeKeys.forEach((sizeKey) => dirtyConfigKeys.add(sizeKey));
+  });
   parameterDirty = true;
+  pendingEditCount += 1;
+}
+
+function markAccountFieldsPending() {
+  accountFieldsDirty = true;
+  pendingEditCount += 1;
 }
 
 function hasPendingEdits() {
@@ -1398,14 +1430,8 @@ function hasPendingEdits() {
 
 function handleConfigFieldChange(key) {
   if (suppressProfileDirty) return;
-  dirtyConfigKeys.add(key);
-  if (key === "trade_size_mode") {
-    syncTradeSizeModeControl();
-    // The size mode decides which of these two the form sends.
-    dirtyConfigKeys.add("max_trade_notional");
-    dirtyConfigKeys.add("max_trade_percent");
-  }
-  parameterDirty = true;
+  if (key === "trade_size_mode") syncTradeSizeModeControl();
+  markConfigPending([key]);
   renderParameterStatus(null);
   if (strategyProfileKeys.has(key)) renderProfileStatus();
 }
@@ -1910,9 +1936,18 @@ async function loadSettings(options = {}) {
   applyAppSettings(payload.app_settings);
   savedAccounts = payload.accounts || [];
   renderSettingsDiagnostics(payload.settings_diagnostics || {});
-  selectedAccountId = payload.selected_account_id || savedAccounts[0]?.account_id || "";
+  // A plain re-read keeps this page on the account (or new-account draft) it is showing, with the
+  // profile it has picked. The server's selection only decides which account opens on a full load.
+  const keepSelection = !applySelected && (isDraftAccount || Boolean(findSavedAccount(selectedAccountId)));
+  if (!keepSelection) {
+    selectedAccountId = payload.selected_account_id || savedAccounts[0]?.account_id || "";
+  }
   const account = findSavedAccount(selectedAccountId) || savedAccounts[0];
-  renderProfileSelect(account?.config?.profile || fields.profile.value || "neutral");
+  renderProfileSelect(
+    keepSelection
+      ? fields.profile.value || "neutral"
+      : account?.config?.profile || fields.profile.value || "neutral"
+  );
   renderAccountSelect();
   if (applySelected && account) applyAccount(account);
 }

@@ -1015,6 +1015,9 @@ def _fill_preset_strategy_defaults() -> None:
 _fill_preset_strategy_defaults()
 
 
+TRADE_SIZE_KEYS = frozenset({"trade_size_mode", "max_trade_notional", "max_trade_percent"})
+
+
 class AccountPayload(BaseModel):
     account_id: str | None = None
     name: str = "Paper Account"
@@ -2001,19 +2004,23 @@ class TraderEngine:
         """The payload's config, keeping this account's current value for every key the client left out.
 
         A page or script that does not know a setting must not reset it to the default just by saving
-        the settings it does know. Only keys that were actually sent can change.
+        the settings it does know. Only keys that were actually sent can change. The payload has
+        already been validated on its own, so a partial payload still has to be a valid config.
         """
         sent = payload._sent_config_keys
         if sent is None:
             return payload.config
+        if sent & TRADE_SIZE_KEYS:
+            # Mode and the two size caps only make sense together: take all three as sent and normalized.
+            sent = sent | TRADE_SIZE_KEYS
         with self.lock:
             current = self.config
-        unsent = [key for key in AppConfig.model_fields if key not in sent]
-        if not unsent:
-            return payload.config
-        merged = payload.config.model_dump()
-        merged.update({key: getattr(current, key) for key in unsent})
-        return AppConfig.model_validate(merged)
+            unsent = [key for key in AppConfig.model_fields if key not in sent]
+            if not unsent:
+                return payload.config
+            merged = payload.config.model_dump()
+            merged.update({key: getattr(current, key) for key in unsent})
+            return AppConfig.model_validate(merged)
 
     def configure_payload(self, payload: AccountPayload) -> None:
         api_key = credential_text(payload.api_key)
@@ -2021,10 +2028,9 @@ class TraderEngine:
         validation_error = credential_validation_error(api_key, secret_key, require_pair=False)
         if validation_error:
             raise RuntimeError(validation_error)
-        config = self.payload_config(payload)
         with self.lock:
             self.name = payload.name.strip() or "Paper Account"
-            self.config = config
+            self.config = self.payload_config(payload)
             self.settings_load_error = ""
             if api_key:
                 self.api_key = api_key
@@ -2198,12 +2204,11 @@ class TraderEngine:
 
     def connect(self, payload: AccountPayload) -> None:
         api_key, secret_key = self.payload_credentials(payload)
-        config = self.payload_config(payload)
         with self.lock:
             self.stop_streams_locked()
             self.close_api_clients_locked()
             self.name = payload.name.strip() or "Paper Account"
-            self.config = config
+            self.config = self.payload_config(payload)
             self.api_key = api_key
             self.secret_key = secret_key
             self.remember = payload.remember

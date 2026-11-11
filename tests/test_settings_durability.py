@@ -114,8 +114,35 @@ class UnsentSettingsAreKeptTests(unittest.TestCase):
         engine = manager.upsert_payload(payload)
         engine.configure_payload(payload)
 
-        self.assertEqual(engine.config.stop_loss_percent, Decimal("2"))
-        self.assertFalse(engine.config.inverse_trend_hold)
+        self.assertEqual(engine.config.model_dump(), AppConfig(stop_loss_percent=Decimal("2")).model_dump())
+
+    def test_switching_to_dollar_sizing_without_sending_the_percent_cap(self) -> None:
+        engine = engine_with(trade_size_mode="percent", max_trade_percent=Decimal("5"), inverse_trend_hold=True)
+
+        engine.configure_payload(payload_from_client({"trade_size_mode": "notional", "max_trade_notional": "100"}))
+
+        self.assertEqual(engine.config.trade_size_mode, "notional")
+        self.assertEqual(engine.config.max_trade_notional, Decimal("100"))
+        self.assertEqual(engine.config.max_trade_percent, Decimal("0"))
+        self.assertTrue(engine.config.inverse_trend_hold)
+
+    def test_sending_only_a_percent_cap_to_a_dollar_sized_account(self) -> None:
+        engine = engine_with(trade_size_mode="notional", max_trade_notional=Decimal("25"), max_trade_percent=Decimal("0"))
+
+        engine.configure_payload(payload_from_client({"max_trade_percent": "5"}))
+
+        self.assertEqual(engine.config.trade_size_mode, "percent")
+        self.assertEqual(engine.config.max_trade_percent, Decimal("5"))
+        self.assertEqual(engine.config.max_trade_notional, Decimal("0"))
+
+    def test_a_save_without_size_settings_keeps_the_sizing(self) -> None:
+        engine = engine_with(trade_size_mode="notional", max_trade_notional=Decimal("25"), max_trade_percent=Decimal("0"))
+
+        engine.configure_payload(payload_from_client({"stop_loss_percent": "2"}))
+
+        self.assertEqual(engine.config.trade_size_mode, "notional")
+        self.assertEqual(engine.config.max_trade_notional, Decimal("25"))
+        self.assertEqual(engine.config.max_trade_percent, Decimal("0"))
 
 
 class ViewingNeverSavesTests(unittest.TestCase):
@@ -136,17 +163,49 @@ class ViewingNeverSavesTests(unittest.TestCase):
         self.assertEqual(self.source.count('postJson("/api/apply-parameters"'), 1)
         self.assertEqual(self.source.count("saveCurrentAccountDraft("), 2)  # the definition and Save Account
 
-    def test_live_settings_are_shown_in_the_form(self) -> None:
-        self.assertIn("function syncFormFromServer(selected)", self.source)
-        self.assertIn("syncFormFromServer(selected);", self.source)
+    def test_live_settings_are_mirrored_into_the_form_on_every_state(self) -> None:
+        render = function_body(self.source, "function renderState(state, context)")
+        self.assertIn("syncFormFromServer(selected);", render)
+        sync = function_body(self.source, "function syncFormFromServer(selected)")
+        # Pending edits win over the live value; everything else is written from the live config.
+        self.assertIn("changedKeys.filter((key) => !dirtyConfigKeys.has(key))", sync)
+        self.assertIn("applyConfig(config, new Set(incoming));", sync)
+        self.assertIn("applyConfig(config);", sync)
+        self.assertNotIn("markConfigPending", sync)
+        self.assertNotIn("postJson", sync)
 
-    def test_pending_edits_are_not_overwritten_or_silently_dropped(self) -> None:
-        self.assertIn("dirtyConfigKeys.has(key)", self.source)
+    def test_unapplied_edits_are_confirmed_before_an_account_switch_drops_them(self) -> None:
         self.assertIn("function hasPendingEdits()", self.source)
         body = function_body(self.source, "async function switchToAccount(nextAccountId)")
-        self.assertIn("hasPendingEdits()", body)
+        self.assertLess(body.index("hasPendingEdits()"), body.index("withAccountTransition"))
         self.assertIn("window.confirm(", body)
 
+    def test_a_plain_reload_of_settings_keeps_the_page_on_its_own_account(self) -> None:
+        # Refresh and Start re-read the saved accounts. That must not move a new-account draft or
+        # another window's account under the form, or undo an unapplied profile pick.
+        body = function_body(self.source, "async function loadSettings(options = {})")
+        self.assertIn(
+            "const keepSelection = !applySelected && (isDraftAccount || Boolean(findSavedAccount(selectedAccountId)));",
+            body,
+        )
+        self.assertIn("if (!keepSelection) {", body)
+        self.assertEqual(self.source.count("selectedAccountId = payload.selected_account_id"), 1)
+
+    def test_every_settings_field_marks_its_edit_as_pending(self) -> None:
+        self.assertIn('fields.symbols.addEventListener("input", () => handleConfigFieldChange("symbols"));', self.source)
+        self.assertIn(
+            'fields.inverseEtfSymbols.addEventListener("input", () => handleConfigFieldChange("inverse_etf_symbols"));',
+            self.source,
+        )
+        self.assertIn('field.addEventListener("input", () => handleConfigFieldChange(key));', self.source)
+
+    def test_a_preset_only_marks_the_settings_it_changed(self) -> None:
+        body = function_body(self.source, "function applyConfigAsPendingEdit(config)")
+        self.assertIn("!sameSettingValue(before[key], after[key])", body)
+        self.assertNotIn("markConfigPending(Object.keys(", self.source)
+
+    def test_edits_made_while_a_save_is_in_flight_stay_pending(self) -> None:
+        self.assertEqual(self.source.count("clearPendingEditsSince(editsAtSave);"), 2)
 
 if __name__ == "__main__":
     unittest.main()
