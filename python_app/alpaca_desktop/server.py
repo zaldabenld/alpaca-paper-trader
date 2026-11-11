@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from .app_settings import AppWideSettings
 from .currentness import currentness_payload
+from .heartbeat import HEARTBEAT
 from .engine import (
     CONFIG_VERSION,
     TOP_VOLUME_CACHE_SECONDS,
@@ -162,6 +163,7 @@ _settings_loaded = False
 async def startup() -> None:
     global _auto_connect_complete
     load_saved_settings_to_manager()
+    HEARTBEAT.start()  # n8n watchdog heartbeat + kill-switch flag; off unless N8N_* env is set
     # The headless protect job holds the engine lock for a few seconds per run. Serve the UI
     # right away, but connect and manage accounts only once this process holds the lock, so the
     # two never manage the same accounts at once.
