@@ -70,6 +70,8 @@ def entry_ready_snapshot(price: str = "10") -> SimpleNamespace:
         volume_ok=True,
         atr_percent=Decimal("2.0"),
         volatility_percent=Decimal("2.0"),
+        previous_close=Decimal(price) * Decimal("0.99"),
+        last_bar_change_percent=Decimal("0.2"),
     )
 
 
@@ -353,37 +355,44 @@ class StrategySelectionContractTests(unittest.TestCase):
         self.assertIsNone(reservation)
         self.assertEqual(engine.strategy_state.last_action["AAA"], "Hold (max positions)")
 
-    def test_soft_confirmation_inputs_do_not_block_before_entry_scoring(self) -> None:
-        engine = TraderEngine("selection-soft-confirmations")
-        engine.config = self.candidate_config(
-            buy_rsi_max="65",
-            max_session_pullback_percent="0.75",
-            max_recent_pullback_percent="0.50",
-            min_smi="40",
-            volume_multiplier="1.0",
-        )
-        snapshot = entry_ready_snapshot()
-        snapshot.rsi = Decimal("75")
-        snapshot.session_pullback_percent = Decimal("1.25")
-        snapshot.recent_pullback_percent = Decimal("0.75")
-        snapshot.smi = Decimal("10")
-        snapshot.relative_volume = Decimal("0.10")
-        snapshot.volume_ok = False
+    def test_documented_confirmation_inputs_are_hard_entry_gates(self) -> None:
+        # OPERATING.md lists the RSI range, SMI floor, pullback limits and the volume threshold as
+        # entry eligibility; they used to be scoring inputs only.
+        scenarios = [
+            ("rsi_ceiling", {"rsi": Decimal("75")}, "Hold (RSI 75.0 above 65)"),
+            ("session_pullback", {"session_pullback_percent": Decimal("1.25")}, "Hold (pulled back 1.25% from session high)"),
+            ("recent_pullback", {"recent_pullback_percent": Decimal("0.75")}, "Hold (pulled back 0.75% from recent high)"),
+            ("smi_floor", {"smi": Decimal("10")}, "Hold (SMI 10.0 below 40)"),
+            ("volume_threshold", {"relative_volume": Decimal("0.10"), "volume_ok": False}, "Hold (volume 0.10x of average)"),
+            ("last_bar_down", {"last_bar_change_percent": Decimal("-0.05")}, "Hold (last bar -0.05%)"),
+        ]
+        for name, updates, expected_action in scenarios:
+            with self.subTest(name=name):
+                engine = TraderEngine(f"selection-confirmation-gate-{name}")
+                engine.config = self.candidate_config(
+                    buy_rsi_max="65",
+                    max_session_pullback_percent="0.75",
+                    max_recent_pullback_percent="0.50",
+                    min_smi="40",
+                    volume_multiplier="1.0",
+                )
+                snapshot = entry_ready_snapshot()
+                for key, value in updates.items():
+                    setattr(snapshot, key, value)
 
-        with patch.object(engine, "snapshot", return_value=snapshot):
-            candidate = engine.entry_candidate(
-                "AAA",
-                0,
-                {"equity": "1000", "buying_power": "1000"},
-                None,
-                open_position_count=0,
-                open_orders=[],
-                entries_allowed=True,
-            )
+                with patch.object(engine, "snapshot", return_value=snapshot):
+                    candidate = engine.entry_candidate(
+                        "AAA",
+                        0,
+                        {"equity": "1000", "buying_power": "1000"},
+                        None,
+                        open_position_count=0,
+                        open_orders=[],
+                        entries_allowed=True,
+                    )
 
-        self.assertIsNotNone(candidate)
-        self.assertEqual(candidate["score"], Decimal("34.5"))
-        self.assertEqual(engine.strategy_state.last_action["AAA"], "Candidate score 34.5")
+                self.assertIsNone(candidate)
+                self.assertEqual(engine.strategy_state.last_action["AAA"], expected_action)
 
     def test_direction_session_momentum_and_vwap_remain_hard_entry_gates(self) -> None:
         scenarios = [
@@ -417,31 +426,37 @@ class StrategySelectionContractTests(unittest.TestCase):
                 self.assertIsNone(candidate)
                 self.assertEqual(engine.strategy_state.last_action["AAA"], expected_action)
 
-    def test_positive_momentum_below_configured_floor_can_score_as_candidate(self) -> None:
-        engine = TraderEngine("selection-soft-momentum")
-        engine.config = self.candidate_config(
-            min_momentum_percent="0.15",
-            min_recent_momentum_percent="0.08",
-            min_long_momentum_percent="0.12",
-        )
-        snapshot = entry_ready_snapshot()
-        snapshot.momentum_percent = Decimal("0.10")
-        snapshot.recent_momentum_percent = Decimal("0.07")
-        snapshot.long_momentum_percent = Decimal("0.05")
+    def test_positive_momentum_below_configured_floor_is_held(self) -> None:
+        scenarios = [
+            ("momentum", {"momentum_percent": Decimal("0.10")}, "Hold (momentum +0.10% < 0.15%)"),
+            ("recent_momentum", {"recent_momentum_percent": Decimal("0.07")}, "Hold (recent momentum +0.07% < 0.08%)"),
+            ("long_momentum", {"long_momentum_percent": Decimal("0.05")}, "Hold (long momentum +0.05% < 0.12%)"),
+        ]
+        for name, updates, expected_action in scenarios:
+            with self.subTest(name=name):
+                engine = TraderEngine(f"selection-momentum-floor-{name}")
+                engine.config = self.candidate_config(
+                    min_momentum_percent="0.15",
+                    min_recent_momentum_percent="0.08",
+                    min_long_momentum_percent="0.12",
+                )
+                snapshot = entry_ready_snapshot()
+                for key, value in updates.items():
+                    setattr(snapshot, key, value)
 
-        with patch.object(engine, "snapshot", return_value=snapshot):
-            candidate = engine.entry_candidate(
-                "AAA",
-                0,
-                {"equity": "1000", "buying_power": "1000"},
-                None,
-                open_position_count=0,
-                open_orders=[],
-                entries_allowed=True,
-            )
+                with patch.object(engine, "snapshot", return_value=snapshot):
+                    candidate = engine.entry_candidate(
+                        "AAA",
+                        0,
+                        {"equity": "1000", "buying_power": "1000"},
+                        None,
+                        open_position_count=0,
+                        open_orders=[],
+                        entries_allowed=True,
+                    )
 
-        self.assertIsNotNone(candidate)
-        self.assertEqual(engine.strategy_state.last_action["AAA"], f"Candidate score {candidate['score']:.1f}")
+                self.assertIsNone(candidate)
+                self.assertEqual(engine.strategy_state.last_action["AAA"], expected_action)
 
 
 class ProfitLossContractBaselineTests(unittest.TestCase):

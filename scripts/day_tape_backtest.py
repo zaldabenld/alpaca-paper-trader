@@ -57,6 +57,9 @@ BACKTEST_STRATEGY_KEYS = set(PROFILE_STRATEGY_KEYS) | {
     "score_weight_recent_pullback_penalty",
     "score_weight_smi_overheat_penalty",
     "extension_atr_reference_percent",
+    "max_entries_per_scan",
+    "entry_spacing_seconds",
+    "breakeven_at_percent",
 }
 
 
@@ -263,6 +266,9 @@ def replay_config(
 ) -> AppConfig:
     payload = dict(raw_config or {})
     payload.setdefault("symbols", ["SPY", "QQQ"])
+    # Tapes recorded before entry pacing existed replay without it unless an override sets it.
+    payload.setdefault("max_entries_per_scan", 0)
+    payload.setdefault("entry_spacing_seconds", 0)
     payload.update(
         {
             # Replay does not support the daily relative-volume list; always use the recorded most-active universe.
@@ -418,6 +424,7 @@ class DayTapeBacktester:
         self.strategy_scan_top_volume_contexts = 0
         self.parse_errors = 0
         self.entry_guard_holds = 0
+        self.last_entry_at: datetime | None = None
         self.session_close: datetime | None = None
         self.top_volume_sources: set[str] = set()
         self.current_top_volume_source = ""
@@ -567,6 +574,10 @@ class DayTapeBacktester:
             )
 
         candidates.sort(key=lambda item: (-float(item["score"]), item["rank"], item["symbol"]))
+        accepted_this_scan = 0
+        entry_cap = int(self.engine.config.max_entries_per_scan or 0)
+        spacing = int(self.engine.config.entry_spacing_seconds or 0)
+        now = parse_event_time(event_time)
         for candidate in candidates:
             symbol = str(candidate.get("symbol") or "").strip().upper()
             if not symbol or symbol in self.positions:
@@ -574,6 +585,16 @@ class DayTapeBacktester:
             if len(self.positions) >= self.engine.config.max_open_positions:
                 self.rejected_candidates.append(
                     {"time": event_time, "symbol": symbol, "reason": "Hold (max positions)", "indicators": {}}
+                )
+                continue
+            if spacing > 0 and now is not None and self.last_entry_at is not None and (now - self.last_entry_at).total_seconds() < spacing:
+                self.rejected_candidates.append(
+                    {"time": event_time, "symbol": symbol, "reason": f"Hold (entry spacing {spacing}s)", "indicators": {}}
+                )
+                continue
+            if entry_cap > 0 and accepted_this_scan >= entry_cap:
+                self.rejected_candidates.append(
+                    {"time": event_time, "symbol": symbol, "reason": f"Hold (entry cap {entry_cap}/scan)", "indicators": {}}
                 )
                 continue
             snapshot = self.boundary.strategy.snapshot(symbol)
@@ -609,8 +630,11 @@ class DayTapeBacktester:
                 "top_volume_source": evaluation_source if universe_source == "top_volume" else "",
                 "entry_indicators": entry_indicators(snapshot.as_dict()),
             }
+            self.engine.position_peak_prices.pop(symbol, None)  # a fresh position starts its own peak
             self.positions[symbol] = ReplayPosition(symbol, qty, snapshot.price, entry_event)
             self.accepted_trades.append(entry_event)
+            accepted_this_scan += 1
+            self.last_entry_at = now
             self.account["buying_power"] = str(decimal_value(self.account["buying_power"]) - notional)
 
     def handle_event(self, event: dict[str, Any]) -> None:
