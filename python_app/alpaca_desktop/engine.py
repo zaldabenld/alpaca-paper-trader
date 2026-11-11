@@ -60,6 +60,7 @@ from .day_tape import (
     compact_top_volume_rows,
     day_tape_file_path,
 )
+from .alerts import NOTIFIER
 from .runtime_diagnostics import (
     AccountRefreshError,
     CachePersistenceError,
@@ -74,6 +75,7 @@ from .runtime_diagnostics import (
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
 
 
+CONFIG_VERSION = 1
 MOST_ACTIVES_MAX = 100  # Alpaca screener maximum for `top`
 
 
@@ -544,6 +546,13 @@ class AppConfig(BaseModel):
     max_entry_rsi: Decimal = Decimal("0")
     max_entries_per_symbol_per_day: int = 0
     flatten_on_daily_loss: bool = False
+    # Sell every position this many minutes before the close (0 = off; for pure day trading).
+    flatten_before_close_minutes: int = 0
+    # Desktop notifications (Linux notify-send): fills/stop-outs, and problems (rejections, errors, loss limit).
+    alert_trades: bool = True
+    alert_problems: bool = True
+    # Saved configs without this key predate one-time migrations and are migrated once on load.
+    config_version: int = CONFIG_VERSION
     smi_period: int = 10
     min_smi: Decimal = Decimal("40")
     atr_period: int = 14
@@ -625,6 +634,7 @@ class AppConfig(BaseModel):
         "entry_close_guard_minutes",
         "stop_loss_grace_minutes",
         "max_entries_per_symbol_per_day",
+        "flatten_before_close_minutes",
     )
     @classmethod
     def validate_cooldown(cls, value: int) -> int:
@@ -756,6 +766,8 @@ class AppConfig(BaseModel):
         self.max_position_notional = Decimal("0")
         self.max_position_percent = Decimal("0")
         self.daily_loss_limit_percent = min(self.daily_loss_limit_percent, Decimal("100"))
+        if self.flatten_before_close_minutes:
+            self.flatten_before_close_minutes = max(2, min(390, self.flatten_before_close_minutes))
         self.risk_per_trade_percent = Decimal("0")
         self.profit_trail_start_percent = Decimal("0")
         self.profit_trail_drop_percent = Decimal("0")
@@ -1065,6 +1077,26 @@ def retune_strategy_config(config: AppConfig) -> AppConfig:
     return retune_riskbox_strategy_config(retune_promoted_h2_config(retune_legacy_conservative_config(config)))
 
 
+def migrate_saved_config(config: AppConfig) -> tuple[AppConfig, list[str]]:
+    """Apply the legacy default retunes once to a config saved before CONFIG_VERSION.
+
+    Previously the retunes ran on every load and save, silently undoing a user's edit whenever
+    it happened to match an old default set. Now they run only for unversioned saved configs,
+    and every changed value is reported.
+    """
+    if "config_version" in config.model_fields_set:
+        return config, []
+    migrated = retune_strategy_config(config)
+    before = config.model_dump(mode="json")
+    after = migrated.model_dump(mode="json")
+    changes = [
+        f"{key} {before.get(key)} -> {value}"
+        for key, value in after.items()
+        if key != "config_version" and before.get(key) != value
+    ]
+    return migrated.model_copy(update={"config_version": CONFIG_VERSION}), changes
+
+
 def config_from_profile(
     profile: str,
     current: dict[str, Any] | None = None,
@@ -1073,7 +1105,7 @@ def config_from_profile(
     profile_key = sanitize_profile_key(profile) or "neutral"
     catalog = profiles or PROFILE_PRESETS
     if profile_key not in catalog and current:
-        return retune_strategy_config(AppConfig(**(current | {"profile": profile_key})))
+        return AppConfig(**(current | {"profile": profile_key}))
     preset = dict(catalog.get(profile_key, catalog.get("neutral", PROFILE_PRESETS["neutral"])))
     if current:
         base = dict(current)
@@ -1081,10 +1113,10 @@ def config_from_profile(
             if key in preset:
                 base[key] = preset[key]
         base["profile"] = profile_key
-        return retune_strategy_config(AppConfig(**base))
+        return AppConfig(**base)
     base = dict(preset)
     base["profile"] = profile_key
-    return retune_strategy_config(AppConfig(**base))
+    return AppConfig(**base)
 
 
 def model_dict(model: Any) -> dict[str, Any]:
@@ -1621,6 +1653,10 @@ class TraderEngine:
         self.entries_today_by_symbol: dict[str, int] = {}
         self.daily_loss_breach_session = ""
         self.daily_loss_detail = ""
+        self.config_migration_notes: list[str] = []
+        self.dry_run_flatten_logged_session = ""
+        self.alerted_fill_ids: set[str] | None = None  # None until the first refresh seeds existing fills
+        self.consecutive_refresh_failures = 0
         self.processed_reentry_exit_ids: set[str] = set()
         self.reentry_reset_at: datetime | None = None
         self.entry_lock_dates: dict[str, str] = {}
@@ -1644,7 +1680,8 @@ class TraderEngine:
         validation_error = credential_validation_error(api_key, secret_key) if api_key or secret_key else ""
         with self.lock:
             self.name = settings.name.strip() or "Paper Account"
-            self.config = retune_strategy_config(settings.config)
+            self.config, migration_notes = migrate_saved_config(settings.config)
+            self.config_migration_notes = migration_notes
             self.settings_load_error = settings.settings_load_error
             self.api_key = api_key if not validation_error else ""
             self.secret_key = secret_key if looks_like_secret_key(secret_key) else ""
@@ -1669,7 +1706,7 @@ class TraderEngine:
             raise RuntimeError(validation_error)
         with self.lock:
             self.name = payload.name.strip() or "Paper Account"
-            self.config = retune_strategy_config(payload.config)
+            self.config = payload.config
             self.settings_load_error = ""
             if api_key:
                 self.api_key = api_key
@@ -1837,7 +1874,7 @@ class TraderEngine:
             self.stop_streams_locked()
             self.close_api_clients_locked()
             self.name = payload.name.strip() or "Paper Account"
-            self.config = retune_strategy_config(payload.config)
+            self.config = payload.config
             self.api_key = api_key
             self.secret_key = secret_key
             self.remember = payload.remember
@@ -1868,6 +1905,8 @@ class TraderEngine:
             self.last_error = ""
             self.strategy_state = StrategyState()
             self.trading_enabled = False
+            self.alerted_fill_ids = None
+            self.consecutive_refresh_failures = 0
 
         self.refresh_top_volume(force=True, restart_stream=False)
         self.refresh(run_strategy=False)
@@ -2206,8 +2245,11 @@ class TraderEngine:
             opening_guard_detail = self.entry_open_guard_message(clock, config)
             closing_guard_detail = self.entry_close_guard_message(clock, config)
             entry_guard_detail = opening_guard_detail or closing_guard_detail
+            close_flatten_detail = self.close_flatten_message(clock, config)
             if loss_breached:
                 entry_guard_detail = self.daily_loss_detail
+            elif close_flatten_detail:
+                entry_guard_detail = close_flatten_detail
             entries_allowed = not entry_guard_detail
             if should_trade and entry_guard_detail:
                 status_message = f"New entries paused: {entry_guard_detail}"
@@ -2231,10 +2273,19 @@ class TraderEngine:
             rows = []
             stop_now = False
             flattened_symbols: set[str] = set()
-            if loss_breached and config.flatten_on_daily_loss and market_open and not config.dry_run:
-                flatten_events, flattened_symbols = self.flatten_for_daily_loss(position_map, flat_orders)
+            flatten_reason = ""
+            if loss_breached and config.flatten_on_daily_loss:
+                flatten_reason = "daily loss limit flatten"
+            elif close_flatten_detail:
+                flatten_reason = "flatten before close"
+            if flatten_reason and market_open and not config.dry_run:
+                flatten_events, flattened_symbols = self.flatten_all_positions(position_map, flat_orders, flatten_reason)
                 for level, message in flatten_events:
                     self.log(level, message)
+            elif flatten_reason and market_open and config.dry_run and position_map:
+                if self.dry_run_flatten_logged_session != session_date:
+                    self.dry_run_flatten_logged_session = session_date
+                    self.log("info", f"Dry run: would sell {len(position_map)} position(s) ({flatten_reason}).")
             if not market_open and manage_exits and not should_trade:
                 for symbol in sorted(position_symbols):
                     symbol_orders = [item for item in flat_orders if str(item.get("symbol", "")).upper() == symbol]
@@ -2341,6 +2392,7 @@ class TraderEngine:
             last_equity = decimal_value(account_dict.get("last_equity"))
             daily_pl_payload = self.portfolio_history_daily_pl_payload(client, session_date)
             trade_history_rows = self.trade_history_rows(closed_order_dicts)
+            self.alert_new_fills(closed_order_dicts)
             realized_account_basis = decimal_value(daily_pl_payload.get("daily_pl_account_basis_raw"))
             if realized_account_basis <= 0:
                 realized_account_basis = last_equity if last_equity > 0 else equity
@@ -2376,6 +2428,8 @@ class TraderEngine:
                     self.status = "Auto trading stopped by risk rule"
                 elif loss_breached:
                     self.status = f"Daily loss limit hit: {self.daily_loss_detail}"
+                elif close_flatten_detail:
+                    self.status = f"Selling before the close: {close_flatten_detail}"
                 elif status_message:
                     self.status = status_message
                 elif self.trading_enabled and market_clock["is_open"]:
@@ -2393,6 +2447,7 @@ class TraderEngine:
                 strategy_rows=rows,
             )
             clear_runtime_diagnostics(area="account_refresh", source="engine")
+            self.consecutive_refresh_failures = 0
         except Exception as exc:
             self.record_runtime_exception(
                 "account_refresh",
@@ -2402,6 +2457,10 @@ class TraderEngine:
                 log_level="error",
                 set_last_error=True,
             )
+            self.consecutive_refresh_failures += 1
+            if self.consecutive_refresh_failures == 3:
+                self.alert("problem", "Refresh failing", f"3 refreshes in a row failed: {exc}",
+                           key="refresh-failing", ttl_seconds=900, urgency="critical")
         finally:
             self.refresh_lock.release()
 
@@ -2957,6 +3016,14 @@ class TraderEngine:
             return value.astimezone().strftime("%b %d, %I:%M %p %Z")
         return str(value)
 
+    def clock_now(self, clock: Any, reference: Any) -> datetime:
+        """The broker clock's timestamp when it is timezone-aware, else the local wall clock."""
+        stamp = getattr(clock, "timestamp", None)
+        if isinstance(stamp, datetime) and stamp.tzinfo is not None:
+            return stamp
+        tz = getattr(reference, "tzinfo", None)
+        return datetime.now(tz) if tz else datetime.now()
+
     def entry_open_guard_message(self, clock: Any, config: AppConfig) -> str:
         guard_minutes = int(config.entry_open_guard_minutes or 0)
         if guard_minutes <= 0 or not bool(getattr(clock, "is_open", False)):
@@ -2964,8 +3031,11 @@ class TraderEngine:
         next_close = getattr(clock, "next_close", None)
         if not hasattr(next_close, "astimezone"):
             return ""
-        session_open = next_close - timedelta(hours=6, minutes=30)
-        now = datetime.now(next_close.tzinfo) if getattr(next_close, "tzinfo", None) else datetime.now()
+        # NYSE opens at 09:30 ET even on half days (13:00 close), so derive the open from the
+        # close's ET date rather than "close minus 6.5 hours".
+        close_et = next_close.astimezone(MARKET_TIMEZONE) if getattr(next_close, "tzinfo", None) else next_close
+        session_open = close_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        now = self.clock_now(clock, next_close)
         seconds_open = (now - session_open).total_seconds()
         if seconds_open < 0 or seconds_open > guard_minutes * 60:
             return ""
@@ -2979,12 +3049,24 @@ class TraderEngine:
         next_close = getattr(clock, "next_close", None)
         if not hasattr(next_close, "astimezone"):
             return ""
-        now = datetime.now(next_close.tzinfo) if getattr(next_close, "tzinfo", None) else datetime.now()
+        now = self.clock_now(clock, next_close)
         seconds_left = (next_close - now).total_seconds()
         if seconds_left < 0 or seconds_left > guard_minutes * 60:
             return ""
         minutes_left = max(0, int((seconds_left + 59) // 60))
         return f"market closes in {minutes_left} min; entry guard is {guard_minutes} min"
+
+    def close_flatten_message(self, clock: Any, config: AppConfig) -> str:
+        minutes = int(config.flatten_before_close_minutes or 0)
+        if minutes <= 0 or not bool(getattr(clock, "is_open", False)):
+            return ""
+        next_close = getattr(clock, "next_close", None)
+        if not hasattr(next_close, "astimezone"):
+            return ""
+        seconds_left = (next_close - self.clock_now(clock, next_close)).total_seconds()
+        if seconds_left < 0 or seconds_left > minutes * 60:
+            return ""
+        return f"market closes in {max(0, int((seconds_left + 59) // 60))} min; selling everything {minutes} min before the close"
 
     def entry_quality_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
         limits = entry_profile_limits(config)
@@ -3308,14 +3390,14 @@ class TraderEngine:
                 events.extend(downgrade_events)
                 return events, False, None
         if has_long and config.use_bracket_orders and not pending_strategy_exit:
-            protection_events, exit_submitted, protection_active = self.ensure_position_exit_orders(
+            protection_events, exit_submitted, protection_active, placed_protective = self.ensure_position_exit_orders(
                 symbol,
                 position,
                 snapshot,
                 protective_orders,
             )
             events.extend(protection_events)
-            if exit_submitted:
+            if exit_submitted or placed_protective:
                 return events, False, None
 
         local_exit_reason, local_hold_reason = self.local_protection_exit_decision(
@@ -3538,6 +3620,8 @@ class TraderEngine:
         self.daily_loss_breach_session = session_date
         self.daily_loss_detail = f"down {money(-daily_pl)} today vs {money(limit)} limit; no new entries until next session"
         self.log("warn", f"Daily loss limit hit: {self.daily_loss_detail}.")
+        self.alert("problem", "Daily loss limit hit", self.daily_loss_detail, key=f"loss-limit:{session_date}",
+                   ttl_seconds=86400, urgency="critical")
         return True
 
     def flatten_for_daily_loss(
@@ -3545,12 +3629,26 @@ class TraderEngine:
         position_map: dict[str, dict[str, Any]],
         flat_orders: list[dict[str, Any]],
     ) -> tuple[list[tuple[str, str]], set[str]]:
-        """Market-sell every position after a daily-loss breach; returns events and handled symbols."""
+        return self.flatten_all_positions(position_map, flat_orders, "daily loss limit flatten")
+
+    def flatten_all_positions(
+        self,
+        position_map: dict[str, dict[str, Any]],
+        flat_orders: list[dict[str, Any]],
+        reason: str,
+    ) -> tuple[list[tuple[str, str]], set[str]]:
+        """Market-sell every long position; returns events and the symbols handled this pass.
+
+        `reason` must contain "flatten" so a rejected sell gets the short retry hold.
+        """
         events: list[tuple[str, str]] = []
         handled: set[str] = set()
         for symbol, position in sorted(position_map.items()):
-            qty = abs(decimal_value(position.get("qty")))
-            if qty <= 0 or decimal_value(position.get("current_price")) <= 0:
+            raw_qty = decimal_value(position.get("qty"))
+            if raw_qty <= 0 or str(position.get("side") or "long").lower() == "short":
+                continue  # long-only bot: never "flatten" a short by selling more
+            qty = raw_qty
+            if decimal_value(position.get("current_price")) <= 0:
                 continue
             symbol_orders = [order for order in flat_orders if str(order.get("symbol", "")).upper() == symbol]
             roles = [self.order_role(order, {symbol}) for order in symbol_orders]
@@ -3569,13 +3667,13 @@ class TraderEngine:
             handled.add(symbol)
             protective = [order for order, role in zip(symbol_orders, roles) if role == "Protective Exit"]
             if take_profit_limits and not all(self.cancel_open_order(order) for order in take_profit_limits):
-                events.append(("warn", f"Waiting for {symbol} take-profit cancellation before daily-loss flatten."))
+                events.append(("warn", f"Waiting for {symbol} take-profit cancellation before {reason}."))
                 continue
             cancelled = self.cancel_orders_for_symbol(protective, symbol) + len(take_profit_limits)
             if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol, include_exits=True):
-                events.append(("warn", f"Waiting for {symbol} order cancellation before daily-loss flatten."))
+                events.append(("warn", f"Waiting for {symbol} order cancellation before {reason}."))
                 continue
-            events.extend(self.submit_exit_order(symbol, qty, self.snapshot(symbol), "daily loss limit flatten"))
+            events.extend(self.submit_exit_order(symbol, qty, self.snapshot(symbol), reason))
         return events, handled
 
     def ensure_offhours_stop(
@@ -3744,10 +3842,10 @@ class TraderEngine:
         position: dict[str, Any] | None,
         snapshot: Any,
         protective_orders: list[dict[str, Any]],
-    ) -> tuple[list[tuple[str, str]], bool, bool]:
+    ) -> tuple[list[tuple[str, str]], bool, bool, bool]:
         events: list[tuple[str, str]] = []
         if not position:
-            return events, False, bool(protective_orders)
+            return events, False, bool(protective_orders), False
 
         qty = abs(decimal_value(position.get("qty")))
         entry_price = decimal_value(position.get("avg_entry_price"))
@@ -3755,11 +3853,11 @@ class TraderEngine:
         if current_price <= 0 and snapshot.price is not None:
             current_price = snapshot.price
         if qty <= 0 or entry_price <= 0 or current_price <= 0:
-            return events, False, bool(protective_orders)
+            return events, False, bool(protective_orders), False
 
         take_profit_price, stop_loss_price = self.exit_prices(entry_price, self.config)
         if take_profit_price <= 0 and stop_loss_price <= 0:
-            return events, False, bool(protective_orders)
+            return events, False, bool(protective_orders), False
 
         active_orders = [
             order for order in protective_orders
@@ -3777,25 +3875,25 @@ class TraderEngine:
             sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
             if sell_hold:
                 self.strategy_state.last_action[symbol] = sell_hold
-                return events, False, True
+                return events, False, True, False
             cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
             if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 events.append(("warn", f"Waiting for existing exit order cancellation before selling {symbol}."))
-                return events, False, True
+                return events, False, True, False
             reason = (
                 f"local stop-loss {self.config.stop_loss_percent}%"
                 f" (gain {current_gain:.2f}%, manual stop missing)"
             )
             events.extend(self.submit_exit_order(symbol, qty, snapshot, reason))
-            return events, True, False
+            return events, True, False, False
 
         if take_profit_price > 0 and current_price >= take_profit_price and not take_profit_orders:
             cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
             if cancelled and not self.wait_for_symbol_app_orders_cleared(symbol):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 events.append(("warn", f"Waiting for stop cancellation before placing take-profit limit for {symbol}."))
-                return events, False, True
+                return events, False, True, False
             submitted, submit_events = self.submit_limit_exit_order(
                 symbol,
                 qty,
@@ -3805,9 +3903,12 @@ class TraderEngine:
                 take_profit_price,
             )
             events.extend(submit_events)
-            return events, submitted, submitted
+            return events, submitted, submitted, False
 
         protection_active = bool(active_orders)
+        # A protective order placed in this pass is not in this pass's order list, so callers must
+        # not also send a local exit now (Alpaca would reject the sell: the stop holds the qty).
+        placed_protective = False
         if stop_loss_price > 0 and not stop_loss_orders:
             submitted, submit_events = self.submit_protective_exit_order(
                 symbol,
@@ -3819,6 +3920,7 @@ class TraderEngine:
             )
             events.extend(submit_events)
             protection_active = protection_active or submitted
+            placed_protective = placed_protective or submitted
         if take_profit_price > 0 and not take_profit_orders:
             if stop_loss_price > 0 or stop_loss_orders:
                 self.strategy_state.last_action[symbol] = f"Hold (profit target armed at {money(take_profit_price)})"
@@ -3833,7 +3935,8 @@ class TraderEngine:
                 )
                 events.extend(submit_events)
                 protection_active = protection_active or submitted
-        return events, False, protection_active
+                placed_protective = placed_protective or submitted
+        return events, False, protection_active, placed_protective
 
     def cancel_stale_protective_order(
         self,
@@ -4423,6 +4526,50 @@ class TraderEngine:
             parts.append(extra)
         return "; ".join(parts)
 
+    def alert(self, kind: str, title: str, body: str, *, key: str = "", ttl_seconds: float = 0,
+              urgency: str = "normal") -> None:
+        """Desktop notification, gated by the account's alert settings; never blocks."""
+        enabled = self.config.alert_trades if kind == "trade" else self.config.alert_problems
+        if not enabled:
+            return
+        NOTIFIER.notify(f"{self.name}: {title}", body, key=f"{self.account_id}:{key}" if key else "",
+                        ttl_seconds=ttl_seconds, urgency=urgency)
+
+    def alert_new_fills(self, closed_orders: list[dict[str, Any]]) -> None:
+        """Alert on orders that filled since the last refresh (the first refresh only seeds).
+
+        Only the latest 100 closed orders are visible, so a fill older than that window when it
+        first appears (rare: it would need 100 newer closed orders) is not alerted.
+        """
+        filled = [
+            order for order in self.flatten_orders(closed_orders)
+            if str(order.get("status") or "").lower() == "filled" and order.get("id")
+        ]
+        ids = {str(order["id"]) for order in filled}
+        if self.alerted_fill_ids is None:
+            self.alerted_fill_ids = ids
+            return
+        for order in filled:
+            order_id = str(order["id"])
+            if order_id in self.alerted_fill_ids:
+                continue
+            self.alerted_fill_ids.add(order_id)
+            symbol = str(order.get("symbol") or "").upper()
+            side = str(order.get("side") or "").lower()
+            client_id = str(order.get("client_order_id") or "")
+            qty = str(order.get("filled_qty") or order.get("qty") or "")
+            price = decimal_value(order.get("filled_avg_price"))
+            if side == "buy":
+                title = f"Bought {symbol}"
+            elif client_id.startswith("apt-protect-sl-") or "stop" in str(order.get("type") or "").lower():
+                title = f"Stopped out of {symbol}"
+            elif client_id.startswith(("apt-protect-tp-", "apt-exit-limit-")):
+                title = f"Took profit on {symbol}"
+            else:
+                title = f"Sold {symbol}"
+            self.alert("trade", title, f"{qty} @ {money(price)}", key=f"fill:{order_id}", ttl_seconds=86400)
+        self.alerted_fill_ids = ids  # bounded to what Alpaca still returns; old ids never reappear
+
     def record_order_intent(
         self,
         symbol: str,
@@ -4451,6 +4598,10 @@ class TraderEngine:
             "reason": reason,
         }
         append_day_tape_event("order_intent", compact_order_intent(event))
+        if status == "error":
+            side_text = getattr(side, "value", str(side))
+            self.alert("problem", f"Order rejected: {side_text} {symbol}", str(reason)[-200:],
+                       key=f"reject:{symbol}:{side_text}", ttl_seconds=600)
         with self.lock:
             self.order_intents.append(event)
             self.order_intents = self.order_intents[-REPLAY_EVENT_LIMIT:]
@@ -5290,7 +5441,7 @@ class TraderManager:
         engine = TraderEngine(account_id, name or f"Account {len(self.accounts) + 1}")
         engine.replay_recorder = self.record_replay_event
         if config is not None:
-            engine.config = retune_strategy_config(config)
+            engine.config = config
         with self.lock:
             self.accounts[account_id] = engine
             if not self.selected_account_id:

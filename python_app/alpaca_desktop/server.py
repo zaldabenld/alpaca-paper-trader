@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from .currentness import currentness_payload
 from .engine import (
+    CONFIG_VERSION,
     TOP_VOLUME_CACHE_SECONDS,
     AccountPayload,
     AccountSettings,
@@ -356,7 +357,12 @@ async def get_settings() -> dict[str, Any]:
 
 @app.post("/api/settings")
 async def post_settings(payload: SettingsPayload) -> dict[str, str]:
-    manager.replace_from_settings(preserve_credentials(payload.accounts), payload.selected_account_id)
+    # Settings posted from a client are current: never run the legacy migration on them.
+    accounts = [
+        item.model_copy(update={"config": item.config.model_copy(update={"config_version": CONFIG_VERSION})})
+        for item in payload.accounts
+    ]
+    manager.replace_from_settings(preserve_credentials(accounts), payload.selected_account_id)
     save_manager_settings()
     return {"status": "saved"}
 
@@ -828,6 +834,29 @@ def load_saved_settings_to_manager() -> None:
             for index, item in enumerate(account_settings)
         ]
         manager.replace_from_settings(account_settings, selected_account_id)
+        migrated = False
+        for account_engine in manager.list_engines():
+            notes = list(getattr(account_engine, "config_migration_notes", []) or [])
+            if not notes:
+                continue
+            migrated = True
+            summary = ", ".join(notes)
+            account_engine.log("warn", f"Saved settings migrated once to current defaults: {summary}")
+            record_runtime_diagnostic(
+                "config",
+                f"{account_engine.name}: saved settings migrated once ({summary})",
+                None,
+                severity="info",
+                source="settings",
+            )
+        load_failed = bool(manager.settings_load_errors) or any(
+            getattr(account_engine, "settings_load_error", "") for account_engine in manager.list_engines()
+        )
+        if migrated and not load_failed:
+            _settings_loaded = True
+            save_manager_settings()  # persist config_version so the migration never runs again
+        # With a load failure, saving would overwrite the failed account's real entry with
+        # placeholders; the migration simply runs again next load (it is idempotent).
 
     _settings_loaded = True
 

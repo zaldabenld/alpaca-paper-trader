@@ -22,14 +22,18 @@ NOW = datetime(2026, 11, 4, 19, 0, tzinfo=timezone.utc)
 class FakeTradingClient:
     """Minimal Alpaca TradingClient stand-in: one long AAA position, configurable orders/clock."""
 
-    def __init__(self, *, is_open: bool, price: str = "100", orders: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self, *, is_open: bool, price: str = "100", orders: list[dict[str, Any]] | None = None, entry: str = "100"
+    ) -> None:
         self.is_open = is_open
         self.price = price
+        self.entry = entry
         self.open_orders = list(orders or [])
         self.submitted: list[Any] = []
         self.cancelled: list[str] = []
         self.equity = "1000"
         self.last_equity = "1000"
+        self.closed_orders: list[dict[str, Any]] = []
 
     def get_account(self) -> dict[str, Any]:
         return {"equity": self.equity, "last_equity": self.last_equity, "buying_power": "1000", "cash": "1000"}
@@ -47,7 +51,7 @@ class FakeTradingClient:
             {
                 "symbol": "AAA",
                 "qty": "0.25",
-                "avg_entry_price": "100",
+                "avg_entry_price": self.entry,
                 "current_price": self.price,
                 "market_value": str(Decimal(self.price) * Decimal("0.25")),
                 "unrealized_pl": "0",
@@ -57,7 +61,7 @@ class FakeTradingClient:
 
     def get_orders(self, request: Any) -> list[dict[str, Any]]:
         status = str(getattr(request, "status", "")).lower()
-        return list(self.open_orders) if "open" in status else []
+        return list(self.open_orders) if "open" in status else list(self.closed_orders)
 
     def submit_order(self, order: Any) -> Any:
         self.submitted.append(order)
@@ -197,6 +201,48 @@ class StopProtectionTests(unittest.TestCase):
         run_refresh(engine, run_strategy=False)  # held: normal pass puts the stop back
         self.assertEqual(kinds(client), [("sell", "stop")])
 
+    def test_new_stop_and_local_take_profit_never_collide_in_one_pass(self) -> None:
+        # Gain is past 2.5% but the price is below the rounded-up take-profit price (102.52), so the
+        # first pass places the stop and must stop there instead of also sending a sell.
+        client = FakeTradingClient(is_open=True, price="102.515", entry="100.01")
+        engine = connected_engine(client)
+        with patch.object(engine, "entry_open_guard_message", return_value=""):
+            run_refresh(engine, run_strategy=False)
+        self.assertEqual(kinds(client), [("sell", "stop")])
+
+    def test_sell_before_close_sells_inside_the_window_only(self) -> None:
+        client = FakeTradingClient(is_open=True)  # fake clock: close is 2 hours away
+        engine = connected_engine(client, flatten_before_close_minutes=180)
+        engine.trading_enabled = True
+        run_refresh(engine, run_strategy=True)
+        self.assertEqual(kinds(client), [("sell", "market")])
+        self.assertIn("Selling before the close", engine.status)
+
+        outside = FakeTradingClient(is_open=True)
+        engine = connected_engine(outside, flatten_before_close_minutes=30)
+        run_refresh(engine, run_strategy=False)
+        self.assertEqual(kinds(outside), [("sell", "stop")])
+
+    def test_sell_before_close_in_dry_run_sends_nothing(self) -> None:
+        client = FakeTradingClient(is_open=True)
+        engine = connected_engine(client, flatten_before_close_minutes=180, dry_run=True)
+        engine.trading_enabled = True
+        run_refresh(engine, run_strategy=True)
+        self.assertEqual(client.submitted, [])
+
+    def test_flatten_never_sells_a_short_position(self) -> None:
+        client = FakeTradingClient(is_open=True)
+        engine = connected_engine(client)
+        short = {"symbol": "AAA", "qty": "-1", "side": "short", "current_price": "100", "avg_entry_price": "100"}
+        events, handled = engine.flatten_all_positions({"AAA": short}, [], "flatten before close")
+        self.assertEqual(client.submitted, [])
+        self.assertEqual(handled, set())
+
+    def test_flatten_window_setting_is_clamped(self) -> None:
+        self.assertEqual(AppConfig(symbols=["SPY"], flatten_before_close_minutes=1).flatten_before_close_minutes, 2)
+        self.assertEqual(AppConfig(symbols=["SPY"], flatten_before_close_minutes=999).flatten_before_close_minutes, 390)
+        self.assertEqual(AppConfig(symbols=["SPY"]).flatten_before_close_minutes, 0)
+
     def test_purge_orders_count_as_app_exits(self) -> None:
         engine = TraderEngine("roles")
         role = engine.order_role({"symbol": "AAA", "side": "sell", "client_order_id": "apt-purge-aaa-1"}, {"AAA"})
@@ -264,6 +310,50 @@ class DailyLossLimitTests(unittest.TestCase):
         run_refresh(engine, run_strategy=False)
         # exactly one closing order: no fresh stop placed behind the flatten sell
         self.assertEqual(kinds(client), [("sell", "market")])
+
+
+class RecordingNotifier:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    def notify(self, title: str, body: str, **_: Any) -> bool:
+        self.sent.append((title, body))
+        return True
+
+
+class AlertHookTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.notifier = RecordingNotifier()
+        self.patcher = patch.object(engine_module, "NOTIFIER", self.notifier)
+        self.patcher.start()
+
+    def tearDown(self) -> None:
+        self.patcher.stop()
+
+    def test_existing_fills_are_seeded_and_new_stop_out_alerts_once(self) -> None:
+        client = FakeTradingClient(is_open=True)
+        client.closed_orders = [{"id": "old", "symbol": "AAA", "side": "buy", "status": "filled",
+                                 "filled_qty": "0.25", "filled_avg_price": "100", "client_order_id": "apt-entry-aaa-1"}]
+        engine = connected_engine(client)
+        run_refresh(engine)
+        self.assertEqual(self.notifier.sent, [])
+        client.closed_orders.append({"id": "new", "symbol": "AAA", "side": "sell", "status": "filled", "type": "stop",
+                                     "filled_qty": "0.25", "filled_avg_price": "98.75",
+                                     "client_order_id": "apt-protect-sl-aaa-2"})
+        run_refresh(engine)
+        run_refresh(engine)
+        self.assertEqual(len(self.notifier.sent), 1)
+        self.assertIn("Stopped out of AAA", self.notifier.sent[0][0])
+
+    def test_rejected_order_alerts_and_alerts_can_be_turned_off(self) -> None:
+        engine = TraderEngine("alerts")
+        engine.config = AppConfig(symbols=["AAA"])
+        engine.record_order_intent("AAA", engine_module.OrderSide.SELL, Decimal("1"), "Protective Exit", "error", "rejected")
+        self.assertEqual(len(self.notifier.sent), 1)
+        self.assertIn("Order rejected", self.notifier.sent[0][0])
+        engine.config = AppConfig(symbols=["AAA"], alert_problems=False)
+        engine.record_order_intent("AAA", engine_module.OrderSide.SELL, Decimal("1"), "Protective Exit", "error", "rejected")
+        self.assertEqual(len(self.notifier.sent), 1)
 
 
 if __name__ == "__main__":

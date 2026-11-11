@@ -393,7 +393,7 @@
                   Wait after open (min)
                   <input id="entryOpenGuardMinutes" type="number" min="0" step="1" value="15" />
                 </label>
-                <label title="No new buys during this many minutes before the market closes (180 = stop at 1 p.m. ET).">
+                <label title="No new buys during this many minutes before the market closes (180 = 1 p.m. ET on a normal day, 10 a.m. on half days).">
                   Stop buying before close (min)
                   <input id="entryCloseGuardMinutes" type="number" min="0" step="1" value="15" />
                 </label>
@@ -415,6 +415,18 @@
               <label class="check-row" title="When the daily loss limit is hit during market hours, also sell every position.">
                 <input id="flattenOnDailyLoss" type="checkbox" />
                 <span>Sell everything if the daily loss limit is hit</span>
+              </label>
+              <label title="For pure day trading: sell every position this many minutes before the close so nothing is held overnight (0 = off).">
+                Sell everything before close (min, 0 = off)
+                <input id="flattenBeforeCloseMinutes" type="number" min="0" max="390" step="1" value="0" />
+              </label>
+              <label class="check-row" title="Desktop notification when a buy, take-profit, or stop-loss fills.">
+                <input id="alertTrades" type="checkbox" checked />
+                <span>Alert me on trades</span>
+              </label>
+              <label class="check-row" title="Desktop notification for rejected orders, errors, and the daily loss limit.">
+                <input id="alertProblems" type="checkbox" checked />
+                <span>Alert me on problems</span>
               </label>
             </div>
 
