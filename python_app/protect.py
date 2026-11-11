@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from alpaca_desktop.alerts import NOTIFIER  # noqa: E402
+from alpaca_desktop.heartbeat import HEARTBEAT  # noqa: E402
 from alpaca_desktop.server import acquire_engine_lock, load_saved_settings_to_manager, manager  # noqa: E402
 from alpaca_desktop.storage import APP_DIR, ensure_private_app_dir  # noqa: E402
 
@@ -39,6 +40,11 @@ def main() -> int:
     if not acquire_engine_lock():
         log("App is running; it manages stops itself. Nothing to do.")
         return 0
+    if HEARTBEAT.enabled:
+        HEARTBEAT.beat_once(source="probe")  # read the kill switch without counting as a live app beat
+        if HEARTBEAT.halted:
+            log("Trading halted by the n8n kill switch; protect job sends no orders.")
+            return 0
     load_saved_settings_to_manager()
     for engine in manager.list_engines():
         settings = engine.settings(include_keys=True)
