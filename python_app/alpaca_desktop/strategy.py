@@ -194,6 +194,21 @@ class StrategyState:
         if len(history) > max_bars:
             del history[: len(history) - max_bars]
 
+    def session_bar_info(self, symbol: str) -> tuple[str, int]:
+        """(US/Eastern date of the latest bar's session, regular-hours bars in it); ("", 0) with no bars."""
+        history = self.histories.get(symbol.strip().upper(), [])
+        if not history:
+            return "", 0
+        latest = _bar_local_time(history[-1].timestamp)
+        if latest is None:
+            return "", 0
+        regular = 0
+        for point in history:
+            local = _bar_local_time(point.timestamp)
+            if local is not None and local.date() == latest.date() and REGULAR_SESSION_OPEN <= local.time() < REGULAR_SESSION_CLOSE:
+                regular += 1
+        return latest.date().isoformat(), regular
+
     def opening_range(self, symbol: str, minutes: int) -> OpeningRange | None:
         return opening_range(self.histories.get(symbol.strip().upper(), []), minutes)
 
