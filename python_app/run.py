@@ -28,7 +28,7 @@ from alpaca_desktop.currentness import (  # noqa: E402
     same_source_path,
     source_stamp,
 )
-from alpaca_desktop.server import app  # noqa: E402
+from alpaca_desktop.server import API_TOKEN, app  # noqa: E402
 
 
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "AlpacaPaperTrader"
@@ -187,18 +187,22 @@ def save_instance_url(url: str) -> None:
         APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
             os.chmod(APP_DATA_DIR, 0o700)
-        INSTANCE_PATH.write_text(
-            json.dumps(
-                {
-                    "url": url,
-                    "pid": os.getpid(),
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                    "source_stamp": source_stamp(),
-                    "source_path": str(SOURCE_ROOT),
-                }
-            ),
-            encoding="utf-8",
+        payload = json.dumps(
+            {
+                "url": url,
+                "pid": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "source_stamp": source_stamp(),
+                "source_path": str(SOURCE_ROOT),
+                # Local tools send this as X-APT-Token on POST/DELETE (see scripts/apt_api.py).
+                "api_token": API_TOKEN,
+            }
         )
+        fd = os.open(INSTANCE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        if os.name != "nt":
+            os.chmod(INSTANCE_PATH, 0o600)
     except OSError as exc:
         safe_print(f"Could not save Alpaca Paper Trader instance file: {exc}")
 
@@ -231,6 +235,10 @@ def main() -> None:
     if args.smoke:
         safe_print("Alpaca Paper Trader Python app imports OK.")
         return
+
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        safe_print(f"Refusing to listen on {args.host}: the trader API is local-only. Use 127.0.0.1.")
+        raise SystemExit(2)
 
     if args.port is None:
         port = configured_port()

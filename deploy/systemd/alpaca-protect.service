@@ -1,0 +1,10 @@
+[Unit]
+Description=Alpaca Paper Trader headless stop protection
+Documentation=file://@ROOT@/OPERATING.md
+
+[Service]
+Type=oneshot
+Environment=ALPACA_TRADER_DISABLE_DAY_TAPE=1
+ExecStart=@ROOT@/.venv/bin/python @ROOT@/python_app/protect.py
+Nice=10
+TimeoutStartSec=300

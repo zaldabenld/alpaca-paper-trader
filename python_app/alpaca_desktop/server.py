@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import binascii
+import hmac
 import importlib.util
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from urllib.parse import urlparse
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -26,7 +29,7 @@ from .engine import (
     credential_validation_error,
 )
 from .runtime_diagnostics import record_runtime_diagnostic, runtime_diagnostics_snapshot
-from .storage import load_settings, protect_text, save_settings, unprotect_text
+from .storage import APP_DIR, load_settings, protect_text, save_settings, unprotect_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,13 +39,71 @@ DAY_TAPE_BACKTEST_SCRIPT = REPO_ROOT / "scripts" / "day_tape_backtest.py"
 _day_tape_backtest_module: Any | None = None
 
 app = FastAPI(title="Alpaca Paper Trader")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost):\d+$",
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
+# Local-only API. Every request must name a loopback Host (blocks DNS rebinding), and every
+# state-changing request must carry this per-launch token, which only the page served by this
+# process (and the owner-only instance.json) knows. There is no CORS, so other origins can't read it.
+API_TOKEN = os.environ.get("ALPACA_TRADER_API_TOKEN") or secrets.token_urlsafe(32)
+API_TOKEN_HEADER = "x-apt-token"
+LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+ENGINE_LOCK_PATH = APP_DIR / "engine.lock"
+_engine_lock_handle: Any | None = None
+_engine_lock_held = False
+
+
+def loopback_hostname(netloc: str) -> str:
+    """Hostname part of a Host header or URL netloc, lowercased ('[::1]:8765' -> '::1')."""
+    try:
+        hostname = urlparse(f"//{netloc}").hostname or ""
+    except ValueError:
+        return ""
+    return hostname.lower()
+
+
+@app.middleware("http")
+async def local_only_guard(request: Request, call_next: Any) -> Any:
+    host_header = request.headers.get("host", "")
+    if loopback_hostname(host_header) not in LOOPBACK_HOSTNAMES:
+        return JSONResponse({"detail": "host not allowed"}, status_code=400)
+    origin = request.headers.get("origin", "")
+    if request.method in UNSAFE_METHODS:
+        token = request.headers.get(API_TOKEN_HEADER, "")
+        if not hmac.compare_digest(token.encode(), API_TOKEN.encode()):
+            return JSONResponse({"detail": "invalid api token"}, status_code=403)
+        if origin and urlparse(origin).netloc.lower() != host_header.lower():
+            return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+    response = await call_next(request)
+    if (
+        request.method == "GET"
+        and request.url.path == "/api/health"
+        and origin
+        and loopback_hostname(urlparse(origin).netloc) in LOOPBACK_HOSTNAMES
+    ):
+        # The UI checks health on the preferred port from another loopback port (stale-instance recovery).
+        response.headers["Access-Control-Allow-Origin"] = origin
+    return response
+
+
+def acquire_engine_lock() -> bool:
+    """Hold an exclusive lock for the life of this process so the headless protect job skips."""
+    global _engine_lock_handle, _engine_lock_held
+    if _engine_lock_held:
+        return True
+    try:
+        import fcntl
+    except ImportError:  # Windows: the protect timer is Linux-only
+        _engine_lock_held = True
+        return True
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    handle = open(ENGINE_LOCK_PATH, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _engine_lock_handle = handle
+    _engine_lock_held = True
+    return True
 manager = TraderManager()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -99,11 +160,35 @@ _settings_loaded = False
 async def startup() -> None:
     global _auto_connect_complete
     load_saved_settings_to_manager()
+    # The headless protect job holds the engine lock for a few seconds per run. Serve the UI
+    # right away, but connect and manage accounts only once this process holds the lock, so the
+    # two never manage the same accounts at once.
     if os.environ.get("ALPACA_TRADER_DISABLE_AUTO_CONNECT") != "1":
-        asyncio.create_task(auto_connect_saved_accounts())
+        asyncio.create_task(auto_connect_when_lock_held())
     else:
+        acquire_engine_lock()
         _auto_connect_complete = True
     asyncio.create_task(background_refresh_loop())
+
+
+async def wait_for_engine_lock() -> None:
+    warned = False
+    while not acquire_engine_lock():
+        if not warned:
+            record_runtime_diagnostic(
+                "runtime",
+                "Waiting for the headless protect job to finish before connecting accounts",
+                None,
+                severity="info",
+                source="server",
+            )
+            warned = True
+        await asyncio.sleep(1)
+
+
+async def auto_connect_when_lock_held() -> None:
+    await wait_for_engine_lock()
+    await auto_connect_saved_accounts()
 
 
 async def auto_connect_saved_accounts() -> None:
@@ -151,6 +236,8 @@ async def background_refresh_loop() -> None:
         try:
             await asyncio.sleep(1)
             now = time.monotonic()
+            if not acquire_engine_lock():
+                continue  # the protect job is managing the accounts right now
             for account_engine in manager.list_engines():
                 state = account_engine.state()
                 if not state.get("connected"):
@@ -237,8 +324,10 @@ def record_background_error(account_engine: Any | None, message: str) -> None:
 
 
 @app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+async def index() -> HTMLResponse:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace('content="__APT_API_TOKEN__"', f'content="{API_TOKEN}"', 1)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/favicon.ico")
@@ -340,6 +429,8 @@ async def select_account(payload: SelectAccountPayload) -> dict[str, Any]:
 
 @app.post("/api/connect")
 async def connect(payload: AccountPayload) -> dict[str, Any]:
+    if not acquire_engine_lock():
+        raise HTTPException(status_code=409, detail="The background stop-protection job is running; try again in a few seconds.")
     try:
         engine = manager.upsert_payload(payload)
         await asyncio.to_thread(engine.connect, payload.model_copy(update={"account_id": engine.account_id}))
