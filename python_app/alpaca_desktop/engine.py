@@ -76,12 +76,14 @@ from .runtime_diagnostics import (
 )
 from .storage import write_private_json
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
+from . import app_settings
 from . import market_overview
 from . import universe as rvol_universe
 
 
 CONFIG_VERSION = 1
 MOST_ACTIVES_MAX = 100  # Alpaca screener maximum for `top`
+DAILY_LIST_MAX = 100
 
 
 def configured_top_symbol_count() -> int:
@@ -109,7 +111,7 @@ HISTORICAL_BARS_CACHE_SECONDS = 15
 DAY_TAPE_SCAN_INTERVAL_SECONDS = 60
 HISTORICAL_BARS_PER_SYMBOL = 500
 HISTORICAL_BARS_REQUEST_LIMIT = 10000
-MARKET_STREAM_SYMBOL_LIMIT = 30
+MARKET_STREAM_SYMBOL_LIMIT = app_settings.DEFAULT_MARKET_STREAM_SYMBOL_LIMIT
 INVALID_SYMBOL_PATTERN = re.compile(r"invalid symbol:\s*([A-Za-z0-9.\-/]+)")
 # Symbols the market-data API rejects (e.g. CVR rights like 046CVR015 left in a paper
 # account by a corporate action). One of them fails a whole multi-symbol request, so
@@ -524,6 +526,11 @@ PROFILE_STRATEGY_KEYS = {
     "score_weight_session_pullback_penalty",
     "score_weight_recent_pullback_penalty",
     "score_weight_smi_overheat_penalty",
+    "most_active_count",
+    "daily_pick_count",
+    "daily_max_symbols",
+    "inverse_etf_symbols",
+    "extension_atr_reference_percent",
 }
 
 
@@ -593,6 +600,10 @@ class AppConfig(BaseModel):
     reentry_score_boost: Decimal = Decimal("10")
     inverse_etf_mode: str = "allow"
     universe_mode: str = "most_active"
+    most_active_count: int = MOST_ACTIVES_MAX
+    daily_pick_count: int = rvol_universe.PICK_COUNT
+    daily_max_symbols: int = rvol_universe.MAX_SYMBOLS
+    inverse_etf_symbols: list[str] = Field(default_factory=lambda: list(TOP_VOLUME_INVERSE_ETF_SYMBOLS))
     volume_period: int = 20
     volume_multiplier: Decimal = Decimal("1.0")
     min_avg_volume: Decimal = Decimal("0")
@@ -746,6 +757,27 @@ class AppConfig(BaseModel):
             raise ValueError("Stock list must be most_active or daily_rvol.")
         return mode
 
+    @field_validator("inverse_etf_symbols", mode="before")
+    @classmethod
+    def validate_inverse_etf_symbols(cls, value):
+        if isinstance(value, str):
+            items = re.sub(r"\s+", ",", value).split(",")
+        elif value is None:
+            items = []
+        else:
+            items = list(value)
+        result: list[str] = []
+        for item in items:
+            symbol = str(item).strip().upper()
+            if symbol and symbol not in result:
+                result.append(symbol)
+        if not result:
+            raise ValueError("Inverse ETF set needs at least one symbol.")
+        bad = [s for s in result if s not in INVERSE_ETF_SYMBOLS]
+        if bad:
+            raise ValueError(f"Not a known inverse ETF: {', '.join(bad)}. The inverse set only takes known inverse ETFs.")
+        return result
+
     @field_validator("entry_mode", mode="before")
     @classmethod
     def validate_entry_mode(cls, value: str) -> str:
@@ -809,6 +841,9 @@ class AppConfig(BaseModel):
         self.min_entry_score = min(self.min_entry_score, Decimal("100"))
         self.max_entry_rsi = min(self.max_entry_rsi, Decimal("100"))
         self.extension_atr_reference_percent = min(max(self.extension_atr_reference_percent, Decimal("0")), Decimal("5"))
+        self.most_active_count = min(max(int(self.most_active_count), 1), MOST_ACTIVES_MAX)
+        self.daily_pick_count = min(max(int(self.daily_pick_count), 1), DAILY_LIST_MAX)
+        self.daily_max_symbols = min(max(int(self.daily_max_symbols), self.daily_pick_count), DAILY_LIST_MAX)
         self.orb_minutes = min(max(int(self.orb_minutes), 5), 60)
         self.orb_max_breakout_percent = min(max(self.orb_max_breakout_percent, Decimal("0")), Decimal("10"))
         self.min_buy_volume_ratio = min(self.min_buy_volume_ratio, Decimal("1"))
@@ -892,6 +927,18 @@ class AppConfig(BaseModel):
             self.max_trade_notional = Decimal("0")
             self.max_trade_percent = Decimal("0")
             self.trade_size_migration = "inferred_exposure_slot_from_empty_trade_caps"
+
+
+def _fill_preset_strategy_defaults() -> None:
+    # Built-in presets name only the keys they tune; every other strategy key takes the AppConfig default,
+    # so picking a built-in style resets it and an untouched preset never reads as edited.
+    defaults = AppConfig().model_dump(mode="json")
+    for preset in PROFILE_PRESETS.values():
+        for key in PROFILE_STRATEGY_KEYS:
+            preset.setdefault(key, defaults[key])
+
+
+_fill_preset_strategy_defaults()
 
 
 class AccountPayload(BaseModel):
@@ -1370,6 +1417,20 @@ def compact_bar_payload(bar: Any, daily: bool = False) -> dict[str, Any]:
     }
 
 
+def market_stream_error_status(code: str, text: str, symbol_limit: int) -> tuple[str, str]:
+    """(status, detail) for an error message from the market-data websocket."""
+    detail = f"{text} ({code})" if code else text
+    # 405: the subscription would exceed the data plan's symbol limit; Alpaca keeps the previous
+    # subscription, so this needs the app-wide stream limit lowered rather than a reconnect.
+    if code == "405" or "symbol limit" in text.lower():
+        return (
+            "Symbol limit",
+            f"Alpaca refused the subscription: {symbol_limit} streamed symbols is more than this data plan allows "
+            f"({detail}). Lower Streamed symbols under Settings > App-wide.",
+        )
+    return "Stream error", detail
+
+
 def is_connection_limit_error(message: str) -> bool:
     return "connection limit exceeded" in str(message or "").lower()
 
@@ -1514,6 +1575,7 @@ def fetch_daily_bars_chunked(
     symbols: list[str],
     feed: str,
     now: datetime | None = None,
+    lookback_days: int = rvol_universe.DAILY_BARS_LOOKBACK_DAYS,
 ) -> dict[str, list[Any]]:
     """Split-adjusted daily bars for the relative-volume average; drops symbols the API rejects."""
     current = now or datetime.now(timezone.utc)
@@ -1527,7 +1589,7 @@ def fetch_daily_bars_chunked(
                     StockBarsRequest(
                         symbol_or_symbols=batch,
                         timeframe=TimeFrame.Day,
-                        start=current - timedelta(days=rvol_universe.DAILY_BARS_LOOKBACK_DAYS),
+                        start=current - timedelta(days=lookback_days),
                         limit=HISTORICAL_BARS_REQUEST_LIMIT,
                         feed=DataFeed(feed),
                         adjustment=Adjustment.SPLIT,
@@ -1551,8 +1613,19 @@ def daily_bar_session_date(timestamp: Any) -> str:
     return session.isoformat() if session else ""
 
 
-def pending_daily_universe_meta(session_date: str = "") -> dict[str, Any]:
-    return {"status": "pending", "session_date": session_date, "picked_at": "", "picked_count": 0, "added_count": 0}
+def pending_daily_universe_meta(session_date: str = "", pick_time: str = "") -> dict[str, Any]:
+    return {
+        "status": "pending",
+        "session_date": session_date,
+        "pick_time": pick_time,
+        "picked_at": "",
+        "picked_count": 0,
+        "added_count": 0,
+    }
+
+
+def et_clock_label(moment: datetime) -> str:
+    return moment.strftime("%I:%M %p ET").lstrip("0")
 
 
 def without_invalid_market_data_symbols(symbols: list[str]) -> list[str]:
@@ -1859,7 +1932,7 @@ class TraderEngine:
                 # Empty until the daily pick: only the inverse set (and held positions) are scanned.
                 base_symbols = list(self.daily_universe_symbols)
             elif config.use_top_volume_symbols and self.top_volume_symbols:
-                base_symbols = list(self.top_volume_symbols[:DASHBOARD_TOP_LIMIT])
+                base_symbols = list(self.top_volume_symbols[:min(config.most_active_count, DASHBOARD_TOP_LIMIT)])
             else:
                 base_symbols = list(config.symbols)
         return merged_symbols(base_symbols, self.active_inverse_symbols())
@@ -1871,8 +1944,9 @@ class TraderEngine:
         with self.lock:
             mode = self.config.inverse_etf_mode
             use_top_volume = self.config.use_top_volume_symbols
+            inverse_symbols = self.config.inverse_etf_symbols
         if mode == "inverse_only" or (mode == "allow" and use_top_volume):
-            return list(TOP_VOLUME_INVERSE_ETF_SYMBOLS)
+            return list(inverse_symbols)
         return []
 
     def market_proxy_analysis_symbols(self) -> list[str]:
@@ -5665,6 +5739,8 @@ class TraderManager:
         self.daily_universe_retry_at = 0.0
         self.daily_universe_loaded_for = ""
         self.daily_universe_streamed = False  # the running stream was built around the daily list
+        self.app_settings = app_settings.AppWideSettings()
+        self.app_settings_load_failed = False  # keep the unreadable saved value instead of overwriting it
         # (session date, feed) -> symbol -> (average daily volume, sessions) or None (too little history)
         self.daily_volume_averages: dict[tuple[str, str], dict[str, tuple[float, int] | None]] = {}
         self.market_overview_lock = threading.Lock()
@@ -5776,6 +5852,7 @@ class TraderManager:
             health["last_message_age"] = f"{int(age)}s ago"
         else:
             health["last_message_age"] = ""
+        health["symbol_limit"] = self.stream_symbol_limit()
         return health
 
     def record_replay_event(self, kind: str, payload: dict[str, Any]) -> None:
@@ -5905,15 +5982,40 @@ class TraderManager:
         except Exception as exc:  # never let the daily list skip this account's refresh (exits run there)
             source.log("error", f"Daily stock list update failed: {exc}")
 
+    def set_app_settings(self, settings: app_settings.AppWideSettings, load_failed: bool = False) -> bool:
+        """Swap in new app-wide settings; returns True when the stream symbol limit changed."""
+        with self.lock:
+            changed = settings.market_stream_symbol_limit != self.app_settings.market_stream_symbol_limit
+            self.app_settings = settings
+            self.app_settings_load_failed = load_failed
+        return changed
+
+    def app_settings_payload(self) -> dict[str, Any]:
+        with self.lock:
+            return self.app_settings.model_dump(mode="json")
+
+    def stream_symbol_limit(self) -> int:
+        with self.lock:
+            return int(self.app_settings.market_stream_symbol_limit)
+
+    @staticmethod
+    def daily_stream_pick_count(engines: list[TraderEngine]) -> int:
+        # Every account's pick is a prefix of the same first ranking, so the largest one covers them all.
+        return max((int(engine.config.daily_pick_count) for engine in engines), default=rvol_universe.PICK_COUNT)
+
     def daily_universe_stream_symbols(self) -> list[str]:
         """The daily list's streamed symbols when a connected streaming account uses it today, else []."""
-        if not any(engine.config.use_market_stream for engine in self.daily_universe_engines()):
+        engines = [engine for engine in self.daily_universe_engines() if engine.config.use_market_stream]
+        if not engines:
             return []
         with self.lock:
             universe = self.daily_universe
         if universe is None or universe.session_date != datetime.now(MARKET_TIMEZONE).date().isoformat():
             return []
-        return without_invalid_market_data_symbols(universe.stream_symbols())
+        # Cut to the stream limit the same way market_data_symbols fills it, so a pick larger than the
+        # limit still reads as carried and never resubscribes on every refresh.
+        symbols = without_invalid_market_data_symbols(universe.stream_symbols(self.daily_stream_pick_count(engines)))
+        return symbols[: self.stream_symbol_limit()]
 
     def sync_daily_universe_stream(self) -> None:
         """Resubscribe when the live stream does not match the daily list it should (or should no longer) carry.
@@ -5970,11 +6072,22 @@ class TraderManager:
                     self.daily_universe = universe
             with source.lock:
                 is_open = bool(source.market_clock.get("is_open"))
-            picking = rvol_universe.pick_due(universe, now_et, is_open)
+            with self.lock:
+                current_params = self.app_settings.list_params()
+            picking = rvol_universe.pick_due(universe, now_et, is_open, current_params["pick_minutes_after_open"])
             rechecking = not picking and rvol_universe.recheck_due(universe, now_et, is_open)
+            # A pick snapshots the app-wide list settings; the rest of the day keeps that snapshot.
+            params = current_params if picking or universe is None else universe.params
             if (picking or rechecking) and time.monotonic() >= self.daily_universe_retry_at:
                 try:
-                    ranked = self.rank_daily_candidates(source, now_et, feed, universe.symbols if universe else [])
+                    ranked = self.rank_daily_candidates(
+                        source,
+                        now_et,
+                        feed,
+                        universe.list_for() if universe else [],
+                        lookback=int(params.get("lookback_sessions") or rvol_universe.LOOKBACK_SESSIONS),
+                        min_sessions=int(params.get("min_sessions") or rvol_universe.MIN_SESSIONS),
+                    )
                     if not ranked:
                         raise RuntimeError("no symbols had today's volume and enough history to rank")
                 except Exception as exc:
@@ -5983,8 +6096,8 @@ class TraderManager:
                 else:
                     added: list[str] = []
                     if picking or universe is None:
-                        universe = rvol_universe.new_universe(ranked, now_et, feed)
-                        source.log("info", f"Daily stock list picked: top {len(universe.symbols)} by relative volume ({', '.join(universe.symbols[:5])}, ...).")
+                        universe = rvol_universe.new_universe(ranked, now_et, feed, params=params)
+                        source.log("info", f"Daily stock list picked: {len(ranked)} ranked by relative volume ({', '.join(universe.symbols[:5])}, ...).")
                     else:
                         added = rvol_universe.merge_additions(universe, ranked, now_et)
                         if added:
@@ -5997,7 +6110,15 @@ class TraderManager:
                         source.log("warn", f"Could not save the daily stock list: {exc}")
                     append_day_tape_event(
                         "daily_universe_pick" if picking else "daily_universe_recheck",
-                        {"feed": feed, "symbols": list(universe.symbols), "added": added, "ranks": universe.ranks},
+                        {
+                            "feed": feed,
+                            "symbols": list(universe.symbols),
+                            "added": added,
+                            "ranks": universe.ranks,
+                            # The full ranking, so a replay can rebuild any account's list size.
+                            "ranking": list(universe.rankings[-1]["symbols"]) if universe.rankings else [],
+                            "params": dict(universe.params),
+                        },
                     )
             self.push_daily_universe(session)
         finally:
@@ -6006,24 +6127,36 @@ class TraderManager:
     def push_daily_universe(self, session: str) -> None:
         with self.lock:
             universe = self.daily_universe
+            pick_minutes = self.app_settings.daily_pick_minutes_after_open
+        try:
+            pick_time = et_clock_label(rvol_universe.pick_time(date.fromisoformat(session), MARKET_TIMEZONE, pick_minutes))
+        except ValueError:
+            pick_time = ""
         if universe is None or universe.session_date != session:
-            symbols: list[str] = []
-            meta = pending_daily_universe_meta(session)
-        else:
-            symbols = without_invalid_market_data_symbols(list(universe.symbols))
-            try:
-                picked_at = datetime.fromisoformat(universe.picked_at).strftime("%I:%M %p ET").lstrip("0")
-            except ValueError:
-                picked_at = ""
+            meta = pending_daily_universe_meta(session, pick_time)
+            for engine in self.list_engines():
+                engine.apply_daily_universe([], meta)
+            return
+        try:
+            picked_at = et_clock_label(datetime.fromisoformat(universe.picked_at))
+        except ValueError:
+            picked_at = ""
+        # Each account replays the shared rankings at its own list size (no extra API calls).
+        for engine in self.list_engines():
+            config = engine.config
+            pick_count = int(config.daily_pick_count)
+            listed = universe.list_for(pick_count, int(config.daily_max_symbols))
+            picked = universe.picked_for(pick_count)
             meta = {
                 "status": "picked",
                 "session_date": universe.session_date,
+                "pick_time": pick_time,
                 "picked_at": picked_at,
-                "picked_count": len(universe.picked),
-                "added_count": len(universe.added),
+                "pick_count": pick_count,
+                "picked_count": len(picked),
+                "added_count": max(0, len(listed) - len(picked)),
             }
-        for engine in self.list_engines():
-            engine.apply_daily_universe(symbols, meta)
+            engine.apply_daily_universe(without_invalid_market_data_symbols(listed), meta)
 
     def rank_daily_candidates(
         self,
@@ -6031,6 +6164,8 @@ class TraderManager:
         now_et: datetime,
         feed: str,
         members: list[str],
+        lookback: int = rvol_universe.LOOKBACK_SESSIONS,
+        min_sessions: int = rvol_universe.MIN_SESSIONS,
     ) -> list[dict[str, Any]]:
         """Rank the most-active list (plus current members) by today's volume / average daily volume."""
         session = now_et.date()
@@ -6063,15 +6198,17 @@ class TraderManager:
                     float(daily_bar.get("volume") or 0),
                     date.fromisoformat(bar_date) if bar_date else None,
                 )
-        key = (session.isoformat(), feed)
+        key = (session.isoformat(), feed, lookback, min_sessions)
         with self.lock:
             # Keep only today's averages; earlier sessions' caches are dead weight.
             self.daily_volume_averages = {k: v for k, v in self.daily_volume_averages.items() if k == key}
             averages = dict(self.daily_volume_averages.get(key, {}))
         uncached = [symbol for symbol in today if symbol not in averages]
         if uncached:
-            bars = fetch_daily_bars_chunked(data_client, uncached, feed)
-            fresh = rvol_universe.average_daily_volumes(bars, session, MARKET_TIMEZONE)
+            bars = fetch_daily_bars_chunked(
+                data_client, uncached, feed, lookback_days=rvol_universe.daily_bars_lookback_days(lookback)
+            )
+            fresh = rvol_universe.average_daily_volumes(bars, session, MARKET_TIMEZONE, lookback, min_sessions)
             averages.update({symbol: fresh.get(symbol) for symbol in uncached})
             with self.lock:
                 self.daily_volume_averages.setdefault(key, {}).update(averages)
@@ -6200,6 +6337,7 @@ class TraderManager:
                 "accounts": accounts,
                 "profiles": self.profile_presets(),
                 "custom_profiles": {key: dict(value) for key, value in self.custom_profiles.items()},
+                "app_settings": self.app_settings.model_dump(mode="json"),
                 "settings_diagnostics": self.settings_diagnostics(),
                 "runtime_diagnostics": runtime_diagnostics_snapshot(),
             }
@@ -6348,18 +6486,19 @@ class TraderManager:
         source = self.shared_market_source()
         ordered_engines = ([source] if source in engines else []) + [engine for engine in engines if engine is not source]
 
-        # The free plan streams at most MARKET_STREAM_SYMBOL_LIMIT symbols in total. Positions held
+        # The plan streams at most stream_symbol_limit() symbols in total (30 on free IEX). Positions held
         # when the stream (re)subscribes come first, then the most-active list, then other scan
         # symbols; everything else is scanned through the cached REST bars. (Exits price positions
         # from the broker's current_price, so they do not depend on being streamed.)
         stream_symbols: list[str] = []
+        limit = self.stream_symbol_limit()
 
         def add(symbol: Any) -> None:
             clean = str(symbol or "").strip().upper()
-            if clean and clean not in stream_symbols and len(stream_symbols) < MARKET_STREAM_SYMBOL_LIMIT:
+            if clean and clean not in stream_symbols and len(stream_symbols) < limit:
                 stream_symbols.append(clean)
 
-        # With a picked daily relative-volume list, its top 25 and the inverse set take the slots
+        # With a picked daily relative-volume list, its pick and the inverse sets take the slots
         # first; held positions only get leftovers (exits use the broker's price and REST bars).
         daily_engines = [
             engine
@@ -6369,7 +6508,8 @@ class TraderManager:
         with self.lock:
             universe = self.daily_universe
         if daily_engines and universe is not None and universe.session_date == datetime.now(MARKET_TIMEZONE).date().isoformat():
-            for symbol in without_invalid_market_data_symbols(universe.stream_symbols()):
+            pick_count = self.daily_stream_pick_count(daily_engines)
+            for symbol in without_invalid_market_data_symbols(universe.stream_symbols(pick_count)):
                 add(symbol)
             for engine in daily_engines:
                 for symbol in engine.active_inverse_symbols():
@@ -6848,9 +6988,9 @@ class SharedMarketStreamHandle:
             elif msg_type == "error":
                 code = str(msg.get("code") or "").strip()
                 text = str(msg.get("msg") or "market data stream error").strip()
-                detail = f"{text} ({code})" if code else text
+                status, detail = market_stream_error_status(code, text, self.manager.stream_symbol_limit())
                 self.manager.update_market_stream_health(
-                    status="Stream error",
+                    status=status,
                     connected=False,
                     last_error=detail,
                 )

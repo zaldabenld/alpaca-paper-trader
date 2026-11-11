@@ -74,7 +74,39 @@ const fields = {
   cooldownMinutes: document.querySelector("#cooldownMinutes"),
   entryOpenGuardMinutes: document.querySelector("#entryOpenGuardMinutes"),
   entryCloseGuardMinutes: document.querySelector("#entryCloseGuardMinutes"),
+  extensionAtrReferencePercent: document.querySelector("#extensionAtrReferencePercent"),
+  scoreWeightRsi: document.querySelector("#scoreWeightRsi"),
+  scoreWeightRelativeVolume: document.querySelector("#scoreWeightRelativeVolume"),
+  scoreWeightMomentum: document.querySelector("#scoreWeightMomentum"),
+  scoreWeightRecentMomentum: document.querySelector("#scoreWeightRecentMomentum"),
+  scoreWeightLongMomentum: document.querySelector("#scoreWeightLongMomentum"),
+  scoreWeightSessionChange: document.querySelector("#scoreWeightSessionChange"),
+  scoreWeightVwap: document.querySelector("#scoreWeightVwap"),
+  scoreWeightSmi: document.querySelector("#scoreWeightSmi"),
+  scoreWeightVolatility: document.querySelector("#scoreWeightVolatility"),
+  scoreWeightLiquidityBonus: document.querySelector("#scoreWeightLiquidityBonus"),
+  scoreWeightFlow: document.querySelector("#scoreWeightFlow"),
+  scoreWeightPullbackPenalty: document.querySelector("#scoreWeightPullbackPenalty"),
+  scoreWeightOverboughtPenalty: document.querySelector("#scoreWeightOverboughtPenalty"),
+  scoreWeightVolatilityPenalty: document.querySelector("#scoreWeightVolatilityPenalty"),
+  scoreWeightSessionExtensionPenalty: document.querySelector("#scoreWeightSessionExtensionPenalty"),
+  scoreWeightVwapExtensionPenalty: document.querySelector("#scoreWeightVwapExtensionPenalty"),
+  scoreWeightSessionPullbackPenalty: document.querySelector("#scoreWeightSessionPullbackPenalty"),
+  scoreWeightRecentPullbackPenalty: document.querySelector("#scoreWeightRecentPullbackPenalty"),
+  scoreWeightSmiOverheatPenalty: document.querySelector("#scoreWeightSmiOverheatPenalty"),
+  mostActiveCount: document.querySelector("#mostActiveCount"),
+  dailyPickCount: document.querySelector("#dailyPickCount"),
+  dailyMaxSymbols: document.querySelector("#dailyMaxSymbols"),
+  inverseEtfSymbols: document.querySelector("#inverseEtfSymbols"),
   lookupSymbol: document.querySelector("#lookupSymbol"),
+};
+
+const appFields = {
+  dailyPickMinutes: document.querySelector("#appDailyPickMinutes"),
+  dailyRecheckMinutes: document.querySelector("#appDailyRecheckMinutes"),
+  rvolLookbackSessions: document.querySelector("#appRvolLookbackSessions"),
+  rvolMinSessions: document.querySelector("#appRvolMinSessions"),
+  marketStreamSymbolLimit: document.querySelector("#appMarketStreamSymbolLimit"),
 };
 
 const els = {
@@ -164,6 +196,8 @@ const els = {
   removeAccountButton: document.querySelector("#removeAccountButton"),
   saveCustomProfileButton: document.querySelector("#saveCustomProfileButton"),
   profileStatus: document.querySelector("#profileStatus"),
+  saveAppSettingsButton: document.querySelector("#saveAppSettingsButton"),
+  appSettingsStatus: document.querySelector("#appSettingsStatus"),
   applyParametersButton: document.querySelector("#applyParametersButton"),
   parameterStatus: document.querySelector("#parameterStatus"),
   connectButton: document.querySelector("#connectButton"),
@@ -251,6 +285,29 @@ const configKeys = [
   "cooldown_minutes",
   "entry_open_guard_minutes",
   "entry_close_guard_minutes",
+  "extension_atr_reference_percent",
+  "score_weight_rsi",
+  "score_weight_relative_volume",
+  "score_weight_momentum",
+  "score_weight_recent_momentum",
+  "score_weight_long_momentum",
+  "score_weight_session_change",
+  "score_weight_vwap",
+  "score_weight_smi",
+  "score_weight_volatility",
+  "score_weight_liquidity_bonus",
+  "score_weight_flow",
+  "score_weight_pullback_penalty",
+  "score_weight_overbought_penalty",
+  "score_weight_volatility_penalty",
+  "score_weight_session_extension_penalty",
+  "score_weight_vwap_extension_penalty",
+  "score_weight_session_pullback_penalty",
+  "score_weight_recent_pullback_penalty",
+  "score_weight_smi_overheat_penalty",
+  "most_active_count",
+  "daily_pick_count",
+  "daily_max_symbols",
 ];
 
 const strategyProfileKeys = new Set([
@@ -295,6 +352,30 @@ const strategyProfileKeys = new Set([
   "cooldown_minutes",
   "entry_open_guard_minutes",
   "entry_close_guard_minutes",
+  "extension_atr_reference_percent",
+  "score_weight_rsi",
+  "score_weight_relative_volume",
+  "score_weight_momentum",
+  "score_weight_recent_momentum",
+  "score_weight_long_momentum",
+  "score_weight_session_change",
+  "score_weight_vwap",
+  "score_weight_smi",
+  "score_weight_volatility",
+  "score_weight_liquidity_bonus",
+  "score_weight_flow",
+  "score_weight_pullback_penalty",
+  "score_weight_overbought_penalty",
+  "score_weight_volatility_penalty",
+  "score_weight_session_extension_penalty",
+  "score_weight_vwap_extension_penalty",
+  "score_weight_session_pullback_penalty",
+  "score_weight_recent_pullback_penalty",
+  "score_weight_smi_overheat_penalty",
+  "most_active_count",
+  "daily_pick_count",
+  "daily_max_symbols",
+  "inverse_etf_symbols",
 ]);
 
 let savedAccounts = [];
@@ -659,6 +740,7 @@ fields.remember.addEventListener("change", syncAutoConnectControl);
 fields.autoConnect.addEventListener("change", syncAutoConnectControl);
 
 els.saveCustomProfileButton.addEventListener("click", saveCustomProfile);
+els.saveAppSettingsButton.addEventListener("click", saveAppSettings);
 
 configKeys
   .filter((key) => key !== "profile")
@@ -668,6 +750,9 @@ configKeys
     field.addEventListener("input", () => handleConfigFieldChange(key));
     field.addEventListener("change", () => handleConfigFieldChange(key));
   });
+
+fields.inverseEtfSymbols.addEventListener("input", () => handleConfigFieldChange("inverse_etf_symbols"));
+fields.inverseEtfSymbols.addEventListener("change", () => handleConfigFieldChange("inverse_etf_symbols"));
 
 els.newAccountButton.addEventListener("click", async () => {
   await switchToAccount("");
@@ -985,6 +1070,33 @@ function readConfig() {
     cooldown_minutes: readInt("cooldownMinutes", 0),
     entry_open_guard_minutes: readInt("entryOpenGuardMinutes", 15),
     entry_close_guard_minutes: readInt("entryCloseGuardMinutes", 15),
+    extension_atr_reference_percent: readNumber("extensionAtrReferencePercent", 0),
+    score_weight_rsi: readNumber("scoreWeightRsi", 5),
+    score_weight_relative_volume: readNumber("scoreWeightRelativeVolume", 13),
+    score_weight_momentum: readNumber("scoreWeightMomentum", 14),
+    score_weight_recent_momentum: readNumber("scoreWeightRecentMomentum", 8),
+    score_weight_long_momentum: readNumber("scoreWeightLongMomentum", 14),
+    score_weight_session_change: readNumber("scoreWeightSessionChange", 16),
+    score_weight_vwap: readNumber("scoreWeightVwap", 14),
+    score_weight_smi: readNumber("scoreWeightSmi", 7),
+    score_weight_volatility: readNumber("scoreWeightVolatility", 0),
+    score_weight_liquidity_bonus: readNumber("scoreWeightLiquidityBonus", 1.5),
+    score_weight_flow: readNumber("scoreWeightFlow", 3),
+    score_weight_pullback_penalty: readNumber("scoreWeightPullbackPenalty", 0),
+    score_weight_overbought_penalty: readNumber("scoreWeightOverboughtPenalty", 0),
+    score_weight_volatility_penalty: readNumber("scoreWeightVolatilityPenalty", 4),
+    score_weight_session_extension_penalty: readNumber("scoreWeightSessionExtensionPenalty", 4),
+    score_weight_vwap_extension_penalty: readNumber("scoreWeightVwapExtensionPenalty", 10),
+    score_weight_session_pullback_penalty: readNumber("scoreWeightSessionPullbackPenalty", 9),
+    score_weight_recent_pullback_penalty: readNumber("scoreWeightRecentPullbackPenalty", 6),
+    score_weight_smi_overheat_penalty: readNumber("scoreWeightSmiOverheatPenalty", 4),
+    most_active_count: readInt("mostActiveCount", 100),
+    daily_pick_count: readInt("dailyPickCount", 25),
+    daily_max_symbols: readInt("dailyMaxSymbols", 40),
+    inverse_etf_symbols: fields.inverseEtfSymbols.value
+      .split(/[\s,]+/)
+      .map((value) => value.trim().toUpperCase())
+      .filter(Boolean),
   };
 }
 
@@ -1084,6 +1196,7 @@ function applyConfig(config) {
   };
   ensureProfileOption(config.profile || "custom", profileLabel(config.profile || "custom", config));
   fields.symbols.value = (normalizedConfig.symbols || ["SPY", "QQQ"]).join(",");
+  fields.inverseEtfSymbols.value = (normalizedConfig.inverse_etf_symbols || ["SQQQ", "SPXU", "SDS", "SH", "TZA"]).join(", ");
   configKeys.forEach((key) => {
     const camel = toCamel(key);
     const field = fields[camel];
@@ -1187,6 +1300,13 @@ function renderProfileStatus() {
   }
 }
 
+function appPickTimeLabel() {
+  // Before an account is connected there is no server meta yet; show the saved app-wide pick time.
+  const minutes = 9 * 60 + 30 + readAppInt("appDailyPickMinutes", 15);
+  const hour = Math.floor(minutes / 60);
+  return `${((hour + 11) % 12) + 1}:${String(minutes % 60).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"} ET`;
+}
+
 function renderDailyUniverseStatus(selected) {
   const el = els.dailyUniverseStatus;
   if (!el) return;
@@ -1202,7 +1322,7 @@ function renderDailyUniverseStatus(selected) {
     const symbols = Array.isArray(daily.symbols) ? daily.symbols : [];
     el.textContent = `Daily list: ${symbols.length} stocks (${daily.picked_count ?? 0} picked at ${daily.picked_at || "-"}, +${daily.added_count ?? 0} added since)`;
   } else {
-    el.textContent = "Daily list: waiting for the 9:45 ET pick (only inverse ETFs and held positions until then)";
+    el.textContent = `Daily list: waiting for the ${daily.pick_time || appPickTimeLabel()} pick (only inverse ETFs and held positions until then)`;
   }
   el.hidden = false;
 }
@@ -1336,6 +1456,30 @@ function presetConfig(profile) {
     cooldown_minutes: 0,
     entry_open_guard_minutes: 15,
     entry_close_guard_minutes: 15,
+    extension_atr_reference_percent: 0,
+    score_weight_rsi: 5,
+    score_weight_relative_volume: 13,
+    score_weight_momentum: 14,
+    score_weight_recent_momentum: 8,
+    score_weight_long_momentum: 14,
+    score_weight_session_change: 16,
+    score_weight_vwap: 14,
+    score_weight_smi: 7,
+    score_weight_volatility: 0,
+    score_weight_liquidity_bonus: 1.5,
+    score_weight_flow: 3,
+    score_weight_pullback_penalty: 0,
+    score_weight_overbought_penalty: 0,
+    score_weight_volatility_penalty: 4,
+    score_weight_session_extension_penalty: 4,
+    score_weight_vwap_extension_penalty: 10,
+    score_weight_session_pullback_penalty: 9,
+    score_weight_recent_pullback_penalty: 6,
+    score_weight_smi_overheat_penalty: 4,
+    most_active_count: 100,
+    daily_pick_count: 25,
+    daily_max_symbols: 40,
+    inverse_etf_symbols: ["SQQQ", "SPXU", "SDS", "SH", "TZA"],
   };
 }
 
@@ -1351,6 +1495,53 @@ function readNumber(id, fallback) {
 function readInt(id, fallback) {
   const value = parseInt(fields[id].value, 10);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function readAppInt(id, fallback) {
+  const value = parseInt(document.querySelector(`#${id}`).value, 10);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+const appSettingKeys = {
+  dailyPickMinutes: "daily_pick_minutes_after_open",
+  dailyRecheckMinutes: "daily_recheck_minutes",
+  rvolLookbackSessions: "rvol_lookback_sessions",
+  rvolMinSessions: "rvol_min_sessions",
+  marketStreamSymbolLimit: "market_stream_symbol_limit",
+};
+let appSettingsDirty = false;
+
+function applyAppSettings(settings, { force = false } = {}) {
+  // Unsaved edits survive settings reloads (Apply Changes, account switches) until saved.
+  if (!settings || (appSettingsDirty && !force)) return;
+  Object.entries(appSettingKeys).forEach(([name, key]) => {
+    if (settings[key] !== undefined && settings[key] !== null) appFields[name].value = settings[key];
+  });
+  appSettingsDirty = false;
+}
+
+Object.values(appFields).forEach((field) => field.addEventListener("input", () => {
+  appSettingsDirty = true;
+}));
+
+function readAppSettings() {
+  return {
+    daily_pick_minutes_after_open: readAppInt("appDailyPickMinutes", 15),
+    daily_recheck_minutes: readAppInt("appDailyRecheckMinutes", 30),
+    rvol_lookback_sessions: readAppInt("appRvolLookbackSessions", 20),
+    rvol_min_sessions: readAppInt("appRvolMinSessions", 5),
+    market_stream_symbol_limit: readAppInt("appMarketStreamSymbolLimit", 30),
+  };
+}
+
+async function saveAppSettings() {
+  try {
+    const result = await postJson("/api/app-settings", readAppSettings());
+    applyAppSettings(result.app_settings, { force: true });
+    els.appSettingsStatus.textContent = "App settings saved.";
+  } catch (error) {
+    els.appSettingsStatus.textContent = error.message || String(error);
+  }
 }
 
 // Per-launch token the server writes into this page; required on every state-changing request.
@@ -1376,10 +1567,15 @@ async function postJson(url, body) {
   if (!response.ok) {
     await reloadIfTokenRejected(response);
     const payload = await response.json().catch(() => ({}));
-    const detail = payload.detail || response.statusText;
-    throw new Error(detail);
+    throw new Error(errorDetailText(payload.detail) || response.statusText);
   }
   return response.json();
+}
+
+function errorDetailText(detail) {
+  // Validation errors (422) arrive as a list of {loc, msg}; show their messages, not "[object Object]".
+  if (Array.isArray(detail)) return detail.map((item) => String(item?.msg ?? item).replace(/^Value error, /, "")).join("; ");
+  return detail;
 }
 
 async function fetchRuntimeHealth(baseUrl = "") {
@@ -1551,6 +1747,7 @@ async function loadSettings(options = {}) {
   const payload = await response.json();
   if (guard && !guard()) return null;
   profiles = payload.profiles || {};
+  applyAppSettings(payload.app_settings);
   savedAccounts = payload.accounts || [];
   renderSettingsDiagnostics(payload.settings_diagnostics || {});
   selectedAccountId = payload.selected_account_id || savedAccounts[0]?.account_id || "";
