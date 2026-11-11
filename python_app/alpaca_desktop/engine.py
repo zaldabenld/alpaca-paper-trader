@@ -3848,7 +3848,10 @@ class TraderEngine:
             if cancelled is None or (cancelled and not self.wait_for_symbol_app_orders_cleared(symbol)):
                 self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
                 return events, False, None
-            qty_to_sell = abs(qty)
+            qty_to_sell = self.sellable_qty(position)
+            if qty_to_sell <= 0:
+                self.strategy_state.last_action[symbol] = "Hold (shares held by a working order)"
+                return events, False, None
             if self.is_take_profit_exit_reason(local_exit_reason):
                 take_profit_price, _ = self.exit_prices(decimal_value(position.get("avg_entry_price")), config)
                 _, limit_events = self.submit_limit_exit_order(
@@ -4073,8 +4076,11 @@ class TraderEngine:
             raw_qty = decimal_value(position.get("qty"))
             if raw_qty <= 0 or str(position.get("side") or "long").lower() == "short":
                 continue  # long-only bot: never "flatten" a short by selling more
-            qty = raw_qty
+            qty = self.sellable_qty(position)
             if decimal_value(position.get("current_price")) <= 0:
+                continue
+            if qty <= 0:
+                handled.add(symbol)  # an order is already taking the shares
                 continue
             symbol_orders = [order for order in flat_orders if str(order.get("symbol", "")).upper() == symbol]
             roles = [self.order_role(order, {symbol}) for order in symbol_orders]
@@ -4206,7 +4212,10 @@ class TraderEngine:
         ):
             events.append(("warn", f"Waiting for {symbol} take-profit cancellation before stop-loss sell."))
             return events
-        qty = abs(decimal_value(position.get("qty")))
+        qty = self.sellable_qty(position)
+        if qty <= 0:
+            events.append(("warn", f"Waiting for {symbol} shares to be released before stop-loss sell."))
+            return events
         events.extend(
             self.submit_exit_order(
                 symbol,
@@ -4387,7 +4396,11 @@ class TraderEngine:
                     f"local stop-loss {self.config.stop_loss_percent}%"
                     f" (gain {current_gain:.2f}%, manual stop missing)"
                 )
-            events.extend(self.submit_exit_order(symbol, qty, snapshot, reason))
+            qty_to_sell = self.sellable_qty(position)
+            if qty_to_sell <= 0:
+                self.strategy_state.last_action[symbol] = "Hold (shares held by a working order)"
+                return events, False, True, False
+            events.extend(self.submit_exit_order(symbol, qty_to_sell, snapshot, reason))
             return events, True, False, False
 
         if take_profit_price > 0 and current_price >= take_profit_price and not take_profit_orders:
@@ -5125,6 +5138,19 @@ class TraderEngine:
             self.replay_recorder("order_intent", event)
         else:
             append_replay_event("order_intent", event)
+
+    def sellable_qty(self, position: dict[str, Any]) -> Decimal:
+        """Shares a market sell may ask for right now: Alpaca's qty_available when it reports one.
+
+        While a protective stop is filling in pieces, part of the position is still held by that
+        order; a sell for the full position is rejected ("insufficient qty available"), as happened
+        with U on 2026-11-06. Replay positions carry no qty_available, so the full quantity is used.
+        """
+        qty = abs(decimal_value(position.get("qty")))
+        available = position.get("qty_available")
+        if available is None or available == "":
+            return qty
+        return max(Decimal("0"), min(qty, abs(decimal_value(available))))
 
     def format_position(self, item: dict[str, Any]) -> dict[str, Any]:
         qty = decimal_value(item.get("qty"))
