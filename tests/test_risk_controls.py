@@ -356,5 +356,75 @@ class AlertHookTests(unittest.TestCase):
         self.assertEqual(len(self.notifier.sent), 1)
 
 
+
+class TakeProfitCancelRaceTests(unittest.TestCase):
+    """Price above take-profit with a resting stop: the stop must be gone before the limit sell."""
+
+    STOP = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "0.25",
+            "stop_price": "98.75", "client_order_id": "apt-protect-sl-aaa-1"}
+
+    def above_take_profit(self, stop: dict[str, Any] | None = None) -> FakeTradingClient:
+        return FakeTradingClient(is_open=True, price="103", orders=[dict(stop or self.STOP)])
+
+    def test_pending_cancel_waits_for_the_stop_to_clear_then_sells(self) -> None:
+        client = self.above_take_profit()
+        polls: list[int] = []
+        open_orders = client.get_orders
+
+        def pending_cancel(order_id: str) -> None:
+            raise RuntimeError('{"code":42210000,"message":"order pending cancel"}')
+
+        def clears_after_first_poll(request: Any) -> list[dict[str, Any]]:
+            orders = open_orders(request)
+            polls.append(len(orders))
+            client.open_orders = []
+            return orders
+
+        client.cancel_order_by_id = pending_cancel  # type: ignore[method-assign]
+        client.get_orders = clears_after_first_poll  # type: ignore[method-assign]
+        engine = connected_engine(client)
+        engine_module.clear_runtime_diagnostics()
+        with patch.object(engine_module.time, "sleep"):
+            run_refresh(engine, run_strategy=False)
+        self.assertEqual(kinds(client), [("sell", "limit")])
+        self.assertNotIn(
+            "Live order cancellation failed",
+            [entry["message"] for entry in engine_module.runtime_diagnostics_snapshot()["entries"]],
+        )
+
+    def test_stop_still_pending_cancel_holds_the_sell(self) -> None:
+        client = self.above_take_profit()
+        client.cancel_order_by_id = lambda order_id: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeError("order pending cancel")
+        )
+        engine = connected_engine(client)
+        with patch.object(engine, "wait_for_symbol_app_orders_cleared", return_value=False) as wait:
+            run_refresh(engine, run_strategy=False)
+        wait.assert_called()
+        self.assertEqual(client.submitted, [])
+        self.assertIn("waiting for exit order cancellation", engine.strategy_state.last_action["AAA"])
+
+    def test_order_already_pending_cancel_is_not_cancelled_again(self) -> None:
+        client = self.above_take_profit(dict(self.STOP, status="pending_cancel"))
+        engine = connected_engine(client)
+        with patch.object(engine, "wait_for_symbol_app_orders_cleared", return_value=False):
+            run_refresh(engine, run_strategy=False)
+        self.assertEqual(client.cancelled, [])
+        self.assertEqual(client.submitted, [])
+
+    def test_refused_stop_cancel_never_sells(self) -> None:
+        client = self.above_take_profit()
+
+        def refuse(order_id: str) -> None:
+            raise RuntimeError("order is not cancelable")
+
+        client.cancel_order_by_id = refuse  # type: ignore[method-assign]
+        engine = connected_engine(client)
+        with patch.object(engine, "wait_for_symbol_app_orders_cleared", return_value=True) as wait:
+            run_refresh(engine, run_strategy=False)
+        wait.assert_not_called()
+        self.assertEqual(client.submitted, [])
+
+
 if __name__ == "__main__":
     unittest.main()
