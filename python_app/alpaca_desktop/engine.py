@@ -1738,9 +1738,13 @@ class TraderEngine:
         return merged_symbols(base_symbols, self.active_inverse_symbols())
 
     def active_inverse_symbols(self) -> list[str]:
+        # The bounded inverse set is always scanned in top-volume allow mode, so a down day cannot
+        # hide it just because Alpaca's most-active list skipped it. Each one still has to pass
+        # the same entry checks as any other symbol; this only guarantees it is looked at.
         with self.lock:
             mode = self.config.inverse_etf_mode
-        if mode == "inverse_only":
+            use_top_volume = self.config.use_top_volume_symbols
+        if mode == "inverse_only" or (mode == "allow" and use_top_volume):
             return list(TOP_VOLUME_INVERSE_ETF_SYMBOLS)
         return []
 

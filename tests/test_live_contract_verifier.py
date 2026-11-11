@@ -41,6 +41,14 @@ def top_volume_symbols() -> list[str]:
     return [f"SYM{index}" for index in range(1, 26)]
 
 
+INVERSE_SET = ["SQQQ", "SPXU", "SDS", "SH", "TZA"]
+
+
+def allow_mode_symbols() -> list[str]:
+    """Allow mode scans the top-volume list plus the bounded inverse set."""
+    return top_volume_symbols() + INVERSE_SET
+
+
 def selected_account(account_id: str, daily: str = "10", pct: str = "1") -> dict[str, object]:
     return {
         "account_id": account_id,
@@ -82,9 +90,9 @@ def selected_account(account_id: str, daily: str = "10", pct: str = "1") -> dict
         "order_intents": [],
         "strategy": [],
         "logs": [],
-        "trading_symbols": top_volume_symbols(),
+        "trading_symbols": allow_mode_symbols(),
         "symbol_source": "top_volume",
-        "trading_symbol_count": 25,
+        "trading_symbol_count": 30,
     }
 
 
@@ -95,7 +103,7 @@ def passing_payload() -> dict[str, object]:
             "name": "Private Account",
             "connected": True,
             "symbol_source": "top_volume",
-            "trading_symbol_count": 25,
+            "trading_symbol_count": 30,
         }
         for index in range(1, 4)
     ]
@@ -332,15 +340,29 @@ class LiveContractVerifierTests(unittest.TestCase):
         module = load_verifier_module()
         payload = deepcopy(passing_payload())
         selected = payload["account_states"][0]["selected"]
-        selected["trading_symbols"] = top_volume_symbols() + ["SQQQ"]
-        selected["trading_symbol_count"] = 26
-        payload["state"]["accounts"][0]["trading_symbol_count"] = 26
+        selected["trading_symbols"] = allow_mode_symbols() + ["MSFT"]
+        selected["trading_symbol_count"] = 31
+        payload["state"]["accounts"][0]["trading_symbol_count"] = 31
 
         report = module.verify_payload(payload)
         failed = {item["name"] for item in report["checks"] if not item["ok"]}
 
         self.assertFalse(report["ok"])
         self.assertIn("account_1.top_volume_universe", failed)
+
+    def test_allow_mode_must_scan_the_inverse_set_and_exclude_mode_must_not(self) -> None:
+        module = load_verifier_module()
+        payload = deepcopy(passing_payload())
+        selected = payload["account_states"][0]["selected"]
+        selected["trading_symbols"] = top_volume_symbols()
+        selected["trading_symbol_count"] = 25
+        payload["state"]["accounts"][0]["trading_symbol_count"] = 25
+        failed = {item["name"] for item in module.verify_payload(payload)["checks"] if not item["ok"]}
+        self.assertIn("account_1.top_volume_universe", failed)
+
+        selected["config"]["inverse_etf_mode"] = "exclude"
+        failed = {item["name"] for item in module.verify_payload(payload)["checks"] if not item["ok"]}
+        self.assertNotIn("account_1.top_volume_universe", failed)
 
     def test_market_stream_health_must_cover_dashboard_symbols_without_error(self) -> None:
         module = load_verifier_module()

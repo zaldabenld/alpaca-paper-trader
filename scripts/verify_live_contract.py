@@ -24,6 +24,7 @@ def expected_top_volume_count() -> int:
 
 
 MARKET_STREAM_SYMBOL_LIMIT = 30  # free-plan websocket limit; engine.MARKET_STREAM_SYMBOL_LIMIT
+INVERSE_SCAN_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")  # engine.TOP_VOLUME_INVERSE_ETF_SYMBOLS
 
 
 def top_volume_count_ok(count: int) -> bool:
@@ -704,15 +705,17 @@ def verify_payload(
                     for symbol in trading_symbols
                     if str(symbol or "").strip()
                 }
-                exact_count_ok = top_volume_count_ok(len(top_rows)) and count == len(top_symbols)
+                # Allow mode also scans the bounded inverse set (engine.TOP_VOLUME_INVERSE_ETF_SYMBOLS).
+                expected_symbols = top_symbols | (set(INVERSE_SCAN_SYMBOLS) if inverse_mode == "allow" else set())
+                exact_count_ok = top_volume_count_ok(len(top_rows)) and count == len(expected_symbols)
                 if listed_symbols:
                     universe_ok = (
                         symbol_source == "top_volume"
                         and exact_count_ok
-                        and listed_symbols == top_symbols
+                        and listed_symbols == expected_symbols
                     )
-                    extra_count = len(listed_symbols - top_symbols)
-                    missing_count = len(top_symbols - listed_symbols)
+                    extra_count = len(listed_symbols - expected_symbols)
+                    missing_count = len(expected_symbols - listed_symbols)
                     universe_detail = (
                         f"{account_label(index)} symbol_source={symbol_source or 'missing'}, "
                         f"trading_symbol_count={count}, extras={extra_count}, missing={missing_count}"
