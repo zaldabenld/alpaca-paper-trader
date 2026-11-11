@@ -669,6 +669,14 @@ let suppressProfileDirty = false;
 let staleInstanceRedirecting = false;
 let lastStreamRecoveryAt = 0;
 let parameterDirty = false;
+// Settings the user has edited but not applied. A live value never overwrites one of these.
+const dirtyConfigKeys = new Set();
+// Name / auto-connect / auto-start edits that have not been saved.
+let accountFieldsDirty = false;
+// The live settings last mirrored into the form: { accountId, config, name, autoConnect, autoStart }.
+let mirroredAccount = null;
+// The backend process this page was loaded from; a restart means the page code may be out of date.
+let loadedBackendStamp = "";
 
 setupSortableTables();
 
@@ -768,6 +776,10 @@ fields.profile.addEventListener("change", async () => {
 
 fields.remember.addEventListener("change", syncAutoConnectControl);
 fields.autoConnect.addEventListener("change", syncAutoConnectControl);
+[fields.accountName, fields.remember, fields.autoConnect, fields.autoStartTrading].forEach((field) => {
+  field.addEventListener("input", () => { accountFieldsDirty = true; });
+  field.addEventListener("change", () => { accountFieldsDirty = true; });
+});
 
 els.saveCustomProfileButton.addEventListener("click", saveCustomProfile);
 els.saveAppSettingsButton.addEventListener("click", saveAppSettings);
@@ -793,7 +805,6 @@ els.saveAccountButton.addEventListener("click", async () => {
     allowSelectedAccountChange: !selectedAccountId || isDraftAccount,
   });
   await saveCurrentAccountDraft(true, { guard: () => isCurrentAccountContext(context) });
-  parameterDirty = false;
   await loadSettings({ guard: () => isCurrentAccountContext(context) });
   await loadState({ accountId: selectedAccountId, source: "save-account" });
 });
@@ -826,11 +837,10 @@ els.connectButton.addEventListener("click", async () => {
 });
 
 els.refreshButton.addEventListener("click", async () => {
+  // Refresh only re-reads the account. Edits stay pending until Apply Changes.
   const context = makeRenderContext();
-  await postJson("/api/accounts", readAccountPayload());
-  parameterDirty = false;
   const state = await postJson("/api/refresh", { account_id: selectedAccountId || null });
-  await loadSettings({ guard: () => isCurrentAccountContext(context) });
+  await loadSettings({ applySelected: false, guard: () => isCurrentAccountContext(context) });
   if (renderState(state, context)) {
     await loadDashboard({ accountId: selectedAccountId, source: "refresh" });
   }
@@ -857,10 +867,9 @@ els.tradingToggleButton.addEventListener("click", async () => {
     if (wasTrading) {
       state = await postJson("/api/stop", { account_id: selectedAccountId || null });
     } else {
-      await postJson("/api/accounts", readAccountPayload());
-      parameterDirty = false;
+      // Start runs the settings that are already live. Edits stay pending until Apply Changes.
       state = await postJson("/api/start", { account_id: selectedAccountId || null });
-      await loadSettings({ guard: () => isCurrentAccountContext(context) });
+      await loadSettings({ applySelected: false, guard: () => isCurrentAccountContext(context) });
     }
     if (renderState(state, context)) {
       await loadDashboard({ accountId: selectedAccountId, source: "trading-toggle" });
@@ -964,22 +973,24 @@ function readAccountPayload() {
   };
 }
 
-function hasAccountFormData() {
-  return Boolean(
-    fields.accountName.value.trim() ||
-      fields.apiKey.value.trim() ||
-      fields.secretKey.value.trim() ||
-      fields.symbols.value.trim()
-  );
-}
-
 async function switchToAccount(nextAccountId) {
   const previousAccountId = selectedAccountId;
+  if ((nextAccountId || "") === (previousAccountId || "")) {
+    fields.accountSelect.value = previousAccountId;
+    return;
+  }
+  // Looking at another account never writes anything. Unapplied edits are dropped, with a warning first.
+  if (hasPendingEdits()) {
+    const name = fields.accountName.value.trim() || "this account";
+    if (!window.confirm(`Discard the changes you have not applied to ${name}?`)) {
+      fields.accountSelect.value = isDraftAccount ? "" : previousAccountId;
+      return;
+    }
+  }
   await withAccountTransition(async (transitionVersion) => {
     try {
-      if (previousAccountId || hasAccountFormData()) {
-        await saveCurrentAccountDraft(false, { guard: () => isTransitionCurrent(transitionVersion) });
-      }
+      // Re-read the saved accounts so the next account's form shows what is live now.
+      await loadSettings({ applySelected: false, guard: () => isTransitionCurrent(transitionVersion) });
     } catch (error) {
       if (isTransitionCurrent(transitionVersion)) {
         fields.accountSelect.value = previousAccountId;
@@ -1022,7 +1033,7 @@ async function saveCurrentAccountDraft(applySavedAccount = true, options = {}) {
   if (options.guard && !options.guard()) return state;
   selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
   isDraftAccount = false;
-  parameterDirty = false;
+  clearPendingEdits();
   await loadSettings({ applySelected: applySavedAccount, guard: options.guard });
   return state;
 }
@@ -1143,7 +1154,8 @@ function readConfig() {
 function applyAccount(account) {
   selectedAccountId = account.account_id || "";
   isDraftAccount = !selectedAccountId;
-  parameterDirty = false;
+  clearPendingEdits();
+  mirroredAccount = null;
   fields.accountName.value = account.name || "Paper Account";
   fields.apiKey.value = "";
   fields.secretKey.value = "";
@@ -1227,17 +1239,24 @@ function renderCredentialStatus(account = {}) {
   fields.secretKey.placeholder = hasCredentials ? `${placeholderPrefix} - enter new secret to replace` : "Enter secret key";
 }
 
-function applyConfig(config) {
+// Writes a config into the form. With `onlyKeys`, writes just those settings and leaves the rest alone.
+function applyConfig(config, onlyKeys = null) {
   if (!config) return;
+  const wanted = (key) => !onlyKeys || onlyKeys.has(key);
   suppressProfileDirty = true;
   const normalizedConfig = {
     ...config,
     trade_size_mode: config.trade_size_mode || inferTradeSizeMode(config),
   };
-  ensureProfileOption(config.profile || "custom", profileLabel(config.profile || "custom", config));
-  fields.symbols.value = (normalizedConfig.symbols || ["SPY", "QQQ"]).join(",");
-  fields.inverseEtfSymbols.value = (normalizedConfig.inverse_etf_symbols || ["SQQQ", "SPXU", "SDS", "SH", "TZA"]).join(", ");
+  if (wanted("profile")) {
+    ensureProfileOption(config.profile || "custom", profileLabel(config.profile || "custom", config));
+  }
+  if (wanted("symbols")) fields.symbols.value = (normalizedConfig.symbols || ["SPY", "QQQ"]).join(",");
+  if (wanted("inverse_etf_symbols")) {
+    fields.inverseEtfSymbols.value = (normalizedConfig.inverse_etf_symbols || ["SQQQ", "SPXU", "SDS", "SH", "TZA"]).join(", ");
+  }
   configKeys.forEach((key) => {
+    if (!wanted(key)) return;
     const camel = toCamel(key);
     const field = fields[camel];
     if (!field || normalizedConfig[key] === undefined || normalizedConfig[key] === null) return;
@@ -1247,9 +1266,63 @@ function applyConfig(config) {
       field.value = normalizedConfig[key];
     }
   });
-  syncTradeSizeModeControl(normalizedConfig);
+  syncTradeSizeModeControl(onlyKeys ? undefined : normalizedConfig);
   suppressProfileDirty = false;
   renderProfileStatus();
+}
+
+function sameSettingValue(a, b) {
+  const text = (value) => (Array.isArray(value) ? value.join(",") : String(value ?? ""));
+  if (text(a) === text(b)) return true;
+  const left = Number(a);
+  const right = Number(b);
+  // "1.0" and "1" are the same setting.
+  return text(a) !== "" && text(b) !== "" && Number.isFinite(left) && Number.isFinite(right) && left === right;
+}
+
+// Keeps the form showing what is live. A setting changed anywhere else (the API, another window)
+// appears here on the next refresh, so the form never holds an old value that a later Apply or
+// Save could write back. Settings the user is in the middle of editing keep their pending value.
+function syncFormFromServer(selected) {
+  if (!selected || isDraftAccount || !selected.account_id || selected.account_id !== selectedAccountId) return;
+  const config = selected.config || {};
+  const previous = mirroredAccount && mirroredAccount.accountId === selected.account_id ? mirroredAccount : null;
+  const changedKeys = Object.keys(config).filter(
+    (key) => !previous || !sameSettingValue(previous.config[key], config[key])
+  );
+  const name = selected.name || "Paper Account";
+  const autoConnect = selected.auto_connect !== false;
+  const autoStart = Boolean(selected.auto_start_trading);
+  const accountChanged = !previous
+    || previous.name !== name
+    || previous.autoConnect !== autoConnect
+    || previous.autoStart !== autoStart;
+  mirroredAccount = { accountId: selected.account_id, config: { ...config }, name, autoConnect, autoStart };
+
+  const saved = findSavedAccount(selected.account_id);
+  if (saved) {
+    saved.config = { ...config };
+    saved.name = name;
+    saved.auto_connect = autoConnect;
+    saved.auto_start_trading = autoStart;
+  }
+
+  const incoming = changedKeys.filter((key) => !dirtyConfigKeys.has(key));
+  if (incoming.length) {
+    if (parameterDirty) {
+      applyConfig(config, new Set(incoming));
+    } else {
+      applyConfig(config);
+    }
+  }
+  if (accountChanged && !accountFieldsDirty) {
+    fields.accountName.value = name;
+    if (fields.remember.checked) {
+      fields.autoConnect.checked = autoConnect;
+      fields.autoStartTrading.checked = autoStart;
+    }
+    syncAutoConnectControl();
+  }
 }
 
 async function applyProfilePreset() {
@@ -1260,7 +1333,7 @@ async function applyProfilePreset() {
   });
   if (!isCurrentAccountContext(context)) return;
   applyConfig(config);
-  parameterDirty = true;
+  markConfigPending(Object.keys(config));
   renderParameterStatus(null);
 }
 
@@ -1276,7 +1349,7 @@ async function applyCurrentParameters() {
     const state = await postJson("/api/apply-parameters", readAccountPayload());
     selectedAccountId = state.selected_account_id || state.selected?.account_id || selectedAccountId;
     isDraftAccount = false;
-    parameterDirty = false;
+    clearPendingEdits();
     await loadSettings({ applySelected: false, guard: () => isCurrentAccountContext(context) });
     if (renderState(state, context)) {
       await loadDashboard({ accountId: selectedAccountId, source: "apply-parameters" });
@@ -1300,13 +1373,38 @@ async function saveCustomProfile() {
   profiles = payload.profiles || profiles;
   renderProfileSelect(payload.profile);
   applyConfig(payload.config);
-  els.profileStatus.textContent = `Saved ${profileLabel(payload.profile, payload.config)}.`;
-  await saveCurrentAccountDraft(false, { guard: () => isCurrentAccountContext(context) });
+  // The profile is saved. Putting it on this account is still a pending change until Apply Changes.
+  markConfigPending(Object.keys(payload.config || {}));
+  renderParameterStatus(null);
+  els.profileStatus.textContent = `Saved ${profileLabel(payload.profile, payload.config)}. Click Apply Changes to use it on this account.`;
+}
+
+function clearPendingEdits() {
+  parameterDirty = false;
+  accountFieldsDirty = false;
+  dirtyConfigKeys.clear();
+}
+
+function markConfigPending(keys) {
+  keys.forEach((key) => dirtyConfigKeys.add(key));
+  parameterDirty = true;
+}
+
+function hasPendingEdits() {
+  return parameterDirty
+    || accountFieldsDirty
+    || Boolean(fields.apiKey.value.trim() || fields.secretKey.value.trim());
 }
 
 function handleConfigFieldChange(key) {
   if (suppressProfileDirty) return;
-  if (key === "trade_size_mode") syncTradeSizeModeControl();
+  dirtyConfigKeys.add(key);
+  if (key === "trade_size_mode") {
+    syncTradeSizeModeControl();
+    // The size mode decides which of these two the form sends.
+    dirtyConfigKeys.add("max_trade_notional");
+    dirtyConfigKeys.add("max_trade_percent");
+  }
   parameterDirty = true;
   renderParameterStatus(null);
   if (strategyProfileKeys.has(key)) renderProfileStatus();
@@ -1737,6 +1835,7 @@ async function checkRuntimeHealth() {
     const health = await fetchRuntimeHealth();
     if (isLatestRequest(request)) {
       renderRuntimeHealth(health);
+      reloadIfBackendRestarted(health);
     }
     return health;
   } catch (error) {
@@ -1745,6 +1844,17 @@ async function checkRuntimeHealth() {
     }
     return null;
   }
+}
+
+// A restarted backend may be serving newer page code. Reload to pick it up, but never over unapplied edits.
+function reloadIfBackendRestarted(health) {
+  if (!health?.pid || !health?.started_at) return;
+  const stamp = `${health.pid}:${health.started_at}`;
+  if (!loadedBackendStamp) {
+    loadedBackendStamp = stamp;
+    return;
+  }
+  if (stamp !== loadedBackendStamp && !hasPendingEdits()) window.location.reload();
 }
 
 async function fetchWithRecovery(url, options) {
@@ -2412,12 +2522,7 @@ function renderState(state, context) {
     positions: protectionRows.length,
     protectedCount: protectionRows.filter((row) => row.status === "Protected").length,
   };
-  if (selected.account_id === selectedAccountId) {
-    const saved = findSavedAccount(selectedAccountId);
-    if (!saved || saved.config?.profile !== config.profile) {
-      applyConfig(config);
-    }
-  }
+  syncFormFromServer(selected);
 
   els.statusText.textContent = selected.name ? `${selected.name}: ${selected.status}` : selected.status || "Not connected";
   renderCredentialStatus({

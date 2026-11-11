@@ -37,7 +37,7 @@ from alpaca.trading.requests import (
     MarketOrderRequest,
     StopOrderRequest,
 )
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from .backtester import (
     EngineBacktesterBoundary,
@@ -1024,6 +1024,17 @@ class AccountPayload(BaseModel):
     auto_connect: bool = True
     auto_start_trading: bool = False
     config: AppConfig
+    # Which config keys the client actually sent (None when built in code from a full AppConfig).
+    _sent_config_keys: frozenset[str] | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def remember_sent_config_keys(cls, data: Any, handler: Any) -> "AccountPayload":
+        payload = handler(data)
+        raw_config = data.get("config") if isinstance(data, dict) else None
+        if isinstance(raw_config, dict):
+            payload._sent_config_keys = frozenset(str(key) for key in raw_config)
+        return payload
 
 
 class AccountSettings(BaseModel):
@@ -1986,15 +1997,34 @@ class TraderEngine:
                 self.status = "Saved credentials invalid"
                 self.log("error", self.last_error)
 
+    def payload_config(self, payload: AccountPayload) -> AppConfig:
+        """The payload's config, keeping this account's current value for every key the client left out.
+
+        A page or script that does not know a setting must not reset it to the default just by saving
+        the settings it does know. Only keys that were actually sent can change.
+        """
+        sent = payload._sent_config_keys
+        if sent is None:
+            return payload.config
+        with self.lock:
+            current = self.config
+        unsent = [key for key in AppConfig.model_fields if key not in sent]
+        if not unsent:
+            return payload.config
+        merged = payload.config.model_dump()
+        merged.update({key: getattr(current, key) for key in unsent})
+        return AppConfig.model_validate(merged)
+
     def configure_payload(self, payload: AccountPayload) -> None:
         api_key = credential_text(payload.api_key)
         secret_key = credential_text(payload.secret_key)
         validation_error = credential_validation_error(api_key, secret_key, require_pair=False)
         if validation_error:
             raise RuntimeError(validation_error)
+        config = self.payload_config(payload)
         with self.lock:
             self.name = payload.name.strip() or "Paper Account"
-            self.config = payload.config
+            self.config = config
             self.settings_load_error = ""
             if api_key:
                 self.api_key = api_key
@@ -2168,11 +2198,12 @@ class TraderEngine:
 
     def connect(self, payload: AccountPayload) -> None:
         api_key, secret_key = self.payload_credentials(payload)
+        config = self.payload_config(payload)
         with self.lock:
             self.stop_streams_locked()
             self.close_api_clients_locked()
             self.name = payload.name.strip() or "Paper Account"
-            self.config = payload.config
+            self.config = config
             self.api_key = api_key
             self.secret_key = secret_key
             self.remember = payload.remember
