@@ -491,6 +491,11 @@ async def get_dashboard(account_id: str | None = None) -> dict[str, Any]:
     return manager.dashboard_state(account_id)
 
 
+@app.get("/api/market-overview")
+async def get_market_overview() -> dict[str, Any]:
+    return await asyncio.to_thread(manager.market_overview)
+
+
 def day_tape_backtest_module() -> Any:
     global _day_tape_backtest_module
     if _day_tape_backtest_module is not None:

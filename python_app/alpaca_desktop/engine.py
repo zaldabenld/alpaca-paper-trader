@@ -15,17 +15,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from alpaca.common.enums import Sort
 from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical.news import NewsClient
 from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.live import StockDataStream
 from alpaca.data.requests import (
     MostActivesRequest,
+    NewsRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
     StockLatestTradeRequest,
     StockSnapshotRequest,
     StockTradesRequest,
 )
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
@@ -74,6 +76,7 @@ from .runtime_diagnostics import (
 )
 from .storage import write_private_json
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
+from . import market_overview
 from . import universe as rvol_universe
 
 
@@ -134,6 +137,7 @@ NON_FRACTIONABLE_HOLD_SECONDS = 6 * 60 * 60
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "AlpacaPaperTrader"
 DAILY_UNIVERSE_PATH = APP_DATA_DIR / "daily-universe.json"
 DAILY_UNIVERSE_RETRY_SECONDS = 60
+MARKET_OVERVIEW_CACHE_SECONDS = 60
 REPLAY_DIR = APP_DATA_DIR / "replay"
 REPLAY_LOCK = threading.RLock()
 DASHBOARD_CACHE_PATH = APP_DATA_DIR / "dashboard-cache.json"
@@ -1750,8 +1754,11 @@ class TraderEngine:
         self.trading_client: TradingClient | None = None
         self.data_client: StockHistoricalDataClient | None = None
         self.screener_client: ScreenerClient | None = None
+        self.news_client: NewsClient | None = None
         self.trade_stream: Any | None = None
         self.top_volume_rows: list[dict[str, Any]] = []
+        # (symbol, session date) -> split-adjusted previous close, or None when there is no earlier bar
+        self.previous_close_cache: dict[tuple[str, str], float | None] = {}
         self.top_volume_symbols: list[str] = []
         self.top_volume_last_fetch_at = 0.0
         self.top_volume_updated = ""
@@ -2009,6 +2016,7 @@ class TraderEngine:
             self.trading_client = TradingClient(self.api_key, self.secret_key, paper=True)
             self.data_client = StockHistoricalDataClient(self.api_key, self.secret_key)
             self.screener_client = ScreenerClient(self.api_key, self.secret_key)
+            self.news_client = NewsClient(self.api_key, self.secret_key)
             self.top_volume_rows = []
             self.top_volume_symbols = []
             self.top_volume_last_fetch_at = 0.0
@@ -2045,7 +2053,7 @@ class TraderEngine:
         self.trade_stream = None
 
     def close_api_clients_locked(self) -> None:
-        for client in (self.trading_client, self.data_client, self.screener_client):
+        for client in (self.trading_client, self.data_client, self.screener_client, self.news_client):
             session = getattr(client, "_session", None)
             if session is not None:
                 try:
@@ -2060,6 +2068,7 @@ class TraderEngine:
         self.trading_client = None
         self.data_client = None
         self.screener_client = None
+        self.news_client = None
 
     def disconnect(self) -> None:
         with self.lock:
@@ -2593,6 +2602,54 @@ class TraderEngine:
         finally:
             self.refresh_lock.release()
 
+    def split_adjusted_previous_closes(self, data_client: Any, snapshots: dict[str, Any], feed: str) -> dict[str, float]:
+        """Previous-session closes on the same split basis as today's price, fetched once per symbol per session.
+
+        A snapshot's previous_daily_bar is raw, so a split reads as a huge move (SOXX's 3:1 split
+        on 2026-11-05 showed as -70.7%). Split-adjusted bars can also apply a split before it shows
+        in trading (CDT's 1:20 reverse split read as -95.7% while it still traded near $0.04). So
+        the raw and adjusted closes are both candidates, and the one nearer today's open wins: a
+        real split leaves a 2x-or-more gap at the open, an ordinary overnight gap does not.
+        """
+        session_bars = {
+            str(symbol).upper(): model_dict(getattr(snapshot, "daily_bar", None)) for symbol, snapshot in snapshots.items()
+        }
+        sessions = {symbol: daily_bar_session_date(bar.get("timestamp")) for symbol, bar in session_bars.items()}
+        sessions = {symbol: session for symbol, session in sessions.items() if session}
+        with self.lock:
+            cache = dict(self.previous_close_cache)
+        missing = [symbol for symbol, session in sessions.items() if (symbol, session) not in cache]
+        if missing:
+            try:
+                bars = fetch_daily_bars_chunked(data_client, missing, feed)
+            except Exception as exc:
+                record_runtime_diagnostic(
+                    "market_data",
+                    "Split-adjusted daily bars failed; movers use raw previous closes",
+                    MarketDataError(str(exc) or exc.__class__.__name__),
+                    source="engine",
+                )
+                bars = None
+            if bars is not None:
+                for symbol in missing:
+                    session = sessions[symbol]
+                    earlier = [
+                        bar for bar in bars.get(symbol, []) if daily_bar_session_date(getattr(bar, "timestamp", None)) < session
+                    ]
+                    adjusted = market_overview.number(getattr(earlier[-1], "close", None)) if earlier else None
+                    raw = market_overview.number(model_dict(getattr(snapshots.get(symbol), "previous_daily_bar", None)).get("close"))
+                    cache[(symbol, session)] = market_overview.nearer_previous_close(
+                        market_overview.number(session_bars[symbol].get("open")), raw, adjusted
+                    )
+                oldest = min(sessions.values())
+                with self.lock:
+                    self.previous_close_cache = {key: value for key, value in cache.items() if key[1] >= oldest}
+        return {
+            symbol: close
+            for symbol, session in sessions.items()
+            if (close := cache.get((symbol, session))) is not None
+        }
+
     def refresh_top_volume(self, force: bool = False, restart_stream: bool = True) -> None:
         with self.lock:
             if not self.connected:
@@ -2619,6 +2676,7 @@ class TraderEngine:
             ranked = fetch_most_active_symbols(screener_client, DASHBOARD_TOP_LIMIT)
             snapshot_symbols = [str(item.get("symbol") or "").strip().upper() for item in ranked]
             snapshots = fetch_stock_snapshots_chunked(data_client, snapshot_symbols, feed)
+            previous_closes = self.split_adjusted_previous_closes(data_client, snapshots, feed)
             updated_at = datetime.now().strftime("%b %d, %I:%M:%S %p")
 
             rows: list[dict[str, Any]] = []
@@ -2637,6 +2695,12 @@ class TraderEngine:
                 daily_bar = model_dict(getattr(snapshot, "daily_bar", None))
                 latest_trade = model_dict(getattr(snapshot, "latest_trade", None))
                 last_price_raw = latest_trade.get("price") or daily_bar.get("close") or previous.get("last_price_raw", 0)
+                previous_close_raw = previous_closes.get(symbol)
+                if previous_close_raw is None:
+                    previous_close_raw = model_dict(getattr(snapshot, "previous_daily_bar", None)).get("close")
+                change_pct_raw = market_overview.percent_change(
+                    market_overview.number(last_price_raw), market_overview.number(previous_close_raw)
+                )
                 rows.append(
                     {
                         "rank": index,
@@ -2661,6 +2725,8 @@ class TraderEngine:
                         "last_trade_side": previous.get("last_trade_side", "-"),
                         "last_price": money_or_dash(last_price_raw),
                         "last_price_raw": last_price_raw,
+                        "previous_close_raw": previous_close_raw,
+                        "change_pct_raw": change_pct_raw,
                         "minute_volume": previous.get("minute_volume", "-"),
                         "minute_volume_raw": previous.get("minute_volume_raw", 0),
                         "last_update": previous.get("last_update", "-"),
@@ -5601,6 +5667,8 @@ class TraderManager:
         self.daily_universe_streamed = False  # the running stream was built around the daily list
         # (session date, feed) -> symbol -> (average daily volume, sessions) or None (too little history)
         self.daily_volume_averages: dict[tuple[str, str], dict[str, tuple[float, int] | None]] = {}
+        self.market_overview_lock = threading.Lock()
+        self.market_overview_cache: tuple[float, dict[str, Any]] | None = None
         self.create_account("Account 1", AppConfig())
 
     def reset_settings_load_errors(self) -> None:
@@ -6150,6 +6218,82 @@ class TraderManager:
                 "settings_diagnostics": self.settings_diagnostics(),
                 "runtime_diagnostics": runtime_diagnostics_snapshot(),
             }
+
+    def market_overview(self) -> dict[str, Any]:
+        """Index ETF charts, top movers and headlines for the dashboard header, cached for a minute.
+
+        Costs three market-data calls a minute at most (index snapshots, index bars, news); the
+        movers reuse the most-active rows the dashboard refresh already loaded.
+        """
+        with self.market_overview_lock:
+            cached = self.market_overview_cache
+            if cached and time.monotonic() - cached[0] < MARKET_OVERVIEW_CACHE_SECONDS:
+                return cached[1]
+            payload = self.fetch_market_overview()
+            movers = payload.get("movers") or {}
+            # Right after a restart the most-active list may not be loaded yet; don't hold empty movers for a minute.
+            if payload.get("connected") and (movers.get("gainers") or movers.get("losers")):
+                self.market_overview_cache = (time.monotonic(), payload)
+            return payload
+
+    def fetch_market_overview(self) -> dict[str, Any]:
+        source = self.shared_market_source()
+        if source is None or not source.connected:
+            return {"connected": False, "indexes": [], "movers": {"gainers": [], "losers": []}, "news": [], "errors": []}
+        with source.lock:
+            data_client = source.data_client
+            news_client = source.news_client
+            feed = source.config.feed
+            rows = [dict(row) for row in source.top_volume_rows]
+        held = [str(position.get("symbol") or "") for engine in self.list_engines() for position in list(engine.positions)]
+        with self.lock:
+            watched = list(self.daily_universe.symbols) if self.daily_universe else []
+
+        errors: list[str] = []
+        symbols = [symbol for symbol, _ in market_overview.INDEX_SYMBOLS]
+        snapshots: dict[str, Any] = {}
+        bars: dict[str, list[Any]] = {}
+        session = None
+        try:
+            snapshots = fetch_stock_snapshots_chunked(data_client, symbols, feed)
+            session = market_overview.snapshot_session_date(snapshots.get("SPY"), MARKET_TIMEZONE)
+            if session:
+                start, end = market_overview.session_window(session, MARKET_TIMEZONE)
+                response = data_client.get_stock_bars(
+                    StockBarsRequest(
+                        symbol_or_symbols=symbols,
+                        timeframe=TimeFrame(market_overview.CHART_BAR_MINUTES, TimeFrameUnit.Minute),
+                        start=start,
+                        end=min(end, datetime.now(timezone.utc)),
+                        feed=DataFeed(feed),
+                        adjustment=Adjustment.RAW,
+                    )
+                )
+                bars = {str(key).upper(): list(value) for key, value in (getattr(response, "data", None) or {}).items()}
+        except Exception as exc:
+            errors.append(f"Index data unavailable: {exc}")
+
+        news: list[dict[str, Any]] = []
+        if news_client is not None:
+            try:
+                request = NewsRequest(
+                    symbols=",".join(market_overview.news_symbols(held, watched)),
+                    limit=market_overview.NEWS_LIMIT,
+                    exclude_contentless=False,
+                )
+                news = market_overview.news_items(news_client.get_news(request))
+            except Exception as exc:
+                errors.append(f"News unavailable: {exc}")
+
+        return {
+            "connected": True,
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "feed": feed,
+            "indexes": market_overview.index_cards(snapshots, bars, session, MARKET_TIMEZONE),
+            "movers": market_overview.top_movers(rows),
+            "news": news,
+            "errors": errors,
+        }
 
     def dashboard_state(self, account_id: str | None = None) -> dict[str, Any]:
         state = self.dashboard_engine(account_id).dashboard_state()

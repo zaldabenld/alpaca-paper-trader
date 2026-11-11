@@ -106,6 +106,14 @@ const els = {
   dashboardTraderStatusDetail: document.querySelector("#dashboardTraderStatusDetail"),
   reconnectStreamButton: document.querySelector("#reconnectStreamButton"),
   lookupButton: document.querySelector("#lookupButton"),
+  marketOverviewToggle: document.querySelector("#marketOverviewToggle"),
+  tickerTrack: document.querySelector("#tickerTrack"),
+  indexCharts: document.querySelector("#indexCharts"),
+  indexBoxUpdated: document.querySelector("#indexBoxUpdated"),
+  newsUpdated: document.querySelector("#newsUpdated"),
+  newsFlash: document.querySelector("#newsFlash"),
+  newsFlashText: document.querySelector("#newsFlashText"),
+  newsList: document.querySelector("#newsList"),
   lookupResult: document.querySelector("#lookupResult"),
   refreshTopVolumeButton: document.querySelector("#refreshTopVolumeButton"),
   topVolumeUpdated: document.querySelector("#topVolumeUpdated"),
@@ -2573,10 +2581,351 @@ window.addEventListener("unhandledrejection", (event) => {
   els.statusText.textContent = event.reason?.message || String(event.reason);
 });
 
+// Market overview: index ETF charts, a top-movers ticker tape, and headlines. The server caches
+// it for a minute (about three market-data calls a minute), so polling every 30s stays cheap.
+const MARKET_OVERVIEW_POLL_MS = 30000;
+const NEWS_FLASH_MS = 15000;
+const NEWS_FLASH_MAX_AGE_MS = 30 * 60 * 1000;
+const SVG_NS = "http://www.w3.org/2000/svg";
+const MARKET_TIME_ZONE = "America/New_York";
+let seenNewsIds = null;
+let newsFlashTimer = 0;
+let tickerSymbolsSignature = "";
+
+function makeEl(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function makeSvg(tag, attributes = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+  return node;
+}
+
+function formatQuotePrice(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  const digits = number < 1 ? 4 : 2;
+  return `$${number.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+}
+
+function formatSignedPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return `${number > 0 ? "+" : ""}${number.toFixed(2)}%`;
+}
+
+function formatSignedMoney(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  return `${number > 0 ? "+" : number < 0 ? "-" : ""}$${Math.abs(number).toFixed(2)}`;
+}
+
+function directionClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "flat";
+  return number > 0 ? "up" : "down";
+}
+
+function marketTime(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZone: MARKET_TIME_ZONE });
+}
+
+function sessionLabel(isoDate) {
+  if (!isoDate) return "";
+  const date = new Date(`${isoDate}T12:00:00Z`);
+  return date.toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function timeAgo(iso) {
+  const time = new Date(iso).getTime();
+  if (!Number.isFinite(time)) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - time) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function openSymbolLookup(symbol) {
+  showView("dashboardView");
+  fields.lookupSymbol.value = symbol;
+  lookupSymbol();
+  fields.lookupSymbol.closest(".lookup-card")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function loadMarketOverview() {
+  if (document.body.classList.contains("market-overview-hidden")) return;
+  try {
+    const response = await fetchWithRecovery("/api/market-overview", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.statusText);
+    renderMarketOverview(await response.json());
+  } catch (error) {
+    if (isAbortError(error)) return;
+    els.indexBoxUpdated.textContent = `Market overview unavailable: ${error.message}`;
+  }
+}
+
+function renderMarketOverview(payload = {}) {
+  if (!payload.connected) {
+    els.indexBoxUpdated.textContent = "Connect an account to load the index charts.";
+    els.newsUpdated.textContent = "Connect an account to load headlines.";
+    renderIndexCharts([]);
+    renderTickerTape({});
+    renderNews([]);
+    return;
+  }
+  const indexes = payload.indexes || [];
+  const session = sessionLabel(indexes.find((card) => card.session_date)?.session_date);
+  const updated = payload.updated_at ? marketTime(payload.updated_at) : "";
+  const errors = (payload.errors || []).join(" ");
+  els.indexBoxUpdated.textContent = [
+    session ? `${session} session` : "",
+    updated ? `updated ${updated} ET` : "",
+    errors,
+  ].filter(Boolean).join(" · ");
+  renderIndexCharts(indexes);
+  renderTickerTape(payload.movers || {});
+  renderNews(payload.news || []);
+}
+
+function renderIndexCharts(cards) {
+  els.indexCharts.replaceChildren();
+  if (!cards.length) {
+    els.indexCharts.appendChild(makeEl("p", "market-empty", "No index data yet."));
+    return;
+  }
+  cards.forEach((card) => els.indexCharts.appendChild(indexChartCard(card)));
+}
+
+function indexChartCard(card) {
+  const direction = directionClass(card.change);
+  const article = makeEl("article", `index-card ${direction}`);
+  const head = makeEl("header", "index-card-head");
+  const title = makeEl("div", "index-card-title");
+  title.append(makeEl("strong", "", card.name || card.symbol), makeEl("span", "", card.symbol));
+  const change = makeEl("span", `index-card-change ${direction}`, formatSignedPercent(card.change_pct));
+  head.append(title, change);
+  const quote = makeEl("div", "index-card-quote");
+  const price = makeEl("strong", "", formatQuotePrice(card.price));
+  const detail = makeEl("span", `index-card-detail ${direction}`, formatSignedMoney(card.change));
+  quote.append(price, detail);
+  const readout = makeEl("span", "index-card-readout");
+  readout.setAttribute("aria-live", "polite");
+  article.append(head, quote, indexChartSvg(card, readout, price, detail), readout);
+  return article;
+}
+
+function indexChartSvg(card, readout, priceEl, detailEl) {
+  const width = 240;
+  const height = 80;
+  const pad = 3;
+  const svg = makeSvg("svg", { viewBox: `0 0 ${width} ${height}`, class: "index-chart", role: "img" });
+  const points = (card.points || []).map((point) => ({ t: new Date(point.t).getTime(), c: Number(point.c) }))
+    .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.c));
+  const previous = Number(card.previous_close);
+  svg.setAttribute(
+    "aria-label",
+    `${card.name || card.symbol} today: ${formatQuotePrice(card.price)}, ${formatSignedPercent(card.change_pct)} from the previous close`
+  );
+  if (!points.length) {
+    const empty = makeSvg("text", { x: width / 2, y: height / 2, class: "index-chart-empty", "text-anchor": "middle" });
+    empty.textContent = "No bars yet";
+    svg.appendChild(empty);
+    return svg;
+  }
+  const start = new Date(card.session_start).getTime() || points[0].t;
+  const end = new Date(card.session_end).getTime() || points[points.length - 1].t;
+  const values = points.map((point) => point.c).concat(Number.isFinite(previous) && previous > 0 ? [previous] : []);
+  let low = Math.min(...values);
+  let high = Math.max(...values);
+  const span = high - low || high * 0.001 || 1;
+  low -= span * 0.08;
+  high += span * 0.08;
+  const x = (time) => pad + ((time - start) / Math.max(1, end - start)) * (width - pad * 2);
+  const y = (value) => pad + (1 - (value - low) / (high - low)) * (height - pad * 2);
+  const line = points.map((point, index) => `${index ? "L" : "M"}${x(point.t).toFixed(1)},${y(point.c).toFixed(1)}`).join(" ");
+  const lastX = x(points[points.length - 1].t).toFixed(1);
+  const firstX = x(points[0].t).toFixed(1);
+  svg.appendChild(makeSvg("path", { d: `${line} L${lastX},${height} L${firstX},${height} Z`, class: "index-chart-area" }));
+  if (Number.isFinite(previous) && previous > 0) {
+    const baseline = y(previous).toFixed(1);
+    svg.appendChild(makeSvg("line", { x1: pad, x2: width - pad, y1: baseline, y2: baseline, class: "index-chart-baseline" }));
+  }
+  svg.appendChild(makeSvg("path", { d: line, class: "index-chart-line" }));
+  const marker = makeSvg("circle", { r: 3, class: "index-chart-marker", visibility: "hidden" });
+  svg.appendChild(marker);
+
+  const resetReadout = () => {
+    marker.setAttribute("visibility", "hidden");
+    readout.textContent = `Prev close ${formatQuotePrice(previous)}`;
+  };
+  const showPoint = (clientX) => {
+    const box = svg.getBoundingClientRect();
+    const time = start + ((clientX - box.left) / Math.max(1, box.width)) * (end - start);
+    let nearest = points[0];
+    points.forEach((point) => {
+      if (Math.abs(point.t - time) < Math.abs(nearest.t - time)) nearest = point;
+    });
+    marker.setAttribute("cx", x(nearest.t).toFixed(1));
+    marker.setAttribute("cy", y(nearest.c).toFixed(1));
+    marker.setAttribute("visibility", "visible");
+    const pct = Number.isFinite(previous) && previous > 0 ? (nearest.c / previous - 1) * 100 : NaN;
+    readout.textContent = `${marketTime(new Date(nearest.t).toISOString())} ET · ${formatQuotePrice(nearest.c)} · ${formatSignedPercent(pct)}`;
+  };
+  svg.addEventListener("pointermove", (event) => showPoint(event.clientX));
+  svg.addEventListener("pointerleave", resetReadout);
+  resetReadout();
+  return svg;
+}
+
+function tickerItem(item) {
+  const direction = directionClass(item.change_pct);
+  const button = makeEl("button", `ticker-item ${direction}`);
+  button.type = "button";
+  button.dataset.symbol = item.symbol;
+  button.title = `Look up ${item.symbol}`;
+  button.append(
+    makeEl("strong", "", item.symbol),
+    makeEl("span", "ticker-price", formatQuotePrice(item.price)),
+    makeEl("span", "ticker-change", `${direction === "up" ? "▲" : direction === "down" ? "▼" : ""} ${formatSignedPercent(item.change_pct)}`)
+  );
+  button.addEventListener("click", () => openSymbolLookup(item.symbol));
+  return button;
+}
+
+function tickerGroup(gainers, losers, duplicate) {
+  const group = makeEl("div", "ticker-group");
+  if (duplicate) {
+    group.setAttribute("aria-hidden", "true");
+    group.inert = true;
+  }
+  if (gainers.length) {
+    group.appendChild(makeEl("span", "ticker-label up", "Top gainers"));
+    gainers.forEach((item) => group.appendChild(tickerItem(item)));
+  }
+  if (losers.length) {
+    group.appendChild(makeEl("span", "ticker-label down", "Top losers"));
+    losers.forEach((item) => group.appendChild(tickerItem(item)));
+  }
+  return group;
+}
+
+function renderTickerTape(movers) {
+  const gainers = movers.gainers || [];
+  const losers = movers.losers || [];
+  const signature = gainers.concat(losers).map((item) => item.symbol).join(",");
+  if (signature && signature === tickerSymbolsSignature) {
+    // Same symbols: update the numbers in place so the scroll doesn't restart.
+    gainers.concat(losers).forEach((item) => {
+      els.tickerTrack.querySelectorAll(`[data-symbol="${CSS.escape(item.symbol)}"]`).forEach((button) => {
+        const direction = directionClass(item.change_pct);
+        button.className = `ticker-item ${direction}`;
+        button.querySelector(".ticker-price").textContent = formatQuotePrice(item.price);
+        button.querySelector(".ticker-change").textContent =
+          `${direction === "up" ? "▲" : direction === "down" ? "▼" : ""} ${formatSignedPercent(item.change_pct)}`;
+      });
+    });
+    return;
+  }
+  tickerSymbolsSignature = signature;
+  els.tickerTrack.replaceChildren();
+  if (!signature) {
+    els.tickerTrack.classList.remove("scrolling");
+    els.tickerTrack.appendChild(makeEl("span", "ticker-empty", "Top movers load once an account is connected."));
+    return;
+  }
+  const first = tickerGroup(gainers, losers, false);
+  els.tickerTrack.append(first, tickerGroup(gainers, losers, true));
+  // About 50px a second whatever the content width.
+  els.tickerTrack.style.setProperty("--ticker-duration", `${Math.max(30, Math.round(first.scrollWidth / 50))}s`);
+  els.tickerTrack.classList.add("scrolling");
+}
+
+function renderNews(items) {
+  els.newsList.replaceChildren();
+  if (!items.length) {
+    els.newsList.appendChild(makeEl("li", "market-empty", "No headlines yet."));
+  }
+  const fresh = [];
+  items.forEach((item) => {
+    const isNew = seenNewsIds !== null && !seenNewsIds.has(item.id);
+    if (isNew && Date.now() - new Date(item.created_at).getTime() < NEWS_FLASH_MAX_AGE_MS) fresh.push(item);
+    const li = makeEl("li", isNew ? "news-item is-new" : "news-item");
+    const link = makeEl("a", "news-headline", item.headline);
+    if (item.url) {
+      link.href = item.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    }
+    const meta = makeEl("div", "news-meta");
+    meta.appendChild(makeEl("span", "", [timeAgo(item.created_at), item.source].filter(Boolean).join(" · ")));
+    (item.symbols || []).forEach((symbol) => {
+      const chip = makeEl("button", "news-symbol", symbol);
+      chip.type = "button";
+      chip.title = `Look up ${symbol}`;
+      chip.addEventListener("click", () => openSymbolLookup(symbol));
+      meta.appendChild(chip);
+    });
+    li.append(link, meta);
+    els.newsList.appendChild(li);
+  });
+  seenNewsIds = new Set([...(seenNewsIds || []), ...items.map((item) => item.id)]);
+  els.newsUpdated.textContent = items.length
+    ? `Latest ${items.length} headlines for the indexes and the stocks you hold or watch.`
+    : "Headlines for the indexes and the stocks you hold or watch.";
+  if (fresh.length) flashNews(fresh[0]);
+}
+
+function flashNews(item) {
+  els.newsFlashText.textContent = item.headline;
+  if (item.url) els.newsFlash.href = item.url;
+  else els.newsFlash.removeAttribute("href");
+  els.newsFlash.hidden = false;
+  els.newsFlash.classList.remove("flashing");
+  void els.newsFlash.offsetWidth; // restart the highlight animation
+  els.newsFlash.classList.add("flashing");
+  clearTimeout(newsFlashTimer);
+  newsFlashTimer = setTimeout(() => {
+    els.newsFlash.hidden = true;
+  }, NEWS_FLASH_MS);
+}
+
+function setMarketOverviewHidden(hidden) {
+  document.body.classList.toggle("market-overview-hidden", hidden);
+  els.marketOverviewToggle.setAttribute("aria-pressed", String(!hidden));
+  try {
+    if (hidden) localStorage.setItem("apt-market-overview", "hidden");
+    else localStorage.removeItem("apt-market-overview");
+  } catch {
+    // storage unavailable: the choice still applies for this session
+  }
+  if (!hidden) loadMarketOverview();
+}
+
+let marketOverviewHidden = false;
+try {
+  marketOverviewHidden = localStorage.getItem("apt-market-overview") === "hidden";
+} catch {
+  marketOverviewHidden = false;
+}
+document.body.classList.toggle("market-overview-hidden", marketOverviewHidden);
+els.marketOverviewToggle.setAttribute("aria-pressed", String(!marketOverviewHidden));
+els.marketOverviewToggle.addEventListener("click", () =>
+  setMarketOverviewHidden(!document.body.classList.contains("market-overview-hidden"))
+);
+
 checkRuntimeHealth().then(() => loadSettings()).then(async () => {
   updateAllTableSortButtons();
   await loadState({ accountId: selectedAccountId, source: "startup" });
   await loadDashboard({ accountId: selectedAccountId, source: "startup" });
+  loadMarketOverview();
 }).catch(async (error) => {
   if (await recoverStaleInstance(error)) return;
   els.statusText.textContent = error.message;
@@ -2584,3 +2933,4 @@ checkRuntimeHealth().then(() => loadSettings()).then(async () => {
 });
 setInterval(() => loadState({ source: "poll" }), 2000);
 setInterval(() => loadDashboard({ source: "poll" }), 5000);
+setInterval(loadMarketOverview, MARKET_OVERVIEW_POLL_MS);
