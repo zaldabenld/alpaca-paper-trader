@@ -314,6 +314,9 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "universe_mode": "most_active",
+        "entry_mode": "momentum",
+        "orb_minutes": 15,
+        "orb_max_breakout_percent": "1.0",
         "volume_period": 20,
         "volume_multiplier": "1.0",
         "min_avg_volume": "0",
@@ -374,6 +377,9 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "universe_mode": "most_active",
+        "entry_mode": "momentum",
+        "orb_minutes": 15,
+        "orb_max_breakout_percent": "1.0",
         "volume_period": 20,
         "volume_multiplier": "1.0",
         "min_avg_volume": "0",
@@ -434,6 +440,9 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "universe_mode": "most_active",
+        "entry_mode": "momentum",
+        "orb_minutes": 15,
+        "orb_max_breakout_percent": "1.0",
         "volume_period": 20,
         "volume_multiplier": "1.0",
         "min_avg_volume": "0",
@@ -478,6 +487,9 @@ PROFILE_STRATEGY_KEYS = {
     "reentry_score_boost",
     "inverse_etf_mode",
     "universe_mode",
+    "entry_mode",
+    "orb_minutes",
+    "orb_max_breakout_percent",
     "volume_period",
     "volume_multiplier",
     "min_avg_volume",
@@ -552,6 +564,15 @@ class AppConfig(BaseModel):
     # Optional entry gates for strategy experiments; 0 leaves each one off.
     min_session_pullback_percent: Decimal = Decimal("0")
     max_entry_rsi: Decimal = Decimal("0")
+    # Scale the VWAP and session extension caps by each symbol's own 1-min ATR%: a stock at this ATR%
+    # gets the flat caps, one twice as volatile gets twice the room. 0 keeps the flat percent caps.
+    extension_atr_reference_percent: Decimal = Decimal("0")
+    # Entry style. "momentum": the trend/RSI/VWAP/score checks above. "orb": opening-range breakout,
+    # buy once per symbol per day when price clears the first orb_minutes' high while above VWAP,
+    # at most orb_max_breakout_percent past it (0 = no cap). Exits stay the take-profit/stop settings.
+    entry_mode: str = "momentum"
+    orb_minutes: int = 15
+    orb_max_breakout_percent: Decimal = Decimal("1.0")
     max_entries_per_symbol_per_day: int = 0
     flatten_on_daily_loss: bool = False
     # Sell every position this many minutes before the close (0 = off; for pure day trading).
@@ -721,6 +742,14 @@ class AppConfig(BaseModel):
             raise ValueError("Stock list must be most_active or daily_rvol.")
         return mode
 
+    @field_validator("entry_mode", mode="before")
+    @classmethod
+    def validate_entry_mode(cls, value: str) -> str:
+        mode = str(value or "momentum").strip().lower()
+        if mode not in {"momentum", "orb"}:
+            raise ValueError("Entry mode must be momentum or orb.")
+        return mode
+
     @field_validator("trade_size_mode", mode="before")
     @classmethod
     def validate_trade_size_mode(cls, value: str) -> str:
@@ -775,6 +804,9 @@ class AppConfig(BaseModel):
             raise ValueError("Buy RSI min must be below buy RSI max.")
         self.min_entry_score = min(self.min_entry_score, Decimal("100"))
         self.max_entry_rsi = min(self.max_entry_rsi, Decimal("100"))
+        self.extension_atr_reference_percent = min(max(self.extension_atr_reference_percent, Decimal("0")), Decimal("5"))
+        self.orb_minutes = min(max(int(self.orb_minutes), 5), 60)
+        self.orb_max_breakout_percent = min(max(self.orb_max_breakout_percent, Decimal("0")), Decimal("10"))
         self.min_buy_volume_ratio = min(self.min_buy_volume_ratio, Decimal("1"))
         if self.volume_multiplier < 0:
             raise ValueError("Volume multiplier cannot be negative.")
@@ -1665,6 +1697,14 @@ def entry_profile_limits(config: AppConfig) -> dict[str, Decimal]:
         limits["max_recent_pullback"] = config.max_recent_pullback_percent
     limits["late_momentum_floor"] = config.late_momentum_floor_percent
     return limits
+
+
+def atr_scaled_cap(cap: Decimal, snapshot: Any, config: AppConfig) -> Decimal:
+    reference = config.extension_atr_reference_percent
+    atr = getattr(snapshot, "atr_percent", None)
+    if reference <= 0 or atr is None or atr <= 0:
+        return cap
+    return cap * atr / reference
 
 
 def below_entry_floor(value: Decimal | None, floor: Decimal) -> bool:
@@ -3195,13 +3235,13 @@ class TraderEngine:
             return "Hold (session trend warming)"
         if below_entry_floor(snapshot.session_change_percent, limits["min_session_change"]):
             return f"Hold (session trend {snapshot.session_change_percent:+.2f}%)"
-        if snapshot.session_change_percent > limits["max_session_extension"]:
+        if snapshot.session_change_percent > atr_scaled_cap(limits["max_session_extension"], snapshot, config):
             return f"Hold (session extended {snapshot.session_change_percent:+.2f}%)"
         if getattr(snapshot, "vwap_distance_percent", None) is None:
             return "Hold (VWAP warming)"
         if below_entry_floor(snapshot.vwap_distance_percent, limits["min_vwap_distance"]):
             return f"Hold (below VWAP {snapshot.vwap_distance_percent:+.2f}%)"
-        if snapshot.vwap_distance_percent > limits["max_vwap_extension"]:
+        if snapshot.vwap_distance_percent > atr_scaled_cap(limits["max_vwap_extension"], snapshot, config):
             return f"Hold (extended above VWAP {snapshot.vwap_distance_percent:+.2f}%)"
         if config.min_session_pullback_percent > 0:
             pullback = getattr(snapshot, "session_pullback_percent", None)
@@ -3340,6 +3380,8 @@ class TraderEngine:
             if entries_today >= config.max_entries_per_symbol_per_day:
                 self.strategy_state.last_action[symbol] = f"Hold (bought {entries_today}x today)"
                 return None
+        if config.entry_mode == "orb":
+            return self.orb_entry_candidate(symbol, rank, snapshot, config)
         quality_hold = self.entry_quality_hold_reason(symbol, snapshot, config)
         if quality_hold:
             self.strategy_state.last_action[symbol] = quality_hold
@@ -3356,6 +3398,39 @@ class TraderEngine:
             return None
         self.strategy_state.last_action[symbol] = f"Candidate score {score:.1f}"
         return {"symbol": symbol, "rank": rank, "score": score}
+
+    def orb_entry_candidate(self, symbol: str, rank: int, snapshot: Any, config: AppConfig) -> dict[str, Any] | None:
+        hold = self.orb_entry_hold_reason(symbol, snapshot, config)
+        if hold:
+            self.strategy_state.last_action[symbol] = hold
+            return None
+        # The scan list is already in priority order (relative-volume rank for the daily list).
+        score = Decimal("100") - Decimal(rank)
+        self.set_entry_score(symbol, score)
+        self.strategy_state.last_action[symbol] = "Candidate ORB breakout"
+        return {"symbol": symbol, "rank": rank, "score": score}
+
+    def orb_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
+        for reason in (self.inverse_etf_hold_reason(symbol, config), self.halt_hold_reason(symbol)):
+            if reason:
+                return reason
+        with self.lock:
+            entries_today = self.entries_today_by_symbol.get(symbol.strip().upper(), 0)
+        if entries_today:
+            return "Hold (ORB: one entry per day)"
+        opening = self.strategy_state.opening_range(symbol, config.orb_minutes)
+        if opening is None or not opening.complete:
+            return "Hold (opening range forming)"
+        price = snapshot.price
+        if price <= opening.high:
+            return f"Hold (inside opening range; high {opening.high})"
+        breakout = (price / opening.high - Decimal("1")) * Decimal("100")
+        if config.orb_max_breakout_percent > 0 and breakout > config.orb_max_breakout_percent:
+            return f"Hold (breakout extended +{breakout:.2f}% past range)"
+        vwap_distance = getattr(snapshot, "vwap_distance_percent", None)
+        if vwap_distance is None or vwap_distance <= 0:
+            return "Hold (below VWAP)"
+        return self.order_flow_hold_reason(symbol, config) or self.asset_tradeability_hold_reason(symbol)
 
     def entry_score(self, snapshot: Any, config: AppConfig, flow_ratio: Decimal | None = None) -> Decimal:
         limits = entry_profile_limits(config)
