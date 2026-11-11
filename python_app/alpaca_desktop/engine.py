@@ -31,6 +31,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
+    GetCalendarRequest,
     GetPortfolioHistoryRequest,
     GetOrdersRequest,
     LimitOrderRequest,
@@ -49,6 +50,7 @@ from .backtester import (
     LiveStrategyBoundary,
 )
 from .day_tape import (
+    DAY_TAPE_DIR,
     append_day_tape_event,
     append_market_bar_once,
     append_market_quote,
@@ -74,8 +76,10 @@ from .runtime_diagnostics import (
     record_runtime_diagnostic,
     runtime_diagnostics_snapshot,
 )
-from .storage import write_private_json
+from .storage import APP_DIR, write_private_json
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
+from . import allocation as allocation_logic
+from . import inplay as inplay_logic
 from . import app_settings
 from . import market_overview
 from . import symbol_info as symbol_info_logic
@@ -488,6 +492,25 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
+ENTRY_MODES = {"momentum", "orb", "allocation", "inplay"}
+
+
+def clean_symbol_list(value: Any) -> list[str]:
+    """Upper-case, de-duplicated symbols from a list or a comma/space separated string."""
+    if isinstance(value, str):
+        items = re.sub(r"\s+", ",", value).split(",")
+    elif value is None:
+        items = []
+    else:
+        items = list(value)
+    result: list[str] = []
+    for item in items:
+        symbol = str(item).strip().upper()
+        if symbol and symbol not in result:
+            result.append(symbol)
+    return result
+
+
 PROFILE_STRATEGY_KEYS = {
     "short_period",
     "long_period",
@@ -526,6 +549,21 @@ PROFILE_STRATEGY_KEYS = {
     "entry_mode",
     "orb_minutes",
     "orb_max_breakout_percent",
+    "allocation_risk_on_symbols",
+    "allocation_risk_off_symbols",
+    "allocation_signal_symbol",
+    "allocation_sma_days",
+    "allocation_check",
+    "allocation_trade_minutes_before_close",
+    "allocation_invest_percent",
+    "allocation_rebalance_drift_percent",
+    "inplay_range_minutes",
+    "inplay_min_relative_volume",
+    "inplay_min_atr_percent",
+    "inplay_min_dollar_volume_millions",
+    "inplay_max_picks",
+    "inplay_max_chase_percent",
+    "inplay_stop",
     "volume_period",
     "volume_multiplier",
     "min_avg_volume",
@@ -615,6 +653,37 @@ class AppConfig(BaseModel):
     entry_mode: str = "momentum"
     orb_minutes: int = 15
     orb_max_breakout_percent: Decimal = Decimal("1.0")
+    # entry_mode "allocation": buy and hold with a trend switch. Hold the risk-on set in equal
+    # weights while the signal symbol is above its allocation_sma_days simple moving average, else
+    # the risk-off set. The regime is re-decided once a week ("weekly": the last session of the
+    # week) or every session ("daily"), in the last allocation_trade_minutes_before_close minutes
+    # before the close. A holding is only rebalanced on a switch or once its weight is off target by
+    # more than allocation_rebalance_drift_percent points. No stops, take-profit or flatten apply;
+    # the switch is the exit. The momentum and ORB entry checks do not run for this mode.
+    allocation_risk_on_symbols: list[str] = Field(default_factory=lambda: ["QQQ", "SPY"])
+    allocation_risk_off_symbols: list[str] = Field(default_factory=lambda: ["IEF", "GLD"])
+    allocation_signal_symbol: str = "QQQ"
+    allocation_sma_days: int = 200
+    allocation_check: str = "weekly"
+    allocation_trade_minutes_before_close: int = 20
+    allocation_invest_percent: Decimal = Decimal("98")
+    allocation_rebalance_drift_percent: Decimal = Decimal("10")
+    # entry_mode "inplay": day trade the stocks in play. inplay_range_minutes after the open, once
+    # consolidated data for the range is available (it is 15 minutes delayed on the free plan), the
+    # liquid symbols are ranked by how much more volume traded in their opening range than in the
+    # same minutes on recent days. The top inplay_max_picks with a green range, at least
+    # inplay_min_relative_volume times their usual range volume, a 14-day daily range of at least
+    # inplay_min_atr_percent and a 20-day average of inplay_min_dollar_volume_millions traded a day
+    # are watched. Each is bought once when it trades above its range high, no more than
+    # inplay_max_chase_percent past it, with a stop at the range middle ("range_mid") or low
+    # ("range_low"). The close guard ends new buys and flatten_before_close sells the rest.
+    inplay_range_minutes: int = 15
+    inplay_min_relative_volume: Decimal = Decimal("2.5")
+    inplay_min_atr_percent: Decimal = Decimal("3")
+    inplay_min_dollar_volume_millions: Decimal = Decimal("20")
+    inplay_max_picks: int = 10
+    inplay_max_chase_percent: Decimal = Decimal("1")
+    inplay_stop: str = "range_mid"
     max_entries_per_symbol_per_day: int = 0
     # Buy only while the price is still rising: the last completed 1-min bar closed at or above the
     # bar before it, and the latest streamed trade (when fresh) is not below that earlier close.
@@ -845,9 +914,43 @@ class AppConfig(BaseModel):
     @classmethod
     def validate_entry_mode(cls, value: str) -> str:
         mode = str(value or "momentum").strip().lower()
-        if mode not in {"momentum", "orb"}:
-            raise ValueError("Entry mode must be momentum or orb.")
+        if mode not in ENTRY_MODES:
+            raise ValueError("Entry mode must be one of: " + ", ".join(sorted(ENTRY_MODES)) + ".")
         return mode
+
+    @field_validator("allocation_risk_on_symbols", "allocation_risk_off_symbols", mode="before")
+    @classmethod
+    def validate_allocation_symbols(cls, value):
+        result = clean_symbol_list(value)
+        if not result:
+            raise ValueError("Each allocation set needs at least one symbol.")
+        if len(result) > 10:
+            raise ValueError("An allocation set takes at most 10 symbols.")
+        return result
+
+    @field_validator("allocation_signal_symbol", mode="before")
+    @classmethod
+    def validate_allocation_signal_symbol(cls, value: str) -> str:
+        symbols = clean_symbol_list(value)
+        if len(symbols) != 1:
+            raise ValueError("The allocation signal is one symbol.")
+        return symbols[0]
+
+    @field_validator("inplay_stop", mode="before")
+    @classmethod
+    def validate_inplay_stop(cls, value: str) -> str:
+        stop = str(value or "range_mid").strip().lower()
+        if stop not in {"range_mid", "range_low"}:
+            raise ValueError("In-play stop must be range_mid or range_low.")
+        return stop
+
+    @field_validator("allocation_check", mode="before")
+    @classmethod
+    def validate_allocation_check(cls, value: str) -> str:
+        check = str(value or "weekly").strip().lower()
+        if check not in {"weekly", "daily"}:
+            raise ValueError("Allocation check must be weekly or daily.")
+        return check
 
     @field_validator("trade_size_mode", mode="before")
     @classmethod
@@ -914,6 +1017,19 @@ class AppConfig(BaseModel):
             # A pullback floor above the cap would block every entry.
             self.min_session_pullback_percent = min(self.min_session_pullback_percent, self.max_session_pullback_percent)
         self.orb_max_breakout_percent = min(max(self.orb_max_breakout_percent, Decimal("0")), Decimal("10"))
+        self.allocation_sma_days = min(max(int(self.allocation_sma_days), 20), 400)
+        self.inplay_range_minutes = min(max(int(self.inplay_range_minutes) // 5 * 5, 5), 30)
+        self.inplay_min_relative_volume = min(max(self.inplay_min_relative_volume, Decimal("0")), Decimal("50"))
+        self.inplay_min_atr_percent = min(max(self.inplay_min_atr_percent, Decimal("0")), Decimal("50"))
+        self.inplay_min_dollar_volume_millions = min(max(self.inplay_min_dollar_volume_millions, Decimal("0")), Decimal("100000"))
+        self.inplay_max_picks = min(max(int(self.inplay_max_picks), 1), 50)
+        self.inplay_max_chase_percent = min(max(self.inplay_max_chase_percent, Decimal("0")), Decimal("10"))
+        self.allocation_trade_minutes_before_close = min(max(int(self.allocation_trade_minutes_before_close), 5), 60)
+        self.allocation_invest_percent = min(max(self.allocation_invest_percent, Decimal("50")), Decimal("100"))
+        self.allocation_rebalance_drift_percent = min(max(self.allocation_rebalance_drift_percent, Decimal("1")), Decimal("50"))
+        overlap = set(self.allocation_risk_on_symbols) & set(self.allocation_risk_off_symbols)
+        if overlap:
+            raise ValueError(f"A symbol cannot be in both allocation sets: {', '.join(sorted(overlap))}.")
         self.inverse_trend_exit_percent = min(self.inverse_trend_exit_percent, Decimal("5"))
         self.inverse_trend_stop_percent = min(max(self.inverse_trend_stop_percent, Decimal("0.5")), Decimal("20"))
         self.inverse_trend_lock_at_percent = min(self.inverse_trend_lock_at_percent, Decimal("50"))
@@ -1974,6 +2090,23 @@ class TraderEngine:
         self.last_refresh = ""
         self.last_error = ""
         self.settings_load_error = ""
+        # Hold mode (entry_mode "allocation"): cached inputs and today's decided regime.
+        self.allocation_closes_cache: dict[tuple[str, str, int], list[Decimal]] = {}
+        self.allocation_sessions_cache: tuple[str, list[date]] | None = None
+        self.allocation_retry_at = 0.0
+        self.allocation_latch: tuple[str, str] | None = None
+        self.allocation_view: dict[str, Any] = {}
+        self.allocation_dry_run_session = ""
+        # Day-trade mode (entry_mode "inplay"): today's picks and the data behind them. The data is
+        # fetched on a worker thread so a slow pull never holds up the shared refresh loop.
+        self.inplay_picks: dict[str, inplay_logic.Pick] = {}
+        self.inplay_picks_session = ""
+        self.inplay_history: tuple[str, dict[str, list[Decimal]], dict[str, inplay_logic.DailyStats]] | None = None
+        self.inplay_rejected: dict[str, int] = {}
+        self.inplay_checked = 0
+        self.inplay_worker: threading.Thread | None = None
+        self.inplay_retry_at = 0.0
+        self.inplay_view: dict[str, Any] = {}
         self.restore_trade_guards_from_replay()
 
     def configure_saved(self, settings: AccountSettings) -> None:
@@ -2092,7 +2225,32 @@ class TraderEngine:
                 if str(item.get("symbol") or "").strip() and decimal_value(item.get("qty_raw") or item.get("qty")) > 0
             ]
 
+    def mode_entry_symbols(self) -> list[str]:
+        """The symbols the entry loop considers: today's picks in day-trade mode, else the scan list."""
+        if self.config.entry_mode == "inplay":
+            with self.lock:
+                return [pick.symbol for pick in sorted(self.inplay_picks.values(), key=lambda pick: pick.rank)]
+        return self.trading_symbols()
+
     def scan_symbols(self, position_symbols: Any = None) -> list[str]:
+        config = self.config
+        if config.entry_mode == "inplay":
+            return without_invalid_market_data_symbols(
+                merged_symbols(
+                    self.mode_entry_symbols(),
+                    position_symbols or self.position_symbols_for_market_data(),
+                    self.market_proxy_analysis_symbols(),
+                )
+            )
+        if config.entry_mode == "allocation":
+            # Hold mode only needs its two sets, its signal and whatever is held.
+            return without_invalid_market_data_symbols(
+                merged_symbols(
+                    [config.allocation_signal_symbol],
+                    list(config.allocation_risk_on_symbols) + list(config.allocation_risk_off_symbols),
+                    position_symbols or self.position_symbols_for_market_data(),
+                )
+            )
         return without_invalid_market_data_symbols(
             merged_symbols(
                 self.trading_symbols(),
@@ -2511,7 +2669,7 @@ class TraderEngine:
                 if not self.connected:
                     return
                 config = self.config
-                entry_symbols = self.trading_symbols()
+                entry_symbols = self.mode_entry_symbols()
                 should_trade = self.trading_enabled if run_strategy is None else bool(run_strategy)
 
             client = self.require_trading_client()
@@ -2563,7 +2721,7 @@ class TraderEngine:
                         getattr(bar, "high", None),
                         getattr(bar, "low", None),
                     )
-            entry_symbols = self.trading_symbols()
+            entry_symbols = self.mode_entry_symbols()
 
             self.sync_loss_reentry_floors_from_closed_orders(closed_order_dicts)
             self.sync_entries_today_from_orders(closed_order_dicts + order_dicts)
@@ -2571,18 +2729,21 @@ class TraderEngine:
             market_clock = self.format_market_clock(clock)
             market_open = bool(market_clock["is_open"])
             session_date = str(market_clock.get("session_date") or datetime.now().astimezone().date().isoformat())
+            # Hold mode trades its own target portfolio: no stops, no flatten, no loss stop, and the
+            # momentum/ORB entry loop does not run (see run_allocation_pass).
+            allocation_mode = config.entry_mode == "allocation"
             # Stops and exits for real positions are managed whenever the account is connected,
             # not only while auto trading is on; Stop Trading only stops new entries.
-            manage_exits = bool(config.use_bracket_orders and not config.dry_run)
-            loss_breached = self.evaluate_daily_loss_limit(config, account_dict, session_date)
+            manage_exits = bool(config.use_bracket_orders and not config.dry_run and not allocation_mode)
+            loss_breached = False if allocation_mode else self.evaluate_daily_loss_limit(config, account_dict, session_date)
             status_message = ""
             if should_trade and config.market_hours_only and not market_open:
                 should_trade = False
                 status_message = "Market closed; auto trading paused by setting"
-            opening_guard_detail = self.entry_open_guard_message(clock, config)
-            closing_guard_detail = self.entry_close_guard_message(clock, config)
+            opening_guard_detail = "" if allocation_mode else self.entry_open_guard_message(clock, config)
+            closing_guard_detail = "" if allocation_mode else self.entry_close_guard_message(clock, config)
             entry_guard_detail = opening_guard_detail or closing_guard_detail
-            close_flatten_detail = self.close_flatten_message(clock, config)
+            close_flatten_detail = "" if allocation_mode else self.close_flatten_message(clock, config)
             if loss_breached:
                 entry_guard_detail = self.daily_loss_detail
             elif close_flatten_detail:
@@ -2633,7 +2794,7 @@ class TraderEngine:
                         symbol, position_map.get(symbol), symbol_orders, getattr(clock, "next_open", None)
                     ):
                         self.log(level, message)
-            if should_trade or (manage_exits and market_open):
+            if not allocation_mode and (should_trade or (manage_exits and market_open)):
                 for symbol in symbols:
                     if symbol not in position_symbols or symbol in flattened_symbols:
                         continue
@@ -2656,7 +2817,15 @@ class TraderEngine:
                         self.log(level, message)
                     stop_now = stop_now or stop_rule
 
-            if should_trade:
+            allocation_status = ""
+            if config.entry_mode == "inplay":
+                allocation_status = self.inplay_pass(clock, market_open)
+                entry_symbols = self.mode_entry_symbols()
+            if allocation_mode:
+                allocation_status = self.run_allocation_pass(
+                    client, clock, account_dict, open_positions, flat_orders, closed_order_dicts, should_trade, market_open
+                )
+            if should_trade and not allocation_mode:
                 candidates = []
                 for rank, symbol in enumerate(entry_symbols):
                     if symbol in position_symbols:
@@ -2721,7 +2890,7 @@ class TraderEngine:
                         available_buying_power = max(Decimal("0"), available_buying_power - reserved_notional)
 
             for symbol in symbols:
-                if should_trade and symbol not in position_symbols and symbol not in entry_symbols:
+                if should_trade and not allocation_mode and symbol not in position_symbols and symbol not in entry_symbols:
                     self.clear_entry_score(symbol)
                     if symbol in MARKET_PROXY_SYMBOLS and self.config.use_top_volume_symbols:
                         self.strategy_state.last_action[symbol] = "Hold (market proxy only)"
@@ -2784,6 +2953,8 @@ class TraderEngine:
                     self.status = f"Selling before the close: {close_flatten_detail}"
                 elif status_message:
                     self.status = status_message
+                elif allocation_status:
+                    self.status = allocation_status
                 elif self.trading_enabled and market_clock["is_open"]:
                     mode = "dry-run" if self.config.dry_run else "paper-order"
                     self.status = f"Auto trading running in {mode} mode"
@@ -3486,6 +3657,642 @@ class TraderEngine:
             return ""
         return f"market closes in {max(0, int((seconds_left + 59) // 60))} min; selling everything {minutes} min before the close"
 
+    # ----- Day-trade mode (entry_mode "inplay") ------------------------------------------------
+
+    INPLAY_RECENT_ACTIVES_PATH = APP_DIR / "inplay_recent_actives.json"
+    INPLAY_RECENT_SESSIONS = 10
+    INPLAY_SIP_DELAY_MINUTES = 16
+
+    def inplay_ready_at(self, today: date, config: AppConfig) -> datetime:
+        """When today's opening range can be read from consolidated data (range end + SIP delay)."""
+        open_et = datetime.combine(today, datetime.min.time(), MARKET_TIMEZONE).replace(hour=9, minute=30)
+        return open_et + timedelta(minutes=config.inplay_range_minutes + self.INPLAY_SIP_DELAY_MINUTES)
+
+    def inplay_recent_actives(self) -> list[str]:
+        try:
+            payload = json.loads(self.INPLAY_RECENT_ACTIVES_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        sessions = payload.get("sessions") if isinstance(payload, dict) else None
+        symbols: list[str] = []
+        for _, items in sorted((sessions or {}).items())[-self.INPLAY_RECENT_SESSIONS:]:
+            symbols.extend(str(item).upper() for item in items or [])
+        return clean_symbol_list(symbols)
+
+    def remember_inplay_actives(self, today: date, symbols: list[str]) -> None:
+        if not symbols:
+            return
+        try:
+            payload = json.loads(self.INPLAY_RECENT_ACTIVES_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        sessions = dict(payload.get("sessions") or {}) if isinstance(payload, dict) else {}
+        sessions[today.isoformat()] = clean_symbol_list(symbols)
+        keep = dict(sorted(sessions.items())[-self.INPLAY_RECENT_SESSIONS:])
+        try:
+            write_private_json(self.INPLAY_RECENT_ACTIVES_PATH, {"sessions": keep})
+        except OSError as exc:
+            self.log("warn", f"Day trade: could not save the recent most-active list: {exc}")
+
+    def inplay_tape_actives(self, today: date) -> list[str]:
+        """Most-active symbols from the recorded day tapes of recent sessions.
+
+        The tapes record the most-active list about once a minute. A handful of points spread
+        through each file are sampled (seek, then read forward to the next snapshot), so a session's
+        list is covered without reading hundreds of megabytes. This fills the recent list on a fresh
+        install and on days the app was not running.
+        """
+        symbols: list[str] = []
+        try:
+            tapes = sorted(path for path in DAY_TAPE_DIR.glob("tape-*.jsonl") if path.stem < f"tape-{today:%Y%m%d}")
+        except OSError:
+            return symbols
+        for path in tapes[-self.INPLAY_RECENT_SESSIONS:]:
+            try:
+                size = path.stat().st_size
+                with path.open("rb") as handle:
+                    for step in range(12):
+                        handle.seek(size * step // 12)
+                        if step:
+                            handle.readline()  # skip the partial line after the seek
+                        read = 0
+                        for raw in handle:
+                            read += len(raw)
+                            if read > 5_000_000:
+                                break
+                            if b'"top_volume_snapshot"' not in raw[:200]:
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except ValueError:
+                                break
+                            payload = event.get("payload") or {}
+                            symbols.extend(str(item).upper() for item in payload.get("symbols", [])[:DASHBOARD_TOP_LIMIT])
+                            break
+            except OSError:
+                continue
+        return clean_symbol_list(symbols)
+
+    def inplay_universe(self, today: date | None = None) -> list[str]:
+        with self.lock:
+            actives = list(self.top_volume_symbols)
+        recent = self.inplay_recent_actives()
+        if today is not None:
+            recent = recent + self.inplay_tape_actives(today)
+        return without_invalid_market_data_symbols(
+            clean_symbol_list(list(inplay_logic.CORE_SYMBOLS) + recent + actives)
+        )
+
+    def inplay_pass(self, clock: Any, market_open: bool) -> str:
+        """Start the data worker when needed and describe where the day stands."""
+        config = self.config
+        today = self.allocation_today(clock)
+        now = self.clock_now(clock, getattr(clock, "next_close", None))
+        ready_at = self.inplay_ready_at(today, config)
+        ready = market_open and now >= ready_at
+        with self.lock:
+            have_history = bool(self.inplay_history and self.inplay_history[0] == today.isoformat())
+            have_picks = self.inplay_picks_session == today.isoformat()
+            if not have_picks and self.inplay_picks_session and self.inplay_picks_session != today.isoformat():
+                self.inplay_picks = {}
+        if market_open and (not have_history or (ready and not have_picks)):
+            self.start_inplay_worker(today, ready)
+        ready_text = ready_at.astimezone(MARKET_TIMEZONE).strftime("%I:%M %p ET").lstrip("0")
+        with self.lock:
+            picks = sorted(self.inplay_picks.values(), key=lambda pick: pick.rank)
+            checked = self.inplay_checked
+            rejected = dict(self.inplay_rejected)
+        if have_picks or picks:
+            if picks:
+                listing = ", ".join(f"{pick.symbol} {pick.relative_volume:.1f}x" for pick in picks)
+                text = f"Day trade: {len(picks)} in play ({listing})"
+            else:
+                text = f"Day trade: nothing in play today ({checked} checked)"
+        elif market_open:
+            text = f"Day trade: picks at {ready_text}, after the {config.inplay_range_minutes}-minute range"
+        else:
+            text = ""
+        view = {
+            "session": today.isoformat(),
+            "ready_at": ready_text,
+            "checked": checked,
+            "rejected": rejected,
+            "picks": [
+                {
+                    "symbol": pick.symbol,
+                    "rank": pick.rank,
+                    "range_high": str(pick.high),
+                    "range_low": str(pick.low),
+                    "stop": str(pick.stop),
+                    "relative_volume": f"{pick.relative_volume:.2f}",
+                    "atr_percent": f"{pick.atr_percent:.2f}",
+                    "dollar_volume_millions": f"{pick.dollar_volume / Decimal('1000000'):.0f}",
+                }
+                for pick in picks
+            ],
+        }
+        with self.lock:
+            self.inplay_view = view
+        return text
+
+    def start_inplay_worker(self, today: date, ready: bool) -> None:
+        with self.lock:
+            if self.inplay_worker is not None and self.inplay_worker.is_alive():
+                return
+            if time.monotonic() < self.inplay_retry_at:
+                return
+            api_key, secret_key = self.api_key, self.secret_key
+            if not api_key or not secret_key:
+                return
+            worker = threading.Thread(
+                target=self.inplay_work, args=(today, ready, api_key, secret_key), daemon=True, name=f"inplay-{self.account_id[:6]}"
+            )
+            self.inplay_worker = worker
+        worker.start()
+
+    def inplay_work(self, today: date, ready: bool, api_key: str, secret_key: str) -> None:
+        """Worker thread: load recent opening ranges and daily stats, then (once ready) rank today's picks."""
+        try:
+            data_client = StockHistoricalDataClient(api_key, secret_key)
+            trading_client = TradingClient(api_key, secret_key, paper=True)
+            config = self.config
+            universe = self.inplay_universe(today)
+            with self.lock:
+                cached = self.inplay_history if self.inplay_history and self.inplay_history[0] == today.isoformat() else None
+            history = dict(cached[1]) if cached else {}
+            stats = dict(cached[2]) if cached else {}
+            missing = [symbol for symbol in universe if symbol not in history]
+            if missing:
+                sessions = self.inplay_previous_sessions(trading_client, today)
+                for session in sessions:
+                    ranges = self.inplay_fetch_ranges(data_client, missing, session, config.inplay_range_minutes)
+                    for symbol in missing:
+                        bar = ranges.get(symbol)
+                        history.setdefault(symbol, []).append(bar.volume if bar else Decimal("0"))
+                stats.update(self.inplay_fetch_daily_stats(data_client, missing, today))
+                with self.lock:
+                    self.inplay_history = (today.isoformat(), history, stats)
+            if not ready:
+                return
+            ranges = self.inplay_fetch_ranges(data_client, universe, today, config.inplay_range_minutes)
+            picks, rejected = inplay_logic.rank_picks(
+                ranges,
+                history,
+                stats,
+                min_relative_volume=config.inplay_min_relative_volume,
+                min_atr_percent=config.inplay_min_atr_percent,
+                min_dollar_volume=config.inplay_min_dollar_volume_millions * Decimal("1000000"),
+                max_picks=config.inplay_max_picks,
+                stop_mode=config.inplay_stop,
+            )
+            with self.lock:
+                self.inplay_picks = {pick.symbol: pick for pick in picks}
+                self.inplay_picks_session = today.isoformat()
+                self.inplay_rejected = rejected
+                self.inplay_checked = len(ranges)
+                actives = list(self.top_volume_symbols)
+            self.remember_inplay_actives(today, actives)
+            if picks:
+                self.log("info", "Day trade picks: " + "; ".join(f"{pick.symbol} ({pick.describe()})" for pick in picks))
+            else:
+                self.log("info", f"Day trade: nothing in play today ({len(ranges)} checked).")
+        except Exception as exc:
+            with self.lock:
+                self.inplay_retry_at = time.monotonic() + 60
+            self.log("warn", f"Day trade data load failed; retrying in a minute: {exc}")
+
+    def inplay_previous_sessions(self, trading_client: Any, today: date) -> list[date]:
+        calendar = trading_client.get_calendar(GetCalendarRequest(start=today - timedelta(days=40), end=today - timedelta(days=1)))
+        sessions = []
+        for item in calendar or []:
+            value = getattr(item, "date", None)
+            if isinstance(value, datetime):
+                value = value.date()
+            if isinstance(value, date) and value < today:
+                sessions.append(value)
+        return sorted(sessions)[-inplay_logic.HISTORY_SESSIONS:]
+
+    def inplay_fetch_ranges(
+        self, data_client: Any, symbols: list[str], session: date, minutes: int
+    ) -> dict[str, inplay_logic.RangeBar]:
+        """Each symbol's opening range on session, from consolidated 5-minute bars."""
+        start = datetime.combine(session, datetime.min.time(), MARKET_TIMEZONE).replace(hour=9, minute=30)
+        end = start + timedelta(minutes=minutes)
+        result: dict[str, inplay_logic.RangeBar] = {}
+        for index in range(0, len(symbols), 100):
+            batch = symbols[index : index + 100]
+            while batch:
+                try:
+                    bars = data_client.get_stock_bars(
+                        StockBarsRequest(
+                            symbol_or_symbols=batch,
+                            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                            start=start,
+                            end=end,
+                            feed=DataFeed.SIP,
+                            adjustment=Adjustment.RAW,
+                            limit=HISTORICAL_BARS_REQUEST_LIMIT,
+                            sort=Sort.ASC,
+                        )
+                    )
+                except Exception as exc:
+                    rejected = rejected_market_data_symbol(exc, batch)
+                    if not rejected:
+                        raise
+                    batch = [symbol for symbol in batch if symbol != rejected]
+                    continue
+                for symbol, symbol_bars in (getattr(bars, "data", {}) or {}).items():
+                    rows = [
+                        (
+                            decimal_value(getattr(bar, "open", None)),
+                            decimal_value(getattr(bar, "high", None)),
+                            decimal_value(getattr(bar, "low", None)),
+                            decimal_value(getattr(bar, "close", None)),
+                            decimal_value(getattr(bar, "volume", None)),
+                        )
+                        for bar in symbol_bars
+                        if start <= getattr(bar, "timestamp", start).astimezone(MARKET_TIMEZONE) < end
+                    ]
+                    # Only a full range counts: a symbol that skipped its first bar did not open normally.
+                    if len(rows) == minutes // 5 and rows[0][0] > 0:
+                        combined = inplay_logic.combine_range(rows)
+                        if combined is not None:
+                            result[str(symbol).upper()] = combined
+                break
+        return result
+
+    def inplay_fetch_daily_stats(
+        self, data_client: Any, symbols: list[str], today: date
+    ) -> dict[str, inplay_logic.DailyStats]:
+        now = datetime.now(timezone.utc)
+        result: dict[str, inplay_logic.DailyStats] = {}
+        for index in range(0, len(symbols), 100):
+            batch = symbols[index : index + 100]
+            while batch:
+                try:
+                    bars = data_client.get_stock_bars(
+                        StockBarsRequest(
+                            symbol_or_symbols=batch,
+                            timeframe=TimeFrame.Day,
+                            start=now - timedelta(days=60),
+                            end=now - timedelta(minutes=self.INPLAY_SIP_DELAY_MINUTES),
+                            feed=DataFeed.SIP,
+                            adjustment=Adjustment.SPLIT,
+                            limit=HISTORICAL_BARS_REQUEST_LIMIT,
+                            sort=Sort.ASC,
+                        )
+                    )
+                except Exception as exc:
+                    rejected = rejected_market_data_symbol(exc, batch)
+                    if not rejected:
+                        raise
+                    batch = [symbol for symbol in batch if symbol != rejected]
+                    continue
+                for symbol, symbol_bars in (getattr(bars, "data", {}) or {}).items():
+                    rows = []
+                    for bar in symbol_bars:
+                        session = rvol_universe.bar_session_date(getattr(bar, "timestamp", None), MARKET_TIMEZONE)
+                        if session is None or session >= today:
+                            continue
+                        rows.append(
+                            (
+                                decimal_value(getattr(bar, "open", None)),
+                                decimal_value(getattr(bar, "high", None)),
+                                decimal_value(getattr(bar, "low", None)),
+                                decimal_value(getattr(bar, "close", None)),
+                                decimal_value(getattr(bar, "volume", None)),
+                            )
+                        )
+                    stat = inplay_logic.daily_stats(rows)
+                    if stat is not None:
+                        result[str(symbol).upper()] = stat
+                break
+        return result
+
+    def inplay_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
+        for reason in (self.halt_hold_reason(symbol),):
+            if reason:
+                return reason
+        with self.lock:
+            pick = self.inplay_picks.get(symbol.strip().upper())
+            entries_today = self.entries_today_by_symbol.get(symbol.strip().upper(), 0)
+        if pick is None:
+            return "Hold (in play: not a pick today)"
+        if entries_today:
+            return "Hold (in play: bought once today)"
+        price = self.latest_stream_price(symbol) or snapshot.price
+        reason = inplay_logic.entry_hold_reason(pick, price, config.inplay_max_chase_percent)
+        if reason:
+            return reason
+        return self.asset_tradeability_hold_reason(symbol)
+
+    def inplay_entry_candidate(self, symbol: str, rank: int, snapshot: Any, config: AppConfig) -> dict[str, Any] | None:
+        hold = self.inplay_entry_hold_reason(symbol, snapshot, config)
+        if hold:
+            self.strategy_state.last_action[symbol] = hold
+            return None
+        with self.lock:
+            pick = self.inplay_picks.get(symbol.strip().upper())
+        pick_rank = pick.rank if pick is not None else rank
+        score = Decimal("100") - Decimal(pick_rank)
+        self.set_entry_score(symbol, score)
+        self.strategy_state.last_action[symbol] = "Candidate in-play breakout"
+        return {"symbol": symbol, "rank": pick_rank, "score": score}
+
+    # ----- Hold mode (entry_mode "allocation") -------------------------------------------------
+
+    def allocation_today(self, clock: Any) -> date:
+        """The market's calendar date (US/Eastern) by the broker clock."""
+        return self.clock_now(clock, getattr(clock, "next_close", None)).astimezone(MARKET_TIMEZONE).date()
+
+    def allocation_window_detail(self, clock: Any, config: AppConfig) -> str:
+        """Non-empty while hold mode may trade: the last allocation minutes before the close,
+        stopping two minutes short of it so a market order still has time to fill."""
+        if not bool(getattr(clock, "is_open", False)):
+            return ""
+        next_close = getattr(clock, "next_close", None)
+        if not hasattr(next_close, "astimezone"):
+            return ""
+        seconds_left = (next_close - self.clock_now(clock, next_close)).total_seconds()
+        if seconds_left <= 120 or seconds_left > config.allocation_trade_minutes_before_close * 60:
+            return ""
+        return f"trade window open; market closes in {max(0, int((seconds_left + 59) // 60))} min"
+
+    def allocation_sessions(self, client: Any, today: date) -> list[date]:
+        """Trading sessions from today through the next two weeks (cached per day)."""
+        cached = self.allocation_sessions_cache
+        if cached and cached[0] == today.isoformat():
+            return cached[1]
+        if time.monotonic() < self.allocation_retry_at:
+            return []
+        try:
+            calendar = client.get_calendar(GetCalendarRequest(start=today, end=today + timedelta(days=14)))
+        except Exception as exc:
+            self.allocation_retry_at = time.monotonic() + 60
+            self.log("warn", f"Hold mode: market calendar lookup failed; retrying in a minute: {exc}")
+            return []
+        sessions: list[date] = []
+        for item in calendar or []:
+            value = getattr(item, "date", None) if not isinstance(item, dict) else item.get("date")
+            if isinstance(value, datetime):
+                value = value.date()
+            elif isinstance(value, str):
+                try:
+                    value = date.fromisoformat(value[:10])
+                except ValueError:
+                    value = None
+            if isinstance(value, date):
+                sessions.append(value)
+        sessions.sort()
+        self.allocation_sessions_cache = (today.isoformat(), sessions)
+        return sessions
+
+    def allocation_previous_closes(self, symbol: str, today: date, days: int) -> list[Decimal] | None:
+        """Consolidated (SIP) daily closes of the sessions before today, oldest first (cached per day).
+
+        Free market data may not query the last 15 minutes of SIP data, so the request ends 16
+        minutes back; only finished sessions before today are kept anyway.
+        """
+        key = (symbol, today.isoformat(), days)
+        if key in self.allocation_closes_cache:
+            return self.allocation_closes_cache[key]
+        if time.monotonic() < self.allocation_retry_at:
+            return None
+        client = self.data_client
+        if client is None:
+            return None
+        now = datetime.now(timezone.utc)
+        try:
+            bars = client.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=symbol,
+                    timeframe=TimeFrame.Day,
+                    start=now - timedelta(days=int(days * 1.6) + 30),
+                    end=now - timedelta(minutes=16),
+                    feed=DataFeed.SIP,
+                    adjustment=Adjustment.ALL,
+                    sort=Sort.ASC,
+                )
+            )
+        except Exception as exc:
+            self.allocation_retry_at = time.monotonic() + 60
+            self.log("warn", f"Hold mode: daily closes for {symbol} failed; retrying in a minute: {exc}")
+            return None
+        data = getattr(bars, "data", {}) or {}
+        closes: list[Decimal] = []
+        for bar in data.get(symbol, []) or []:
+            session = rvol_universe.bar_session_date(getattr(bar, "timestamp", None), MARKET_TIMEZONE)
+            if session is None or session >= today:
+                continue
+            close = decimal_value(getattr(bar, "close", None))
+            if close > 0:
+                closes.append(close)
+        self.allocation_closes_cache = {k: v for k, v in self.allocation_closes_cache.items() if k[1] == today.isoformat()}
+        self.allocation_closes_cache[key] = closes
+        return closes
+
+    def allocation_live_price(self, symbol: str) -> Decimal | None:
+        price = self.latest_stream_price(symbol)
+        if price is None or price <= 0:
+            price = self.snapshot(symbol).price
+        return price if price is not None and price > 0 else None
+
+    def allocation_latch_from_orders(self, orders: list[dict[str, Any]], today: date) -> str:
+        """Today's decided regime, read back from the app's own hold-mode order ids (survives a restart)."""
+        for order in orders:
+            client_id = str(order.get("client_order_id") or "")
+            match = re.match(r"^apt-(?:entry|exit)-alloc-(on|off)-", client_id)
+            if not match:
+                continue
+            submitted = self.parse_order_datetime(order.get("submitted_at") or order.get("created_at"))
+            if submitted is not None and submitted.astimezone(MARKET_TIMEZONE).date() == today:
+                return match.group(1)
+        return ""
+
+    def build_allocation_order(self, symbol: str, side: OrderSide, qty: Decimal, regime: str) -> MarketOrderRequest:
+        prefix = "entry" if side == OrderSide.BUY else "exit"
+        return MarketOrderRequest(
+            symbol=symbol,
+            qty=float(qty),
+            side=side,
+            type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY,
+            client_order_id=f"apt-{prefix}-alloc-{regime}-{symbol.lower()}-{int(time.time() * 1000)}",
+        )
+
+    def run_allocation_pass(
+        self,
+        client: Any,
+        clock: Any,
+        account: dict[str, Any],
+        positions: list[dict[str, Any]],
+        open_orders: list[dict[str, Any]],
+        closed_orders: list[dict[str, Any]],
+        should_trade: bool,
+        market_open: bool,
+    ) -> str:
+        """One hold-mode pass: read the signal, decide today's target, and place at most one wave of
+        orders (sells, or else buys). Every pass re-reads broker state, so it is safe to repeat."""
+        config = self.config
+        today = self.allocation_today(clock)
+        risk_on = list(config.allocation_risk_on_symbols)
+        risk_off = list(config.allocation_risk_off_symbols)
+        sets = {"on": risk_on, "off": risk_off}
+        signal_symbol = config.allocation_signal_symbol
+        closes = self.allocation_previous_closes(signal_symbol, today, config.allocation_sma_days)
+        signal = allocation_logic.allocation_signal(
+            closes or [], self.allocation_live_price(signal_symbol), config.allocation_sma_days
+        )
+        sessions = self.allocation_sessions(client, today)
+        check_day = allocation_logic.is_check_day(today, sessions, config.allocation_check) if sessions else False
+        next_check = allocation_logic.next_check_day(today, sessions, config.allocation_check) if sessions else None
+        holdings = [
+            allocation_logic.Holding(
+                symbol=str(item.get("symbol", "")).upper(),
+                qty=decimal_value(item.get("qty")),
+                market_value=decimal_value(item.get("market_value")),
+                qty_available=self.sellable_qty(item),
+            )
+            for item in positions
+            if decimal_value(item.get("qty")) > 0 and not is_placeholder_position(item)
+        ]
+        held = allocation_logic.held_regime(holdings, risk_on, risk_off)
+        equity = decimal_value(account.get("equity"))
+        window = self.allocation_window_detail(clock, config)
+
+        latch = self.allocation_latch if self.allocation_latch and self.allocation_latch[0] == today.isoformat() else None
+        if latch is None:
+            rebuilt = self.allocation_latch_from_orders(open_orders + closed_orders, today)
+            if rebuilt:
+                latch = (today.isoformat(), rebuilt)
+                self.allocation_latch = latch
+        target_regime = ""
+        decided_by = ""
+        if latch:
+            target_regime, decided_by = latch[1], "decided earlier today"
+        elif check_day and signal is not None:
+            target_regime, decided_by = signal.regime, "weekly check" if config.allocation_check == "weekly" else "daily check"
+        elif held in ("on", "off"):
+            target_regime, decided_by = held, "holding"
+        elif signal is not None:
+            target_regime, decided_by = signal.regime, "funding" if held == "none" else "repair"
+        target = sets.get(target_regime, [])
+        switching = held in ("on", "off", "mixed") and bool(target_regime) and held != target_regime
+
+        regime_text = {"on": "risk-on", "off": "risk-off"}.get(target_regime, "undecided")
+        signal_text = signal.describe(signal_symbol) if signal is not None else f"{signal_symbol} signal warming up"
+        next_text = next_check.strftime("%a %b %d") if next_check else "unknown"
+        view = {
+            "session": today.isoformat(),
+            "signal": signal_text,
+            "regime": target_regime,
+            "held": held,
+            "target": target,
+            "check_day": check_day,
+            "next_check": next_text,
+            "window": window,
+            "decided_by": decided_by,
+        }
+        positions_by_symbol = {item.symbol: item for item in holdings}
+        target_weight = config.allocation_invest_percent / Decimal(len(target)) if target else Decimal("0")
+        for symbol in merged_symbols([signal_symbol], risk_on + risk_off):
+            parts = []
+            if symbol == signal_symbol:
+                parts.append(f"signal: {signal_text}")
+            if symbol in target:
+                held_value = positions_by_symbol[symbol].market_value if symbol in positions_by_symbol else Decimal("0")
+                now_weight = held_value / equity * Decimal("100") if equity > 0 else Decimal("0")
+                parts.append(f"target {target_weight:.1f}%, now {now_weight:.1f}%")
+            elif symbol in positions_by_symbol:
+                parts.append("held; sells at the next trade window")
+            elif symbol in risk_on + risk_off:
+                parts.append("not in the current target")
+            self.strategy_state.last_action[symbol] = "Hold mode (" + "; ".join(parts) + ")"
+        status = f"Hold mode {regime_text}: {signal_text}. Next check {next_text}"
+        if window:
+            status += f"; {window}"
+
+        def finish(detail: str = "") -> str:
+            view["detail"] = detail
+            with self.lock:
+                self.allocation_view = view
+            return status + (f". {detail}" if detail else "")
+
+        if not target_regime:
+            return finish("Waiting for the signal")
+        if not (should_trade and market_open and window):
+            return finish("")
+        if latch is None:
+            self.allocation_latch = (today.isoformat(), target_regime)
+
+        plan = allocation_logic.plan_allocation(
+            holdings,
+            target,
+            equity,
+            decimal_value(account.get("cash")),
+            decimal_value(account.get("buying_power")),
+            config.allocation_invest_percent,
+            config.allocation_rebalance_drift_percent,
+            rebalance=check_day or switching,
+        )
+        if not plan.sells and not plan.buys:
+            return finish(plan.note or "on target")
+        if config.dry_run:
+            if self.allocation_dry_run_session != today.isoformat():
+                self.allocation_dry_run_session = today.isoformat()
+                for symbol, qty, why in plan.sells:
+                    self.log("info", f"Dry run: hold mode would sell {qty} {symbol} ({why}).")
+                for symbol, notional, why in plan.buys:
+                    self.log("info", f"Dry run: hold mode would buy {money(notional)} of {symbol} ({why}).")
+            return finish("dry run")
+        # One wave at a time: let the app's own leftover stops clear, and wait out any open order.
+        leftovers = [order for order in open_orders if self.is_app_protective_order(order)]
+        if leftovers:
+            for order in leftovers:
+                self.cancel_open_order(order)
+            return finish("cancelling leftover stop orders first")
+        if open_orders:
+            return finish(f"waiting for {len(open_orders)} open order(s)")
+        for symbol in [item[0] for item in plan.sells] + [item[0] for item in plan.buys]:
+            side = OrderSide.SELL if any(symbol == item[0] for item in plan.sells) else OrderSide.BUY
+            if self.order_hold_reason(symbol, side):
+                return finish("waiting for the last order to show up")
+        reason_head = f"hold mode {regime_text} ({decided_by}): {signal_text}"
+        if plan.sells:
+            for symbol, qty, why in plan.sells:
+                order = self.build_allocation_order(symbol, OrderSide.SELL, qty, target_regime)
+                self.submit_allocation_order(symbol, OrderSide.SELL, qty, order, f"{reason_head}; sell: {why}", "Strategy Exit")
+            return finish(f"selling {len(plan.sells)} holding(s)")
+        for symbol, notional, why in plan.buys:
+            price = self.current_trade_price(symbol, self.allocation_live_price(symbol) or Decimal("0"))
+            qty = order_quantity(notional, price)
+            if qty <= 0:
+                self.log("warn", f"Hold mode: no price for {symbol}; buy skipped this pass.")
+                continue
+            order = self.build_allocation_order(symbol, OrderSide.BUY, qty, target_regime)
+            self.submit_allocation_order(
+                symbol, OrderSide.BUY, qty, order, f"{reason_head}; buy {money(notional)} {why}; order_ref={price}", "Pending Entry"
+            )
+        return finish(f"buying {len(plan.buys)} holding(s)")
+
+    def submit_allocation_order(
+        self, symbol: str, side: OrderSide, qty: Decimal, order: MarketOrderRequest, reason: str, role: str
+    ) -> None:
+        client_order_id = str(getattr(order, "client_order_id", ""))
+        try:
+            submitted = self.submit_order_request(order)
+        except OrderExecutionError as exc:
+            self.hold_rejected_order(symbol, side, ORDER_REJECT_HOLD_SECONDS)
+            self.record_order_intent(symbol, side, qty, role, "error", f"{reason}; {exc}", client_order_id)
+            self.log("error", f"Hold mode {self.order_side_text(side)} rejected for {symbol}: {exc}")
+            return
+        submitted_id = str(getattr(submitted, "id", ""))
+        self.hold_submitted_order(symbol, side)
+        self.record_order_intent(symbol, side, qty, role, "submitted", reason, client_order_id, submitted_id)
+        if side == OrderSide.BUY:
+            self.mark_entry_today(symbol)
+        self.log("success", f"Hold mode: submitted {self.order_side_text(side)} for {qty} {symbol}: {submitted_id}")
+
     def entry_spacing_hold_reason(self, config: AppConfig) -> str:
         seconds = int(config.entry_spacing_seconds or 0)
         if seconds <= 0 or not self.last_entry_submitted_at:
@@ -3498,6 +4305,8 @@ class TraderEngine:
     def entry_quality_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
         if self.inverse_trend_active(symbol, config):
             return self.inverse_trend_entry_hold_reason(symbol, snapshot, config)
+        if config.entry_mode == "inplay":
+            return self.inplay_entry_hold_reason(symbol, snapshot, config)
         limits = entry_profile_limits(config)
         inverse_reason = self.inverse_etf_hold_reason(symbol, config)
         if inverse_reason:
@@ -3742,6 +4551,8 @@ class TraderEngine:
                 return None
         if self.inverse_trend_active(symbol, config):
             return self.inverse_trend_entry_candidate(symbol, rank, snapshot, config)
+        if config.entry_mode == "inplay":
+            return self.inplay_entry_candidate(symbol, rank, snapshot, config)
         if config.entry_mode == "orb":
             return self.orb_entry_candidate(symbol, rank, snapshot, config)
         quality_hold = self.entry_quality_hold_reason(symbol, snapshot, config)
@@ -4091,7 +4902,7 @@ class TraderEngine:
                 self.set_entry_score(symbol, entry_score)
             # A trend-hold candidate has no real score (its number only orders it), so neither the
             # minimum score nor a re-entry floor left by an earlier stop applies to it.
-            scored_entry = not self.inverse_trend_active(symbol, config)
+            scored_entry = not self.inverse_trend_active(symbol, config) and config.entry_mode != "inplay"
             if scored_entry and entry_score < config.min_entry_score:
                 self.strategy_state.last_action[symbol] = f"Hold (score {entry_score:.1f} < {config.min_entry_score})"
                 return events, False, None
@@ -4104,6 +4915,14 @@ class TraderEngine:
                 return events, False, None
 
             order_price = self.current_trade_price(symbol, snapshot.price)
+            if config.entry_mode == "inplay":
+                # The order goes at the live price, which can be past the chase limit by now.
+                with self.lock:
+                    pick = self.inplay_picks.get(symbol)
+                chase_hold = inplay_logic.entry_hold_reason(pick, order_price, config.inplay_max_chase_percent) if pick else "Hold (in play: not a pick)"
+                if chase_hold:
+                    self.strategy_state.last_action[symbol] = chase_hold
+                    return events, False, None
             reference_premium = percent_change(order_price, snapshot.price)
             if reference_premium > MAX_ENTRY_REFERENCE_PREMIUM_PERCENT:
                 self.strategy_state.last_action[symbol] = (
@@ -4120,6 +4939,11 @@ class TraderEngine:
                 events.append(("warn", f"Skipped {symbol}: calculated quantity is zero."))
                 return events, False, None
             entry_notes = [entry_guard_detail]
+            if config.entry_mode == "inplay":
+                with self.lock:
+                    day_pick = self.inplay_picks.get(symbol)
+                if day_pick is not None:
+                    entry_notes.append(f"in play #{day_pick.rank + 1}: {day_pick.describe()}")
             if entry_score is not None:
                 entry_notes.append(f"score={entry_score:.1f}")
             if config.use_bracket_orders and self.is_fractional_quantity(qty_to_buy):
@@ -4487,6 +5311,13 @@ class TraderEngine:
         to 0.25%-of-entry steps so the broker order is only replaced every quarter percent. The
         result only ever rises for a position (callers never lower a live stop below it).
         """
+        if config.entry_mode == "inplay":
+            with self.lock:
+                pick = self.inplay_picks.get(symbol.strip().upper())
+            if pick is not None and pick.stop > 0:
+                # The pick's own stop (range middle or low). Without today's pick (data not loaded
+                # yet after a restart) the percent stop below still protects the position.
+                return max(Decimal("0"), self.round_exit_price(pick.stop, ROUND_DOWN))
         if self.inverse_trend_active(symbol, config):
             # A wide stop from entry, so index noise cannot shake the hold out; the VWAP exit ends
             # it. Once the fund has been up the lock percent the profit is locked: the stop trails
@@ -4563,6 +5394,11 @@ class TraderEngine:
 
     def position_stop_percent(self, symbol: str, config: AppConfig) -> Decimal:
         """The stop distance from entry that applies to this position, for log and order notes."""
+        if config.entry_mode == "inplay":
+            with self.lock:
+                pick = self.inplay_picks.get(symbol.strip().upper())
+            if pick is not None and pick.high > 0:
+                return ((pick.high - pick.stop) / pick.high * Decimal("100")).quantize(Decimal("0.01"))
         if self.inverse_trend_active(symbol, config):
             return config.inverse_trend_stop_percent
         return config.stop_loss_percent
@@ -6223,6 +7059,8 @@ class TraderEngine:
                 "positions": self.positions,
                 "orders": self.orders,
                 "protection": self.protection_rows,
+                "allocation": dict(self.allocation_view),
+                "inplay": dict(self.inplay_view),
                 "trade_history": self.trade_history,
                 "risk": {
                     "daily_loss_breached": bool(self.daily_loss_breach_session),

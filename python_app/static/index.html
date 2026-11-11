@@ -593,6 +593,8 @@
                     <select id="entryMode">
                       <option value="momentum" selected>Momentum (trend, RSI, VWAP, score)</option>
                       <option value="orb">Opening-range breakout</option>
+                      <option value="allocation">Buy and hold: index with trend switch</option>
+                      <option value="inplay">Day trade: stocks-in-play breakout</option>
                     </select>
                   </label>
                   <label title="Opening-range breakout only: the range is the high/low of this many minutes after 9:30 ET.">
@@ -602,6 +604,72 @@
                   <label title="Opening-range breakout only: skip a breakout already this far past the range high (0 = no cap).">
                     ORB Max Breakout %
                     <input id="orbMaxBreakoutPercent" type="number" min="0" max="10" step="0.25" value="1" />
+                  </label>
+                  <label title="Hold mode: funds held in equal weights while the trend signal is above its average.">
+                    Hold: Risk-on Funds
+                    <input id="allocationRiskOnSymbols" type="text" value="QQQ, SPY" spellcheck="false" />
+                  </label>
+                  <label title="Hold mode: funds held in equal weights while the trend signal is below its average.">
+                    Hold: Risk-off Funds
+                    <input id="allocationRiskOffSymbols" type="text" value="IEF, GLD" spellcheck="false" />
+                  </label>
+                  <label title="Hold mode: the fund whose price vs its moving average decides risk-on or risk-off.">
+                    Hold: Trend Signal
+                    <input id="allocationSignalSymbol" type="text" value="QQQ" spellcheck="false" />
+                  </label>
+                  <label title="Hold mode: days in the moving average.">
+                    Hold: Trend Average Days
+                    <input id="allocationSmaDays" type="number" min="20" max="400" step="10" value="200" />
+                  </label>
+                  <label title="Hold mode: how often risk-on/off is re-decided.">
+                    Hold: Switch Check
+                    <select id="allocationCheck">
+                      <option value="weekly" selected>Weekly (last session of the week)</option>
+                      <option value="daily">Daily</option>
+                    </select>
+                  </label>
+                  <label title="Hold mode: trades happen in this many minutes before the close.">
+                    Hold: Trade Minutes Before Close
+                    <input id="allocationTradeMinutesBeforeClose" type="number" min="5" max="60" step="1" value="20" />
+                  </label>
+                  <label title="Hold mode: share of equity invested; the rest stays as cash.">
+                    Hold: Invested %
+                    <input id="allocationInvestPercent" type="number" min="50" max="100" step="1" value="98" />
+                  </label>
+                  <label title="Hold mode: rebalance a fund only when its weight is this many points off target.">
+                    Hold: Rebalance Drift %
+                    <input id="allocationRebalanceDriftPercent" type="number" min="1" max="50" step="1" value="10" />
+                  </label>
+                  <label title="In-play mode: the opening range is this many minutes after 9:30 ET.">
+                    Day Trade: Range Minutes
+                    <input id="inplayRangeMinutes" type="number" min="5" max="30" step="5" value="15" />
+                  </label>
+                  <label title="In-play mode: opening-range volume must be at least this many times its recent average.">
+                    Day Trade: Min Range Volume x
+                    <input id="inplayMinRelativeVolume" type="number" min="0" max="50" step="0.25" value="2.5" />
+                  </label>
+                  <label title="In-play mode: 14-day average daily range must be at least this percent.">
+                    Day Trade: Min Daily Range %
+                    <input id="inplayMinAtrPercent" type="number" min="0" max="50" step="0.5" value="3" />
+                  </label>
+                  <label title="In-play mode: 20-day average dollars traded per day, in millions.">
+                    Day Trade: Min $ Volume (millions)
+                    <input id="inplayMinDollarVolumeMillions" type="number" min="0" step="5" value="20" />
+                  </label>
+                  <label title="In-play mode: most stocks watched per day.">
+                    Day Trade: Max Picks
+                    <input id="inplayMaxPicks" type="number" min="1" max="50" step="1" value="10" />
+                  </label>
+                  <label title="In-play mode: skip a break already this far past the range high.">
+                    Day Trade: Max Chase %
+                    <input id="inplayMaxChasePercent" type="number" min="0" max="10" step="0.25" value="1" />
+                  </label>
+                  <label title="In-play mode: where the stop goes.">
+                    Day Trade: Stop
+                    <select id="inplayStop">
+                      <option value="range_mid" selected>Range middle</option>
+                      <option value="range_low">Range low</option>
+                    </select>
                   </label>
                   <label title="Never buy when RSI is above this.">
                     Max Entry RSI (0 = off)

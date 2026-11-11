@@ -47,6 +47,21 @@ const fields = {
   entryMode: document.querySelector("#entryMode"),
   orbMinutes: document.querySelector("#orbMinutes"),
   orbMaxBreakoutPercent: document.querySelector("#orbMaxBreakoutPercent"),
+  allocationRiskOnSymbols: document.querySelector("#allocationRiskOnSymbols"),
+  allocationRiskOffSymbols: document.querySelector("#allocationRiskOffSymbols"),
+  allocationSignalSymbol: document.querySelector("#allocationSignalSymbol"),
+  allocationSmaDays: document.querySelector("#allocationSmaDays"),
+  allocationCheck: document.querySelector("#allocationCheck"),
+  allocationTradeMinutesBeforeClose: document.querySelector("#allocationTradeMinutesBeforeClose"),
+  allocationInvestPercent: document.querySelector("#allocationInvestPercent"),
+  allocationRebalanceDriftPercent: document.querySelector("#allocationRebalanceDriftPercent"),
+  inplayRangeMinutes: document.querySelector("#inplayRangeMinutes"),
+  inplayMinRelativeVolume: document.querySelector("#inplayMinRelativeVolume"),
+  inplayMinAtrPercent: document.querySelector("#inplayMinAtrPercent"),
+  inplayMinDollarVolumeMillions: document.querySelector("#inplayMinDollarVolumeMillions"),
+  inplayMaxPicks: document.querySelector("#inplayMaxPicks"),
+  inplayMaxChasePercent: document.querySelector("#inplayMaxChasePercent"),
+  inplayStop: document.querySelector("#inplayStop"),
   maxEntriesPerSymbolPerDay: document.querySelector("#maxEntriesPerSymbolPerDay"),
   requireRisingPrice: document.querySelector("#requireRisingPrice"),
   maxEntriesPerScan: document.querySelector("#maxEntriesPerScan"),
@@ -293,6 +308,19 @@ const configKeys = [
   "entry_mode",
   "orb_minutes",
   "orb_max_breakout_percent",
+  "allocation_signal_symbol",
+  "allocation_sma_days",
+  "allocation_check",
+  "allocation_trade_minutes_before_close",
+  "allocation_invest_percent",
+  "allocation_rebalance_drift_percent",
+  "inplay_range_minutes",
+  "inplay_min_relative_volume",
+  "inplay_min_atr_percent",
+  "inplay_min_dollar_volume_millions",
+  "inplay_max_picks",
+  "inplay_max_chase_percent",
+  "inplay_stop",
   "sell_rsi",
   "volume_period",
   "volume_multiplier",
@@ -369,6 +397,21 @@ const strategyProfileKeys = new Set([
   "entry_mode",
   "orb_minutes",
   "orb_max_breakout_percent",
+  "allocation_risk_on_symbols",
+  "allocation_risk_off_symbols",
+  "allocation_signal_symbol",
+  "allocation_sma_days",
+  "allocation_check",
+  "allocation_trade_minutes_before_close",
+  "allocation_invest_percent",
+  "allocation_rebalance_drift_percent",
+  "inplay_range_minutes",
+  "inplay_min_relative_volume",
+  "inplay_min_atr_percent",
+  "inplay_min_dollar_volume_millions",
+  "inplay_max_picks",
+  "inplay_max_chase_percent",
+  "inplay_stop",
   "sell_rsi",
   "volume_period",
   "volume_multiplier",
@@ -799,6 +842,10 @@ fields.symbols.addEventListener("input", () => handleConfigFieldChange("symbols"
 fields.symbols.addEventListener("change", () => handleConfigFieldChange("symbols"));
 fields.inverseEtfSymbols.addEventListener("input", () => handleConfigFieldChange("inverse_etf_symbols"));
 fields.inverseEtfSymbols.addEventListener("change", () => handleConfigFieldChange("inverse_etf_symbols"));
+fields.allocationRiskOnSymbols.addEventListener("input", () => handleConfigFieldChange("allocation_risk_on_symbols"));
+fields.allocationRiskOnSymbols.addEventListener("change", () => handleConfigFieldChange("allocation_risk_on_symbols"));
+fields.allocationRiskOffSymbols.addEventListener("input", () => handleConfigFieldChange("allocation_risk_off_symbols"));
+fields.allocationRiskOffSymbols.addEventListener("change", () => handleConfigFieldChange("allocation_risk_off_symbols"));
 
 els.newAccountButton.addEventListener("click", async () => {
   await switchToAccount("");
@@ -1112,6 +1159,27 @@ function readConfig() {
     entry_mode: fields.entryMode.value,
     orb_minutes: readInt("orbMinutes", 15),
     orb_max_breakout_percent: readNumber("orbMaxBreakoutPercent", 1),
+    allocation_risk_on_symbols: fields.allocationRiskOnSymbols.value
+      .split(/[\s,]+/)
+      .map((value) => value.trim().toUpperCase())
+      .filter(Boolean),
+    allocation_risk_off_symbols: fields.allocationRiskOffSymbols.value
+      .split(/[\s,]+/)
+      .map((value) => value.trim().toUpperCase())
+      .filter(Boolean),
+    allocation_signal_symbol: fields.allocationSignalSymbol.value.trim().toUpperCase() || "QQQ",
+    allocation_sma_days: readInt("allocationSmaDays", 200),
+    allocation_check: fields.allocationCheck.value || "weekly",
+    allocation_trade_minutes_before_close: readInt("allocationTradeMinutesBeforeClose", 20),
+    allocation_invest_percent: readNumber("allocationInvestPercent", 98),
+    allocation_rebalance_drift_percent: readNumber("allocationRebalanceDriftPercent", 10),
+    inplay_range_minutes: readInt("inplayRangeMinutes", 15),
+    inplay_min_relative_volume: readNumber("inplayMinRelativeVolume", 2.5),
+    inplay_min_atr_percent: readNumber("inplayMinAtrPercent", 3),
+    inplay_min_dollar_volume_millions: readNumber("inplayMinDollarVolumeMillions", 20),
+    inplay_max_picks: readInt("inplayMaxPicks", 10),
+    inplay_max_chase_percent: readNumber("inplayMaxChasePercent", 1),
+    inplay_stop: fields.inplayStop.value || "range_mid",
     sell_rsi: readNumber("sellRsi", 72),
     volume_period: readInt("volumePeriod", 20),
     volume_multiplier: readNumber("volumeMultiplier", 1.5),
@@ -1259,6 +1327,12 @@ function applyConfig(config, onlyKeys = null) {
   if (wanted("symbols")) fields.symbols.value = (normalizedConfig.symbols || ["SPY", "QQQ"]).join(",");
   if (wanted("inverse_etf_symbols")) {
     fields.inverseEtfSymbols.value = (normalizedConfig.inverse_etf_symbols || ["SQQQ", "SPXU", "SDS", "SH", "TZA"]).join(", ");
+  }
+  if (wanted("allocation_risk_on_symbols")) {
+    fields.allocationRiskOnSymbols.value = (normalizedConfig.allocation_risk_on_symbols || ["QQQ", "SPY"]).join(", ");
+  }
+  if (wanted("allocation_risk_off_symbols")) {
+    fields.allocationRiskOffSymbols.value = (normalizedConfig.allocation_risk_off_symbols || ["IEF", "GLD"]).join(", ");
   }
   configKeys.forEach((key) => {
     if (!wanted(key)) return;
@@ -1616,6 +1690,21 @@ function presetConfig(profile) {
     entry_mode: "momentum",
     orb_minutes: 15,
     orb_max_breakout_percent: 1,
+    allocation_risk_on_symbols: ["QQQ", "SPY"],
+    allocation_risk_off_symbols: ["IEF", "GLD"],
+    allocation_signal_symbol: "QQQ",
+    allocation_sma_days: 200,
+    allocation_check: "weekly",
+    allocation_trade_minutes_before_close: 20,
+    allocation_invest_percent: 98,
+    allocation_rebalance_drift_percent: 10,
+    inplay_range_minutes: 15,
+    inplay_min_relative_volume: 2.5,
+    inplay_min_atr_percent: 3,
+    inplay_min_dollar_volume_millions: 20,
+    inplay_max_picks: 10,
+    inplay_max_chase_percent: 1,
+    inplay_stop: "range_mid",
     sell_rsi: 72,
     volume_period: 20,
     volume_multiplier: 1.5,

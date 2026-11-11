@@ -86,6 +86,58 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertIn("entry_mode: fields.entryMode.value", self.app_js)
         self.assertIn('entry_mode: "momentum"', self.app_js)
 
+    def test_hold_and_day_trade_controls_are_wired(self) -> None:
+        hold_ids = (
+            "allocationRiskOnSymbols",
+            "allocationRiskOffSymbols",
+            "allocationSignalSymbol",
+            "allocationSmaDays",
+            "allocationCheck",
+            "allocationTradeMinutesBeforeClose",
+            "allocationInvestPercent",
+            "allocationRebalanceDriftPercent",
+        )
+        day_trade_ids = (
+            "inplayRangeMinutes",
+            "inplayMinRelativeVolume",
+            "inplayMinAtrPercent",
+            "inplayMinDollarVolumeMillions",
+            "inplayMaxPicks",
+            "inplayMaxChasePercent",
+            "inplayStop",
+        )
+        for element_id in hold_ids + day_trade_ids:
+            self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
+        for value in ("allocation", "inplay"):
+            self.assertIn(f'<option value="{value}"', self.index_html)
+        config_start = self.app_js.index("const configKeys = [")
+        config_text = self.app_js[config_start : self.app_js.index("];", config_start)]
+        profile_start = self.app_js.index("const strategyProfileKeys = new Set([")
+        profile_text = self.app_js[profile_start : self.app_js.index("]);", profile_start)]
+        scalar_keys = (
+            "allocation_signal_symbol",
+            "allocation_sma_days",
+            "allocation_check",
+            "allocation_trade_minutes_before_close",
+            "allocation_invest_percent",
+            "allocation_rebalance_drift_percent",
+            "inplay_range_minutes",
+            "inplay_min_relative_volume",
+            "inplay_min_atr_percent",
+            "inplay_min_dollar_volume_millions",
+            "inplay_max_picks",
+            "inplay_max_chase_percent",
+            "inplay_stop",
+        )
+        list_keys = ("allocation_risk_on_symbols", "allocation_risk_off_symbols")
+        for key in scalar_keys:
+            self.assertIn(f'"{key}"', config_text)
+            self.assertIn(f'"{key}"', profile_text)
+            self.assertIn(f'"{key}"', self.app_js)
+        for key in list_keys:
+            self.assertIn(f'"{key}"', profile_text)
+            self.assertIn(f'"{key}"', self.app_js)
+
     def test_market_overview_is_wired(self) -> None:
         for element_id in ("tickerTape", "tickerTrack", "marketOverview", "indexCharts", "newsList", "newsFlash"):
             self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
