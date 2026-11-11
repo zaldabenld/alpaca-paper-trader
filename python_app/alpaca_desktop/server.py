@@ -708,6 +708,11 @@ async def lookup_symbol(symbol: str, account_id: str | None = None) -> dict[str,
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/symbol-info")
+async def symbol_info(symbol: str, account_id: str | None = None) -> dict[str, Any]:
+    return await asyncio.to_thread(manager.symbol_info, symbol, account_id)
+
+
 @app.post("/api/cancel-orders")
 async def cancel_orders(payload: AccountActionPayload) -> dict[str, Any]:
     try:
