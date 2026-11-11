@@ -1375,6 +1375,12 @@ def is_already_stopped_stream_error(exc: Exception) -> bool:
     return "nonetype" in message and "is_running" in message
 
 
+def is_placeholder_position(position: dict[str, Any]) -> bool:
+    # Corporate-action leftovers such as CVR rights (046CVR015) have no market price, cannot be sold,
+    # and hold no exposure, so they must not use up a max-open-positions slot.
+    return decimal_value(position.get("current_price"), Decimal("-1")) == 0
+
+
 def is_pending_cancel_error(exc: Exception) -> bool:
     # Alpaca 422 (code 42210000) when a cancel is sent for an order whose earlier cancel is still in flight.
     return "pending cancel" in str(exc or "").lower()
@@ -2386,7 +2392,10 @@ class TraderEngine:
                 for order in flat_orders
                 if self.order_role(order, position_symbols) == "Pending Entry"
             }
-            potential_position_count = len(position_symbols | pending_entry_symbols)
+            slot_symbols = {
+                str(item.get("symbol", "")).upper() for item in open_positions if not is_placeholder_position(item)
+            }
+            potential_position_count = len(slot_symbols | pending_entry_symbols)
             total_exposure = sum(abs(decimal_value(item.get("market_value"))) for item in open_positions)
             available_buying_power = decimal_value(account_dict.get("buying_power"))
 
