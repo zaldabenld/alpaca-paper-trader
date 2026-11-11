@@ -4076,11 +4076,7 @@ class TraderEngine:
             raw_qty = decimal_value(position.get("qty"))
             if raw_qty <= 0 or str(position.get("side") or "long").lower() == "short":
                 continue  # long-only bot: never "flatten" a short by selling more
-            qty = self.sellable_qty(position)
             if decimal_value(position.get("current_price")) <= 0:
-                continue
-            if qty <= 0:
-                handled.add(symbol)  # an order is already taking the shares
                 continue
             symbol_orders = [order for order in flat_orders if str(order.get("symbol", "")).upper() == symbol]
             roles = [self.order_role(order, {symbol}) for order in symbol_orders]
@@ -4093,11 +4089,26 @@ class TraderEngine:
             if len(take_profit_limits) < len(strategy_exits):
                 handled.add(symbol)  # a market exit is already working
                 continue
+            protective = [order for order, role in zip(symbol_orders, roles) if role == "Protective Exit"]
+            # Shares held by the orders this pass cancels (the app's own stop and take-profit) are sold
+            # too; Alpaca's qty_available excludes them, which left every stop-protected position
+            # unsold at the 2026-11-09 close. Shares held by anything else stay out of the sell.
+            released = sum(
+                (
+                    max(Decimal("0"), abs(decimal_value(order.get("qty"))) - abs(decimal_value(order.get("filled_qty"))))
+                    for order in protective + take_profit_limits
+                    if self.is_app_protective_order(order) or order in take_profit_limits
+                ),
+                Decimal("0"),
+            )
+            qty = min(raw_qty, self.sellable_qty(position) + released)
+            if qty <= 0:
+                handled.add(symbol)  # another order is already taking the shares
+                continue
             if self.order_hold_reason(symbol, OrderSide.SELL):
                 continue  # not handled: the normal pass keeps the stop in place meanwhile
             # From here this pass owns the symbol's exit: no new stop behind the flatten sell.
             handled.add(symbol)
-            protective = [order for order, role in zip(symbol_orders, roles) if role == "Protective Exit"]
             if take_profit_limits and not all(self.cancel_open_order(order) for order in take_profit_limits):
                 events.append(("warn", f"Waiting for {symbol} take-profit cancellation before {reason}."))
                 continue

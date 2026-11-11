@@ -273,6 +273,46 @@ class StopProtectionTests(unittest.TestCase):
         run_refresh(engine, run_strategy=True)
         self.assertEqual(client.submitted, [])
 
+    def test_flatten_sells_the_shares_its_own_stop_was_holding(self) -> None:
+        # 2026-11-09 close: every Account A position had a live app stop holding all its shares, so
+        # Alpaca reported qty_available 0 and the sell-before-close pass skipped all of them.
+        stop = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "0.25", "filled_qty": "0",
+                "stop_price": "98.75", "client_order_id": "apt-protect-sl-aaa-1"}
+        client = FakeTradingClient(is_open=True, orders=[stop])
+        engine = connected_engine(client)
+        position = {"symbol": "AAA", "qty": "0.25", "qty_available": "0", "side": "long",
+                    "current_price": "100", "avg_entry_price": "100"}
+        events, handled = engine.flatten_all_positions({"AAA": position}, [stop], "flatten before close")
+        self.assertEqual(client.cancelled, ["s1"])
+        self.assertEqual(kinds(client), [("sell", "market")])
+        self.assertEqual(str(client.submitted[0].qty), "0.25")
+        self.assertEqual(handled, {"AAA"})
+
+    def test_flatten_leaves_shares_held_by_a_manual_order(self) -> None:
+        manual = {"id": "m1", "symbol": "AAA", "side": "sell", "type": "limit", "qty": "0.25",
+                  "limit_price": "150", "client_order_id": "my-own-order"}
+        client = FakeTradingClient(is_open=True, orders=[manual])
+        engine = connected_engine(client)
+        position = {"symbol": "AAA", "qty": "0.25", "qty_available": "0", "side": "long",
+                    "current_price": "100", "avg_entry_price": "100"}
+        events, handled = engine.flatten_all_positions({"AAA": position}, [manual], "flatten before close")
+        self.assertEqual(client.cancelled, [])
+        self.assertEqual(client.submitted, [])
+        self.assertEqual(handled, {"AAA"})
+
+    def test_flatten_sells_only_the_part_a_filling_stop_released(self) -> None:
+        # Like U on 2026-11-06: the stop is filling in pieces (20 shares still working), the position
+        # already reflects the fills and Alpaca reports only the unheld 12.7446 as available.
+        stop = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "110.7446", "filled_qty": "90.7446",
+                "stop_price": "98.75", "client_order_id": "apt-protect-sl-aaa-1"}
+        client = FakeTradingClient(is_open=True, orders=[stop])
+        engine = connected_engine(client)
+        position = {"symbol": "AAA", "qty": "32.7446", "qty_available": "12.7446", "side": "long",
+                    "current_price": "100", "avg_entry_price": "100"}
+        engine.flatten_all_positions({"AAA": position}, [stop], "flatten before close")
+        self.assertEqual(kinds(client), [("sell", "market")])
+        self.assertEqual(str(client.submitted[0].qty), "32.7446")
+
     def test_flatten_never_sells_a_short_position(self) -> None:
         client = FakeTradingClient(is_open=True)
         engine = connected_engine(client)
