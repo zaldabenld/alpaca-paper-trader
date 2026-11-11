@@ -65,6 +65,7 @@ from .day_tape import (
     day_tape_file_path,
 )
 from .alerts import NOTIFIER
+from .heartbeat import TradingHaltedError, trading_halted
 from .runtime_diagnostics import (
     AccountRefreshError,
     CachePersistenceError,
@@ -2333,6 +2334,8 @@ class TraderEngine:
         return text
 
     def submit_order_request(self, order: Any) -> Any:
+        if trading_halted():
+            raise TradingHaltedError("Trading halted by the n8n kill switch; order not sent")
         try:
             return self.backtester_boundary().orders.submit_order(order)
         except OrderExecutionError as exc:

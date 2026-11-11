@@ -7,6 +7,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 # run.py reuses a backend that is already running (exit 0) or starts one in the foreground.
+# Optional: N8N_HEARTBEAT_URL and N8N_CONTROL_TOKEN for the n8n watchdog / kill switch.
+EnvironmentFile=-%h/.config/alpaca-paper-trader/n8n.env
 ExecStart=@ROOT@/.venv/bin/python @ROOT@/python_app/run.py --no-browser
 Restart=on-failure
 RestartSec=15
