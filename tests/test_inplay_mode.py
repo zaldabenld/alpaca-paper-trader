@@ -174,7 +174,7 @@ class EngineTests(unittest.TestCase):
     def test_the_stop_is_the_range_middle_and_falls_back_to_percent_without_a_pick(self) -> None:
         engine = day_engine(Broker(), [pick("HOT")], {})
         self.assertEqual(engine.position_stop_price("HOT", D("10.65"), D("10.9"), engine.config), D("10.25"))
-        self.assertEqual(engine.position_stop_price("ZZZ", D("100"), D("100"), engine.config), D("97.00"))
+        self.assertEqual(engine.position_stop_price("ZZZ", D("100"), D("100"), engine.config), D("95.00"))  # never under 5% away
 
     def test_held_pick_gets_a_broker_stop_at_the_range_middle(self) -> None:
         held = {"symbol": "HOT", "qty": "939", "qty_available": "939", "avg_entry_price": "10.65", "current_price": "10.80",
@@ -183,6 +183,61 @@ class EngineTests(unittest.TestCase):
         engine = day_engine(broker, [pick("HOT")], {"HOT": "10.80"})
         refresh(engine, ("HOT",))
         self.assertEqual([(order.side.value, order.type.value, float(order.stop_price)) for order in broker.submitted], [("sell", "stop", 10.25)])
+
+    def test_day_trades_always_sell_before_the_close_and_ignore_take_profit(self) -> None:
+        engine = day_engine(Broker(), [pick("HOT")], {}, )
+        engine.config = engine.config.model_copy(update={"flatten_before_close_minutes": 0, "take_profit_percent": D("2.5")})
+        clock = SimpleNamespace(is_open=True, timestamp=NOON.replace(hour=20, minute=55), next_close=NOON.replace(hour=21))
+        self.assertIn("selling everything 10 min before the close", engine.close_flatten_message(clock, engine.config))
+        self.assertEqual(engine.position_take_profit_price("HOT", D("10.65"), engine.config), D("0"))
+        held = {"qty": "10", "avg_entry_price": "10", "current_price": "11"}
+        self.assertEqual(engine.local_protection_exit_decision("HOT", engine.config, held, D("11"), False, True), ("", ""))
+
+    def test_a_restart_reloads_todays_picks_before_any_stop_is_checked(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "inplay_picks.json"
+            with patch.object(TraderEngine, "INPLAY_PICKS_PATH", path):
+                first = day_engine(Broker(), [pick("HOT")], {})
+                first.save_inplay_picks(date(2026, 11, 12), [pick("HOT")], 300, {"range volume": 250})
+                held = {"symbol": "HOT", "qty": "939", "qty_available": "939", "avg_entry_price": "10.65", "current_price": "10.30",
+                        "market_value": "9672", "side": "long"}
+                broker = Broker(positions=[held])
+                restarted = day_engine(broker, [], {"HOT": "10.30"})
+                restarted.inplay_picks = {}
+                restarted.inplay_picks_session = ""
+                with patch.object(restarted, "start_inplay_worker") as worker:
+                    refresh(restarted, ("HOT",))
+                worker.assert_not_called()
+        self.assertEqual(list(restarted.inplay_picks), ["HOT"])
+        # The stop placed is the range middle (10.25), so a price of 10.30 is not sold by a tighter fallback.
+        self.assertEqual([(order.side.value, order.type.value, float(order.stop_price)) for order in broker.submitted], [("sell", "stop", 10.25)])
+
+    def test_a_live_day_trade_stop_is_never_loosened_but_momentum_keeps_its_rule(self) -> None:
+        stop = {"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "10", "stop_price": "10.25",
+                "client_order_id": "apt-protect-sl-hot-1"}
+        engine = day_engine(Broker(), [], {})
+        with patch.object(engine, "cancel_open_order", return_value=True) as cancel:
+            self.assertFalse(engine.cancel_stale_protective_order(stop, D("10"), D("0"), D("10.11"), D("10.65")))
+            cancel.assert_not_called()
+        momentum = TraderEngine("momentum")
+        momentum.config = AppConfig(use_top_volume_symbols=False, symbols=["HOT"])
+        with patch.object(momentum, "cancel_open_order", return_value=True) as cancel:
+            self.assertTrue(momentum.cancel_stale_protective_order(stop, D("10"), D("0"), D("10.11"), D("10.65")))
+
+    def test_failed_loads_back_off(self) -> None:
+        engine = TraderEngine("day")
+        engine.config = AppConfig(entry_mode="inplay")
+        with patch.object(engine, "inplay_universe", side_effect=RuntimeError("down")), \
+             patch("alpaca_desktop.engine.StockHistoricalDataClient"), patch("alpaca_desktop.engine.TradingClient"):
+            engine.inplay_work(date(2026, 11, 12), True, "k", "s")
+            import time as clock
+            self.assertAlmostEqual(engine.inplay_retry_at - clock.monotonic(), 60, delta=5)
+            engine.inplay_work(date(2026, 11, 12), True, "k", "s")
+            self.assertAlmostEqual(engine.inplay_retry_at - clock.monotonic(), 120, delta=5)
+        self.assertEqual(engine.inplay_failures, 2)
 
     def test_momentum_accounts_are_untouched(self) -> None:
         engine = TraderEngine("momentum")
@@ -238,6 +293,7 @@ class WorkerTests(unittest.TestCase):
             patch("alpaca_desktop.engine.TradingClient", return_value=FakeCalendarClient()),
             patch.object(engine, "inplay_universe", return_value=["HOT", "COLD"]),
             patch.object(engine, "remember_inplay_actives"),
+            patch.object(engine, "save_inplay_picks"),
         ):
             engine.inplay_work(date(2026, 11, 12), False, "key", "secret")
             self.assertEqual(engine.inplay_picks, {})

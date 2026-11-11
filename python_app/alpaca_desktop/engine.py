@@ -133,6 +133,8 @@ MIN_EXIT_PRICE_OFFSET = Decimal("0.01")
 PRICE_INCREMENT = Decimal("0.01")
 SUB_DOLLAR_PRICE_INCREMENT = Decimal("0.0001")
 MIN_ENTRY_NOTIONAL = Decimal("1.00")
+INPLAY_DEFAULT_FLATTEN_MINUTES = 10
+INPLAY_FALLBACK_STOP_PERCENT = Decimal("5")
 TRADE_SIZE_MODES = {"percent", "notional", "exposure_slot"}
 MAX_ENTRY_REFERENCE_PREMIUM_PERCENT = Decimal("2.0")
 ASSET_CHECK_CACHE_SECONDS = 6 * 60 * 60
@@ -2107,6 +2109,7 @@ class TraderEngine:
         self.inplay_checked = 0
         self.inplay_worker: threading.Thread | None = None
         self.inplay_retry_at = 0.0
+        self.inplay_failures = 0
         self.inplay_view: dict[str, Any] = {}
         self.restore_trade_guards_from_replay()
 
@@ -2755,6 +2758,13 @@ class TraderEngine:
             if should_trade and entry_guard_detail:
                 status_message = f"New entries paused: {entry_guard_detail}"
 
+            # Day-trade mode loads today's picks (from disk after a restart) before any stop is
+            # checked, so a held pick is protected by its own range stop, not the fallback percent.
+            inplay_status = ""
+            if config.entry_mode == "inplay":
+                inplay_status = self.inplay_pass(clock, market_open)
+                entry_symbols = self.mode_entry_symbols()
+
             position_map = {str(item.get("symbol", "")).upper(): item for item in position_dicts}
             open_positions = [item for item in position_dicts if abs(decimal_value(item.get("qty"))) > Decimal("0")]
             flat_orders = self.flatten_orders(order_dicts)
@@ -2820,10 +2830,7 @@ class TraderEngine:
                         self.log(level, message)
                     stop_now = stop_now or stop_rule
 
-            allocation_status = ""
-            if config.entry_mode == "inplay":
-                allocation_status = self.inplay_pass(clock, market_open)
-                entry_symbols = self.mode_entry_symbols()
+            allocation_status = inplay_status
             if allocation_mode:
                 allocation_status = self.run_allocation_pass(
                     client, clock, account_dict, open_positions, flat_orders, closed_order_dicts, should_trade, market_open
@@ -3650,6 +3657,8 @@ class TraderEngine:
 
     def close_flatten_message(self, clock: Any, config: AppConfig) -> str:
         minutes = int(config.flatten_before_close_minutes or 0)
+        if config.entry_mode == "inplay" and minutes <= 0:
+            minutes = INPLAY_DEFAULT_FLATTEN_MINUTES  # a day trade never stays overnight
         if minutes <= 0 or not bool(getattr(clock, "is_open", False)):
             return ""
         next_close = getattr(clock, "next_close", None)
@@ -3663,6 +3672,7 @@ class TraderEngine:
     # ----- Day-trade mode (entry_mode "inplay") ------------------------------------------------
 
     INPLAY_RECENT_ACTIVES_PATH = APP_DIR / "inplay_recent_actives.json"
+    INPLAY_PICKS_PATH = APP_DIR / "inplay_picks.json"
     INPLAY_RECENT_SESSIONS = 10
     INPLAY_SIP_DELAY_MINUTES = 16
 
@@ -3736,6 +3746,51 @@ class TraderEngine:
                 continue
         return clean_symbol_list(symbols)
 
+    def save_inplay_picks(self, today: date, picks: list[inplay_logic.Pick], checked: int, rejected: dict[str, int]) -> None:
+        """Keep today's picks on disk so a restart reloads them instead of ranking again."""
+        try:
+            payload = json.loads(self.INPLAY_PICKS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload[self.account_id] = {
+            "session": today.isoformat(),
+            "checked": checked,
+            "rejected": rejected,
+            "picks": [
+                {key: str(getattr(pick, key)) for key in ("symbol", "rank", "high", "low", "open", "close", "relative_volume", "atr_percent", "dollar_volume", "stop")}
+                for pick in picks
+            ],
+        }
+        try:
+            write_private_json(self.INPLAY_PICKS_PATH, payload)
+        except OSError as exc:
+            self.log("warn", f"Day trade: could not save today's picks: {exc}")
+
+    def load_inplay_picks(self, today: date) -> bool:
+        try:
+            payload = json.loads(self.INPLAY_PICKS_PATH.read_text(encoding="utf-8"))
+            saved = payload.get(self.account_id) or {}
+            if saved.get("session") != today.isoformat():
+                return False
+            picks = [
+                inplay_logic.Pick(
+                    symbol=str(item["symbol"]).upper(),
+                    rank=int(item["rank"]),
+                    **{key: Decimal(str(item[key])) for key in ("high", "low", "open", "close", "relative_volume", "atr_percent", "dollar_volume", "stop")},
+                )
+                for item in saved.get("picks", [])
+            ]
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError, AttributeError):
+            return False
+        with self.lock:
+            self.inplay_picks = {pick.symbol: pick for pick in picks}
+            self.inplay_picks_session = today.isoformat()
+            self.inplay_checked = int(saved.get("checked") or 0)
+            self.inplay_rejected = dict(saved.get("rejected") or {})
+        return True
+
     def inplay_universe(self, today: date | None = None) -> list[str]:
         with self.lock:
             actives = list(self.top_volume_symbols)
@@ -3758,6 +3813,9 @@ class TraderEngine:
             have_picks = self.inplay_picks_session == today.isoformat()
             if not have_picks and self.inplay_picks_session and self.inplay_picks_session != today.isoformat():
                 self.inplay_picks = {}
+                self.inplay_picks_session = ""
+        if not have_picks and self.load_inplay_picks(today):
+            have_picks = True
         if market_open and (not have_history or (ready and not have_picks)):
             self.start_inplay_worker(today, ready)
         ready_text = ready_at.astimezone(MARKET_TIMEZONE).strftime("%I:%M %p ET").lstrip("0")
@@ -3827,12 +3885,16 @@ class TraderEngine:
             missing = [symbol for symbol in universe if symbol not in history]
             if missing:
                 sessions = self.inplay_previous_sessions(trading_client, today)
-                for session in sessions:
-                    ranges = self.inplay_fetch_ranges(data_client, missing, session, config.inplay_range_minutes)
+                session_ranges = [
+                    self.inplay_fetch_ranges(data_client, missing, session, config.inplay_range_minutes) for session in sessions
+                ]
+                daily = self.inplay_fetch_daily_stats(data_client, missing, today)
+                # Only a complete load is kept: a symbol with a gap in its history would rank wrongly.
+                for ranges in session_ranges:
                     for symbol in missing:
                         bar = ranges.get(symbol)
                         history.setdefault(symbol, []).append(bar.volume if bar else Decimal("0"))
-                stats.update(self.inplay_fetch_daily_stats(data_client, missing, today))
+                stats.update(daily)
                 with self.lock:
                     self.inplay_history = (today.isoformat(), history, stats)
             if not ready:
@@ -3855,14 +3917,19 @@ class TraderEngine:
                 self.inplay_checked = len(ranges)
                 actives = list(self.top_volume_symbols)
             self.remember_inplay_actives(today, actives)
+            self.save_inplay_picks(today, picks, len(ranges), rejected)
+            with self.lock:
+                self.inplay_failures = 0
             if picks:
                 self.log("info", "Day trade picks: " + "; ".join(f"{pick.symbol} ({pick.describe()})" for pick in picks))
             else:
                 self.log("info", f"Day trade: nothing in play today ({len(ranges)} checked).")
         except Exception as exc:
             with self.lock:
-                self.inplay_retry_at = time.monotonic() + 60
-            self.log("warn", f"Day trade data load failed; retrying in a minute: {exc}")
+                self.inplay_failures += 1
+                wait = min(600, 60 * 2 ** (self.inplay_failures - 1))
+                self.inplay_retry_at = time.monotonic() + wait
+            self.log("warn", f"Day trade data load failed; retrying in {wait // 60} min: {exc}")
 
     def inplay_previous_sessions(self, trading_client: Any, today: date) -> list[date]:
         calendar = trading_client.get_calendar(GetCalendarRequest(start=today - timedelta(days=40), end=today - timedelta(days=1)))
@@ -3973,7 +4040,7 @@ class TraderEngine:
         return result
 
     def inplay_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
-        for reason in (self.halt_hold_reason(symbol),):
+        for reason in (self.inverse_etf_hold_reason(symbol, config), self.halt_hold_reason(symbol)):
             if reason:
                 return reason
         with self.lock:
@@ -4225,7 +4292,9 @@ class TraderEngine:
             return finish("Waiting for the signal")
         if not (should_trade and market_open and window):
             return finish("")
-        if latch is None:
+        if latch is None and decided_by in ("weekly check", "daily check"):
+            # Only a real check decision is latched: if the signal or calendar is missing on the first
+            # pass, "keep holding" must not stick when they come back a minute later.
             self.allocation_latch = (today.isoformat(), target_regime)
 
         plan = allocation_logic.plan_allocation(
@@ -4248,25 +4317,37 @@ class TraderEngine:
                 for symbol, notional, why in plan.buys:
                     self.log("info", f"Dry run: hold mode would buy {money(notional)} of {symbol} ({why}).")
             return finish("dry run")
-        # One wave at a time: let the app's own leftover stops clear, and wait out any open order.
+        # One wave at a time: let the app's own leftover stops clear, and wait out open orders that
+        # touch this account's holdings or sets (a manual order on an unrelated symbol is ignored).
         leftovers = [order for order in open_orders if self.is_app_protective_order(order)]
         if leftovers:
             for order in leftovers:
                 self.cancel_open_order(order)
             return finish("cancelling leftover stop orders first")
-        if open_orders:
-            return finish(f"waiting for {len(open_orders)} open order(s)")
-        for symbol in [item[0] for item in plan.sells] + [item[0] for item in plan.buys]:
-            side = OrderSide.SELL if any(symbol == item[0] for item in plan.sells) else OrderSide.BUY
-            if self.order_hold_reason(symbol, side):
-                return finish("waiting for the last order to show up")
+        involved = set(risk_on) | set(risk_off) | {item.symbol for item in holdings}
+        blocking = [
+            order for order in open_orders
+            if str(order.get("symbol", "")).upper() in involved or str(order.get("client_order_id") or "").startswith("apt-")
+        ]
+        if blocking:
+            return finish(f"waiting for {len(blocking)} open order(s)")
+        # A symbol on a submit or reject hold is skipped this pass; the rest of the wave still goes.
+        sells = [item for item in plan.sells if not self.order_hold_reason(item[0], OrderSide.SELL)]
+        buys = [item for item in plan.buys if not self.order_hold_reason(item[0], OrderSide.BUY)]
+        held_back = len(plan.sells) - len(sells) + (0 if plan.sells else len(plan.buys) - len(buys))
         reason_head = f"hold mode {regime_text} ({decided_by}): {signal_text}"
         if plan.sells:
-            for symbol, qty, why in plan.sells:
+            if not sells:
+                return finish("waiting for the last order to show up")
+            self.allocation_latch = (today.isoformat(), target_regime)
+            for symbol, qty, why in sells:
                 order = self.build_allocation_order(symbol, OrderSide.SELL, qty, target_regime)
                 self.submit_allocation_order(symbol, OrderSide.SELL, qty, order, f"{reason_head}; sell: {why}", "Strategy Exit")
-            return finish(f"selling {len(plan.sells)} holding(s)")
-        for symbol, notional, why in plan.buys:
+            return finish(f"selling {len(sells)} holding(s)" + (f"; {held_back} on hold" if held_back else ""))
+        if not buys:
+            return finish("waiting for the last order to show up")
+        self.allocation_latch = (today.isoformat(), target_regime)
+        for symbol, notional, why in buys:
             price = self.current_trade_price(symbol, self.allocation_live_price(symbol) or Decimal("0"))
             qty = order_quantity(notional, price)
             if qty <= 0:
@@ -4276,7 +4357,7 @@ class TraderEngine:
             self.submit_allocation_order(
                 symbol, OrderSide.BUY, qty, order, f"{reason_head}; buy {money(notional)} {why}; order_ref={price}", "Pending Entry"
             )
-        return finish(f"buying {len(plan.buys)} holding(s)")
+        return finish(f"buying {len(buys)} holding(s)" + (f"; {held_back} on hold" if held_back else ""))
 
     def submit_allocation_order(
         self, symbol: str, side: OrderSide, qty: Decimal, order: MarketOrderRequest, reason: str, role: str
@@ -5318,9 +5399,15 @@ class TraderEngine:
             with self.lock:
                 pick = self.inplay_picks.get(symbol.strip().upper())
             if pick is not None and pick.stop > 0:
-                # The pick's own stop (range middle or low). Without today's pick (data not loaded
-                # yet after a restart) the percent stop below still protects the position.
+                # The pick's own stop (range middle or low).
                 return max(Decimal("0"), self.round_exit_price(pick.stop, ROUND_DOWN))
+            # No pick on record (picks lost after a restart): a wide percent stop still protects the
+            # position, but never one tighter than INPLAY_FALLBACK_STOP_PERCENT, so it cannot raise
+            # (and so trigger) the live range stop that was placed when the pick was known.
+            if entry_price <= 0:
+                return Decimal("0")
+            percent = max(config.stop_loss_percent, INPLAY_FALLBACK_STOP_PERCENT)
+            return max(Decimal("0"), self.round_exit_price(entry_price * (Decimal("1") - percent / Decimal("100")), ROUND_DOWN))
         if self.inverse_trend_active(symbol, config):
             # A wide stop from entry, so index noise cannot shake the hold out; the VWAP exit ends
             # it. Once the fund has been up the lock percent the profit is locked: the stop trails
@@ -5390,8 +5477,9 @@ class TraderEngine:
             self.update_position_peak(symbol, entry_price, implied_peak)
 
     def position_take_profit_price(self, symbol: str, entry_price: Decimal, config: AppConfig) -> Decimal:
-        """The profit target for a held position; none while an inverse fund is on trend hold."""
-        if self.inverse_trend_active(symbol, config):
+        """The profit target for a held position; none while an inverse fund is on trend hold, and none
+        in day-trade mode, where winners run until the stop or the sale before the close."""
+        if self.inverse_trend_active(symbol, config) or config.entry_mode == "inplay":
             return Decimal("0")
         return self.exit_prices(entry_price, config)[0]
 
@@ -5569,7 +5657,14 @@ class TraderEngine:
                 return self.cancel_open_order(order)  # raise the stop (trail ratchet or config change)
             # Lower a stop only when it is a plain base stop below entry (a settings change). A stop
             # at or above entry came from break-even/trailing and is never lowered, restart or not.
-            if stop_price > 0 and stop_price < entry_price and stop_price - stop_loss_price >= increment:
+            # Day-trade stops come from the pick's range and never loosen; a missing pick after a
+            # restart must not swap the range stop for the wider fallback.
+            if (
+                stop_price > 0
+                and stop_price < entry_price
+                and stop_price - stop_loss_price >= increment
+                and self.config.entry_mode != "inplay"
+            ):
                 return self.cancel_open_order(order)
         return False
 
@@ -5687,7 +5782,7 @@ class TraderEngine:
                 return f"local stop-loss {config.inverse_trend_stop_percent}% (gain {current_gain:.2f}%)", ""
             return "", ""
 
-        if config.take_profit_percent > 0 and current_gain >= config.take_profit_percent and not has_take_profit_order:
+        if config.take_profit_percent > 0 and config.entry_mode != "inplay" and current_gain >= config.take_profit_percent and not has_take_profit_order:
             return (
                 f"local take-profit {config.take_profit_percent}%"
                 f" (gain {current_gain:.2f}%)",

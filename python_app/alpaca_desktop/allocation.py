@@ -98,17 +98,19 @@ class AllocationPlan:
 
 
 def held_regime(holdings: list[Holding], risk_on: list[str], risk_off: list[str]) -> str:
-    """Which set the account holds now: "on", "off", "none", "mixed" (both sets) or "outside"."""
+    """Which set the account holds now: "on", "off", "mixed" (both sets) or "none".
+
+    Symbols outside both sets do not count: they are sold at the next window whatever the regime,
+    so a stray holding can never let the signal switch the portfolio mid-week.
+    """
     symbols = {item.symbol for item in holdings if item.qty > 0}
-    if not symbols:
-        return "none"
-    if symbols - set(risk_on) - set(risk_off):
-        return "outside"
     in_on = bool(symbols & set(risk_on))
     in_off = bool(symbols & set(risk_off))
     if in_on and in_off:
         return "mixed"
-    return "on" if in_on else "off"
+    if in_on:
+        return "on"
+    return "off" if in_off else "none"
 
 
 def portfolio_is_valid(

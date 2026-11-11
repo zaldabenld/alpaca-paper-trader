@@ -15,6 +15,7 @@ from .helpers import configure_test_environment
 configure_test_environment()
 
 from alpaca_desktop import allocation as A  # noqa: E402
+from alpaca_desktop import engine as engine_module  # noqa: E402
 from alpaca_desktop.engine import AppConfig, TraderEngine  # noqa: E402
 
 D = Decimal
@@ -109,7 +110,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(A.held_regime([holding("QQQ", "1")], ["QQQ"], ["GLD"]), "on")
         self.assertEqual(A.held_regime([holding("GLD", "1")], ["QQQ"], ["GLD"]), "off")
         self.assertEqual(A.held_regime([holding("QQQ", "1"), holding("GLD", "1")], ["QQQ"], ["GLD"]), "mixed")
-        self.assertEqual(A.held_regime([holding("AAPL", "1")], ["QQQ"], ["GLD"]), "outside")
+        self.assertEqual(A.held_regime([holding("AAPL", "1")], ["QQQ"], ["GLD"]), "none")  # outside symbols do not count
+        self.assertEqual(A.held_regime([holding("AAPL", "1"), holding("QQQ", "1")], ["QQQ"], ["GLD"]), "on")
 
 
 class ConfigTests(unittest.TestCase):
@@ -224,8 +226,10 @@ class EnginePassTests(unittest.TestCase):
         refresh(engine)
         client.open_orders = [{"id": "o1", "symbol": "QQQ", "side": "buy", "type": "market", "qty": "4.4",
                                "client_order_id": client.submitted[0].client_order_id}]
+        engine.order_submit_holds.clear()  # the open order alone must block, not just the submit hold
         refresh(engine)
         self.assertEqual(len(client.submitted), 2)
+        self.assertIn("waiting for 1 open order", engine.allocation_view["detail"])
 
     def test_check_day_switch_sells_first_and_buys_nothing_yet(self) -> None:
         client = FakeClient(FRIDAY_LATE, cash="20", positions=[position("IEF", "5.1579", "95"), position("GLD", "1.96", "250")])
@@ -288,6 +292,37 @@ class EnginePassTests(unittest.TestCase):
         self.assertEqual(str(requests[0].feed.value).lower(), "sip")
         end = requests[0].end if requests[0].end.tzinfo else requests[0].end.replace(tzinfo=timezone.utc)
         self.assertLessEqual(end, datetime.now(timezone.utc) - timedelta(minutes=15))
+
+    def test_a_failed_signal_on_the_check_day_does_not_lock_in_holding(self) -> None:
+        client = FakeClient(FRIDAY_LATE, cash="20", positions=[position("QQQ", "4.4545", "110"), position("SPY", "0.98", "500")])
+        engine = hold_engine(client, PRICES_DOWN)
+        with patch.object(engine, "allocation_previous_closes", return_value=None):
+            refresh(engine)  # closes request failed: no signal yet
+        self.assertEqual(client.submitted, [])
+        self.assertIsNone(engine.allocation_latch)
+        refresh(engine)  # the signal is back: QQQ is below its average on a check day
+        self.assertEqual(sorted((order.symbol, order.side.value) for order in client.submitted), [("QQQ", "sell"), ("SPY", "sell")])
+
+    def test_a_stray_holding_cannot_switch_the_portfolio_mid_week(self) -> None:
+        client = FakeClient(THURSDAY_LATE, cash="20",
+                            positions=[position("QQQ", "4.4545", "110"), position("SPY", "0.98", "500"), position("AAPL", "0.01", "200")])
+        engine = hold_engine(client, PRICES_DOWN)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("AAPL", "sell")])
+
+    def test_one_held_symbol_does_not_block_the_rest_of_the_wave(self) -> None:
+        client = FakeClient(FRIDAY_LATE, cash="20", positions=[position("IEF", "5.1579", "95"), position("GLD", "1.96", "250")])
+        engine = hold_engine(client, PRICES_UP)
+        engine.hold_rejected_order("GLD", engine_module.OrderSide.SELL, 1800)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("IEF", "sell")])
+
+    def test_a_manual_order_on_another_symbol_does_not_block(self) -> None:
+        manual = {"id": "m1", "symbol": "TSLA", "side": "buy", "type": "limit", "qty": "1", "client_order_id": "my-own-order"}
+        client = FakeClient(THURSDAY_LATE, open_orders=[manual])
+        engine = hold_engine(client, PRICES_UP)
+        refresh(engine)
+        self.assertEqual(sorted(order.symbol for order in client.submitted), ["QQQ", "SPY"])
 
     def test_momentum_mode_never_runs_the_hold_pass(self) -> None:
         client = FakeClient(THURSDAY_LATE)
