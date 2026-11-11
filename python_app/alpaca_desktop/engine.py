@@ -1787,6 +1787,14 @@ def percent_change(value: Decimal, basis: Decimal) -> Decimal:
     return ((value - basis) / basis * Decimal("100")).quantize(Decimal("0.01"))
 
 
+def cash_percent_of_equity(cash: Any, equity: Any) -> Decimal:
+    """Cash as a percent of equity: how much of the account is liquid. 0 when equity is not positive."""
+    equity_value = decimal_value(equity)
+    if equity_value <= 0:
+        return Decimal("0")
+    return (decimal_value(cash) / equity_value * Decimal("100")).quantize(Decimal("0.1"))
+
+
 def entry_profile_limits(config: AppConfig) -> dict[str, Decimal]:
     limits = dict(ENTRY_PROFILE_LIMITS.get(config.profile, ENTRY_PROFILE_LIMITS["neutral"]))
     limits["min_recent_momentum"] = config.min_recent_momentum_percent
@@ -2666,6 +2674,8 @@ class TraderEngine:
                     "equity_display": money(equity),
                     "buying_power_display": money(account_dict.get("buying_power")),
                     "cash_display": money(account_dict.get("cash")),
+                    "cash_percent_raw": str(cash_percent_of_equity(account_dict.get("cash"), equity)),
+                    "cash_percent_display": f"{cash_percent_of_equity(account_dict.get('cash'), equity)}%",
                 }
                 self.positions = [self.format_position(item) for item in position_dicts]
                 self.orders = [self.format_order(item, position_symbols) for item in flat_orders]
