@@ -392,6 +392,18 @@ class DayTapeBacktestTests(unittest.TestCase):
         self.assertEqual(summary["sizing_harness"]["starting_equity"], "5000")
         self.assertEqual(summary["sizing_harness"]["trade_percent"], "10")
 
+    def test_replay_config_forces_most_active_universe_mode(self) -> None:
+        backtest = load_backtest_module()
+        with (
+            patch.object(backtest, "AppConfig", side_effect=lambda **kw: kw),
+            patch.object(backtest, "retune_strategy_config", side_effect=lambda c: c),
+        ):
+            config = backtest.replay_config({"universe_mode": "daily_rvol"})
+            self.assertEqual(config["universe_mode"], "most_active")
+
+            config = backtest.replay_config(None, {"universe_mode": "daily_rvol"})
+            self.assertEqual(config["universe_mode"], "most_active")
+
 
 if __name__ == "__main__":
     unittest.main()

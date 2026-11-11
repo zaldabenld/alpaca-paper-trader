@@ -364,6 +364,71 @@ class LiveContractVerifierTests(unittest.TestCase):
         failed = {item["name"] for item in module.verify_payload(payload)["checks"] if not item["ok"]}
         self.assertNotIn("account_1.top_volume_universe", failed)
 
+    def daily_rvol_payload(self) -> dict[str, object]:
+        """Account 1 switched to the daily RVOL universe with a picked set."""
+        payload = deepcopy(passing_payload())
+        selected = payload["account_states"][0]["selected"]
+        selected["config"]["universe_mode"] = "daily_rvol"
+        selected["symbol_source"] = "daily_rvol"
+        selected["daily_universe"] = {
+            "status": "picked",
+            "session_date": "2026-06-24",
+            "picked_at": "09:45 ET",
+            "symbols": ["AAA", "BBB"],
+            "picked_count": 2,
+            "added_count": 0,
+        }
+        selected["trading_symbols"] = ["AAA", "BBB"] + INVERSE_SET
+        selected["trading_symbol_count"] = 7
+        payload["state"]["accounts"][0]["symbol_source"] = "daily_rvol"
+        payload["state"]["accounts"][0]["trading_symbol_count"] = 7
+        return payload
+
+    def test_daily_rvol_account_must_scan_the_picked_set_plus_the_inverse_set(self) -> None:
+        module = load_verifier_module()
+        payload = self.daily_rvol_payload()
+
+        report = module.verify_payload(payload)
+        failed = {item["name"] for item in report["checks"] if not item["ok"]}
+
+        self.assertTrue(report["ok"])
+        self.assertNotIn("account_1.top_volume_universe", failed)
+
+    def test_daily_rvol_account_must_not_lose_a_picked_symbol(self) -> None:
+        module = load_verifier_module()
+        payload = self.daily_rvol_payload()
+        selected = payload["account_states"][0]["selected"]
+        selected["trading_symbols"] = ["AAA"] + INVERSE_SET
+        selected["trading_symbol_count"] = 6
+        payload["state"]["accounts"][0]["trading_symbol_count"] = 6
+
+        report = module.verify_payload(payload)
+        failed = {item["name"] for item in report["checks"] if not item["ok"]}
+
+        self.assertFalse(report["ok"])
+        self.assertIn("account_1.top_volume_universe", failed)
+
+    def test_daily_rvol_pending_account_may_scan_only_the_inverse_set(self) -> None:
+        module = load_verifier_module()
+        payload = self.daily_rvol_payload()
+        selected = payload["account_states"][0]["selected"]
+        selected["symbol_source"] = "daily_rvol_pending"
+        selected["daily_universe"] = {
+            "status": "pending",
+            "session_date": "2026-06-24",
+            "symbols": [],
+        }
+        selected["trading_symbols"] = list(INVERSE_SET)
+        selected["trading_symbol_count"] = 5
+        payload["state"]["accounts"][0]["symbol_source"] = "daily_rvol_pending"
+        payload["state"]["accounts"][0]["trading_symbol_count"] = 5
+
+        report = module.verify_payload(payload)
+        failed = {item["name"] for item in report["checks"] if not item["ok"]}
+
+        self.assertTrue(report["ok"])
+        self.assertNotIn("account_1.top_volume_universe", failed)
+
     def test_market_stream_health_must_cover_dashboard_symbols_without_error(self) -> None:
         module = load_verifier_module()
         payload = deepcopy(passing_payload())
