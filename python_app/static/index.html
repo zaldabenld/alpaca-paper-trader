@@ -536,11 +536,11 @@
                     RSI Period
                     <input id="rsiPeriod" type="number" min="1" step="1" value="14" />
                   </label>
-                  <label data-modes="momentum orb" title="Only buy when RSI is at least this high.">
+                  <label data-modes="momentum" title="Only buy when RSI is at least this high.">
                     Buy RSI Min
                     <input id="buyRsiMin" type="number" min="0" max="100" step="0.5" value="42" />
                   </label>
-                  <label data-modes="momentum orb" title="RSI above this lowers the entry score (it does not block the buy; use Max Entry RSI for that).">
+                  <label data-modes="momentum" title="RSI above this lowers the entry score (it does not block the buy; use Max Entry RSI for that).">
                     Buy RSI Max
                     <input id="buyRsiMax" type="number" min="0" max="100" step="0.5" value="68" />
                   </label>
@@ -552,39 +552,39 @@
                     Momentum Bars
                     <input id="momentumPeriod" type="number" min="1" step="1" value="6" />
                   </label>
-                  <label data-modes="momentum orb" title="Minimum short-term price rise over the momentum bars.">
+                  <label data-modes="momentum" title="Minimum short-term price rise over the momentum bars.">
                     Min Momentum %
                     <input id="minMomentumPercent" type="number" step="0.01" value="0.08" />
                   </label>
-                  <label data-modes="momentum orb" title="Minimum rise over the last few bars.">
+                  <label data-modes="momentum" title="Minimum rise over the last few bars.">
                     Min Recent Momentum %
                     <input id="minRecentMomentumPercent" type="number" step="0.01" value="0.05" />
                   </label>
-                  <label data-modes="momentum orb" title="Minimum rise over the longer lookback.">
+                  <label data-modes="momentum" title="Minimum rise over the longer lookback.">
                     Min Long Momentum %
                     <input id="minLongMomentumPercent" type="number" step="0.01" value="0.05" />
                   </label>
-                  <label data-modes="momentum orb" title="Minimum gain since today's open.">
+                  <label data-modes="momentum" title="Minimum gain since today's open.">
                     Min Session Change %
                     <input id="minSessionChangePercent" type="number" step="0.01" value="1.35" />
                   </label>
-                  <label data-modes="momentum orb" title="Price must be at least this far above VWAP (the day's volume-weighted average price).">
+                  <label data-modes="momentum" title="Price must be at least this far above VWAP (the day's volume-weighted average price).">
                     Min VWAP Distance %
                     <input id="minVwapDistancePercent" type="number" step="0.01" value="0.05" />
                   </label>
-                  <label data-modes="momentum orb" title="Skip stocks already this far above VWAP (avoids chasing).">
+                  <label data-modes="momentum" title="Skip stocks already this far above VWAP (avoids chasing).">
                     Max VWAP Distance %
                     <input id="maxVwapDistancePercent" type="number" min="0" step="0.05" value="2.25" />
                   </label>
-                  <label data-modes="momentum orb" title="Larger drops from the day's high lower the score.">
+                  <label data-modes="momentum" title="Larger drops from the day's high lower the score.">
                     Max Session Pullback %
                     <input id="maxSessionPullbackPercent" type="number" min="0" step="0.05" value="0.9" />
                   </label>
-                  <label data-modes="momentum orb" title="Larger drops over the last few bars lower the score.">
+                  <label data-modes="momentum" title="Larger drops over the last few bars lower the score.">
                     Max Recent Pullback %
                     <input id="maxRecentPullbackPercent" type="number" min="0" step="0.05" value="0.55" />
                   </label>
-                  <label data-modes="momentum orb" title="Wait until price has dipped at least this much from the day's high before buying.">
+                  <label data-modes="momentum" title="Wait until price has dipped at least this much from the day's high before buying.">
                     Min Session Pullback % (0 = off)
                     <input id="minSessionPullbackPercent" type="number" min="0" step="0.05" value="0" />
                   </label>
@@ -672,7 +672,7 @@
                       <option value="range_low">Range low</option>
                     </select>
                   </label>
-                  <label data-modes="momentum orb" title="Never buy when RSI is above this.">
+                  <label data-modes="momentum" title="Never buy when RSI is above this.">
                     Max Entry RSI (0 = off)
                     <input id="maxEntryRsi" type="number" min="0" max="100" step="1" value="0" />
                   </label>
@@ -680,7 +680,7 @@
                     Max Buys per Symbol per Day (0 = off)
                     <input id="maxEntriesPerSymbolPerDay" type="number" min="0" step="1" value="0" />
                   </label>
-                  <label data-modes="momentum orb" class="check-row" title="Buy only while the price is still rising: the last 1-minute bar closed at or above the one before it, and the latest trade is not below that earlier close.">
+                  <label data-modes="momentum" class="check-row" title="Buy only while the price is still rising: the last 1-minute bar closed at or above the one before it, and the latest trade is not below that earlier close.">
                     <input id="requireRisingPrice" type="checkbox" checked />
                     <span>Require rising price</span>
                   </label>
@@ -692,7 +692,7 @@
                     Seconds Between New Buys (0 = off)
                     <input id="entrySpacingSeconds" type="number" min="0" max="600" step="5" value="0" />
                   </label>
-                  <label data-modes="momentum orb" title="When RSI or SMI is near its top, require at least this much momentum.">
+                  <label data-modes="momentum" title="When RSI or SMI is near its top, require at least this much momentum.">
                     Late Momentum Floor %
                     <input id="lateMomentumFloorPercent" type="number" min="0" step="0.05" value="0.5" />
                   </label>
@@ -700,7 +700,7 @@
                     SMI Bars
                     <input id="smiPeriod" type="number" min="1" step="1" value="10" />
                   </label>
-                  <label data-modes="momentum orb" title="Minimum SMI (stochastic momentum) reading.">
+                  <label data-modes="momentum" title="Minimum SMI (stochastic momentum) reading.">
                     Min SMI
                     <input id="minSmi" type="number" min="-100" max="100" step="0.5" value="40" />
                   </label>
@@ -712,7 +712,7 @@
                     Buy Flow Ratio
                     <input id="minBuyVolumeRatio" type="number" min="0" max="1" step="0.01" value="0.5" />
                   </label>
-                  <label data-modes="momentum orb" title="After a losing exit, a re-buy needs this many extra score points.">
+                  <label data-modes="momentum" title="After a losing exit, a re-buy needs this many extra score points.">
                     Re-entry Boost
                     <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="12" />
                   </label>
@@ -752,15 +752,15 @@
                     Vol Period
                     <input id="volumePeriod" type="number" min="1" step="1" value="20" />
                   </label>
-                  <label data-modes="momentum orb" title="Current volume must be this many times the average.">
+                  <label data-modes="momentum" title="Current volume must be this many times the average.">
                     Vol Mult
                     <input id="volumeMultiplier" type="number" min="0" step="0.05" value="1.5" />
                   </label>
-                  <label data-modes="momentum orb" title="Skip stocks with lower average volume than this (0 = off).">
+                  <label data-modes="momentum" title="Skip stocks with lower average volume than this (0 = off).">
                     Min Avg Vol
                     <input id="minAvgVolume" type="number" min="0" step="1000" value="0" />
                   </label>
-                  <label data-modes="momentum orb" title="A stock with this 1-minute ATR% gets the flat VWAP and session caps; one twice as volatile gets twice the room (0 = off).">
+                  <label data-modes="momentum" title="A stock with this 1-minute ATR% gets the flat VWAP and session caps; one twice as volatile gets twice the room (0 = off).">
                     ATR Extension Reference % (0 = off)
                     <input id="extensionAtrReferencePercent" type="number" min="0" max="5" step="0.05" value="0" />
                   </label>
@@ -810,8 +810,8 @@
                 </div>
               </div>
 
-              <div class="compact-section" data-modes="momentum orb">
-                <h3>Score Weights (momentum and ORB)</h3>
+              <div class="compact-section" data-modes="momentum">
+                <h3>Score Weights (momentum)</h3>
                 <small class="helper-text">How much each signal adds to the entry score. Penalties subtract. 0 turns a signal off.</small>
                 <input id="scoreWeightPullbackPenalty" type="hidden" value="0" />
                 <input id="scoreWeightOverboughtPenalty" type="hidden" value="0" />

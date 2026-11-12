@@ -4138,7 +4138,6 @@ class TraderEngine:
             volume_full_at=config.mover_volume_full_at,
         )
 
-
     def mover_price_change(self, symbol: str, price: Decimal | None, minutes: int) -> Decimal | None:
         """Percent change of price against the session bar from `minutes` ago (or the session's
         first bar while the session is younger than that)."""

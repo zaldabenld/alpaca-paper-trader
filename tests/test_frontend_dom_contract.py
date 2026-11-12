@@ -123,9 +123,10 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertIsNotNone(movers)
         for element_id in ("moverWeightVolume", "moverWeightRsi", "moverVolumeFullAt", "moverMinDollarVolumeMillions"):
             self.assertIn(f'id="{element_id}"', movers.group(1))
-        self.assertIn('<div class="compact-section" data-modes="momentum orb">\n                <h3>Score Weights (momentum and ORB)</h3>', self.index_html)
+        self.assertIn('<div class="compact-section" data-modes="momentum">\n                <h3>Score Weights (momentum)</h3>', self.index_html)
         for element_id in ("buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice"):
-            self.assertRegex(self.index_html, rf'(?s)<label data-modes="momentum orb"[^>]*>(?:(?!</label>).)*id="{element_id}"', )
+            self.assertRegex(self.index_html, rf'(?s)<label data-modes="momentum"[^>]*>(?:(?!</label>).)*id="{element_id}"', )
+        self.assertRegex(self.index_html, r'(?s)<label data-modes="momentum orb"[^>]*>(?:(?!</label>).)*id="minBuyVolumeRatio"')  # ORB's order-flow check
         self.assertRegex(self.index_html, r'(?s)<label data-modes="momentum orb movers"[^>]*>(?:(?!</label>).)*id="minEntryScore"')
         self.assertIn("function syncEntryModeFields()", self.app_js)
         self.assertIn('fields.entryMode.addEventListener("change", syncEntryModeFields)', self.app_js)
