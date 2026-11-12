@@ -4134,6 +4134,7 @@ class TraderEngine:
 
     MOVERS_PATH = APP_DIR / "movers_volume.json"
     MOVERS_REFRESH_SECONDS = 150
+    MOVERS_STALE_SECONDS = 10 * 60
 
     def mover_weights(self, config: AppConfig) -> movers_logic.Weights:
         return movers_logic.Weights(
@@ -4187,6 +4188,10 @@ class TraderEngine:
         with self.lock:
             relative = self.mover_volume.get(clean)
             stat = self.mover_stats.get(clean)
+            volume_age = time.monotonic() - self.mover_volume_at
+        if volume_age > self.MOVERS_STALE_SECONDS:
+            # The volume worker has not succeeded for a while: an old reading earns no points.
+            relative = None
         price = self.latest_stream_price(clean) or snapshot.price
         return movers_logic.Readings(
             relative_volume=relative,
@@ -4232,6 +4237,17 @@ class TraderEngine:
                 f"Hold (movers: trades ${stat.dollar_volume / Decimal('1000000'):.0f}M a day, "
                 f"under ${config.mover_min_dollar_volume_millions:.0f}M)"
             )
+        # One buy per stock per day unless the account sets its own cap: a stock that just stopped
+        # out would otherwise be bought straight back while it still scores.
+        daily_cap = config.max_entries_per_symbol_per_day if config.max_entries_per_symbol_per_day > 0 else 1
+        with self.lock:
+            entries_today = self.entries_today_by_symbol.get(clean, 0)
+        if entries_today >= daily_cap:
+            return f"Hold (movers: bought {entries_today}x today)"
+        if readings.relative_volume is None:
+            # Volume carries the most weight; without a current reading the score would be a
+            # price-only score, so wait for it (first readable about 09:51 ET, then every few minutes).
+            return "Hold (movers: volume reading not in yet)"
         result = movers_logic.score(readings, self.mover_weights(config))
         with self.lock:
             self.mover_scores[clean] = result
@@ -4356,7 +4372,7 @@ class TraderEngine:
             missing = [symbol for symbol in symbols if symbol not in known]
             if missing:
                 trading_client = TradingClient(api_key, secret_key, paper=True)
-                sessions = self.inplay_previous_sessions(trading_client, today)
+                sessions = self.mover_previous_sessions(trading_client, today)
                 per_symbol: dict[str, list[list[float]]] = {symbol: [] for symbol in missing}
                 for session in sessions:
                     bars = self.mover_fetch_volume(data_client, missing, session, None)
@@ -4401,6 +4417,21 @@ class TraderEngine:
                 wait = min(600, 60 * 2 ** (self.mover_failures - 1))
                 self.mover_retry_at = time.monotonic() + wait
             self.log("warn", f"Movers volume data load failed; retrying in {wait // 60} min: {exc}")
+
+    def mover_previous_sessions(self, trading_client: Any, today: date) -> list[date]:
+        """The last full sessions before today. Half days are left out: their flat afternoon would
+        make every normal afternoon look like heavy volume for weeks."""
+        calendar = trading_client.get_calendar(GetCalendarRequest(start=today - timedelta(days=45), end=today - timedelta(days=1)))
+        sessions: list[date] = []
+        for item in calendar or []:
+            value = getattr(item, "date", None)
+            if isinstance(value, datetime):
+                value = value.date()
+            close = getattr(item, "close", None)
+            close_hour = getattr(close, "hour", 16)
+            if isinstance(value, date) and value < today and close_hour >= 16:
+                sessions.append(value)
+        return sorted(sessions)[-movers_logic.PROFILE_SESSIONS:]
 
     def mover_fetch_volume(
         self, data_client: Any, symbols: list[str], session: date, end: datetime | None
@@ -5875,8 +5906,10 @@ class TraderEngine:
                 )
             elif config.entry_mode == "movers":
                 if stop_price > entry_price:
-                    distance = self.mover_stop_distance(symbol, config)
-                    implied_peak = stop_price / (Decimal("1") - distance / Decimal("100"))
+                    # Use the smallest stop distance: the real one is at least that, so the stop
+                    # worked out from this peak can never sit above the stop that is already live
+                    # (not even when the stock's daily range only loads later).
+                    implied_peak = stop_price / (Decimal("1") - config.mover_stop_min_percent / Decimal("100"))
             elif config.profit_trail_drop_percent > 0 and stop_price > entry_price:
                 implied_peak = stop_price / (Decimal("1") - config.profit_trail_drop_percent / Decimal("100"))
             elif config.breakeven_at_percent > 0:

@@ -75,7 +75,12 @@ class Score:
     parts: tuple[tuple[str, Decimal], ...]
 
     def describe(self) -> str:
-        return ", ".join(f"{label} +{points:.0f}" for label, points in self.parts if points >= Decimal("0.5"))
+        """The points each reading earned. Volume is always shown, even at zero, since it carries the most."""
+        return ", ".join(
+            f"{label} +{points:.0f}"
+            for index, (label, points) in enumerate(self.parts)
+            if index == 0 or points >= Decimal("0.5")
+        )
 
 
 def _fraction(value: Decimal | None, low: Decimal, high: Decimal) -> Decimal:

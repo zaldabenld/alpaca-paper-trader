@@ -179,6 +179,22 @@ class EntryTests(unittest.TestCase):
         engine.mover_stats = {"HOT": inplay_logic.DailyStats(atr_percent=D("8"), dollar_volume=D("3000000"))}
         self.assertIn("trades $3M a day, under $20M", hold(engine))
 
+    def test_a_volume_reading_the_worker_could_not_refresh_earns_no_points(self) -> None:
+        engine = movers_engine()
+        self.assertEqual(hold(engine), "")
+        engine.mover_volume_at = clock_module.monotonic() - 11 * 60
+        self.assertIn("volume reading not in yet", hold(engine))
+
+    def test_no_volume_reading_waits_and_a_stock_is_bought_once_a_day(self) -> None:
+        engine = movers_engine()
+        engine.mover_volume = {}
+        self.assertIn("volume reading not in yet", hold(engine))
+        engine = movers_engine()
+        engine.entries_today_by_symbol = {"HOT": 1}
+        self.assertIn("bought 1x today", hold(engine))
+        engine.config = engine.config.model_copy(update={"max_entries_per_symbol_per_day": 2})
+        self.assertEqual(hold(engine), "")
+
     def test_candidate_carries_the_weighted_score(self) -> None:
         engine = movers_engine()
         with patch.object(engine, "asset_tradeability_hold_reason", return_value=""):
@@ -224,12 +240,32 @@ class StopTests(unittest.TestCase):
             cancel.assert_not_called()
             self.assertTrue(engine.cancel_stale_protective_order(live, D("10"), D("0"), D("103.00"), D("100")))  # raising is fine
 
+    def test_daily_range_loading_late_never_lifts_the_stop_over_the_live_one(self) -> None:
+        # A stop at 101 is live on a position bought at 100 and the stock's daily range is not on
+        # record yet. When it loads (a 1.4% stop distance) the stop must not jump above the price.
+        engine = movers_engine()
+        engine.mover_stats = {}
+        live = [{"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "10", "stop_price": "101.00",
+                 "client_order_id": "apt-protect-sl-hot-1"}]
+        engine.seed_peak_from_live_stops("HOT", D("100"), live, engine.config)
+        engine.mover_stats = {"HOT": inplay_logic.DailyStats(atr_percent=D("4"), dollar_volume=D("90000000"))}
+        engine.seed_peak_from_live_stops("HOT", D("100"), live, engine.config)
+        stop = engine.position_stop_price("HOT", D("100"), D("101.50"), engine.config)
+        self.assertLessEqual(stop, D("101.00"))
+        with patch.object(engine, "cancel_open_order", return_value=True) as cancel:
+            self.assertFalse(engine.cancel_stale_protective_order(live[0], D("10"), D("0"), stop, D("100")))
+            cancel.assert_not_called()
+
     def test_restart_reads_the_peak_back_from_a_live_trailed_stop(self) -> None:
         engine = movers_engine()
         live = [{"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "10", "stop_price": "103.00",
                  "client_order_id": "apt-protect-sl-hot-1"}]
         engine.seed_peak_from_live_stops("HOT", D("100"), live, engine.config)
-        self.assertGreaterEqual(engine.position_stop_price("HOT", D("100"), D("101"), engine.config), D("102.75"))
+        # The peak is read back conservatively, so the computed stop is at or under the live one
+        # (which is then kept), and well above the first stop at 97.20.
+        stop = engine.position_stop_price("HOT", D("100"), D("101"), engine.config)
+        self.assertLessEqual(stop, D("103.00"))
+        self.assertGreaterEqual(stop, D("101.00"))
 
 
 def refresh(engine: TraderEngine) -> None:
@@ -284,11 +320,15 @@ class RefreshTests(unittest.TestCase):
 
 
 class FakeCalendar:
+    """Weekdays are sessions; 2026-11-10 closes at 13:00 (a half day)."""
+
     def get_calendar(self, request: Any) -> list[Any]:
+        from datetime import time as day_time
+
         days, day = [], request.start
         while day <= request.end:
             if day.weekday() < 5:
-                days.append(SimpleNamespace(date=day))
+                days.append(SimpleNamespace(date=day, close=day_time(13, 0) if day == date(2026, 11, 10) else day_time(16, 0)))
             day += timedelta(days=1)
         return days
 
@@ -347,6 +387,10 @@ class WorkerTests(unittest.TestCase):
             self.assertNotIn("THIN", engine.mover_volume)
             self.assertEqual(engine.mover_stats["HOT"].atr_percent, D("6"))
             self.assertTrue(all(str(request.feed.value).lower() == "sip" for request in data.requests))
+            asked = {(request.start if request.start.tzinfo else request.start.replace(tzinfo=timezone.utc)).date() for request in data.requests
+                     if not str(request.timeframe.unit.value).lower().startswith("day")}
+            self.assertNotIn(date(2026, 11, 10), asked)  # the half day is left out of the usual-volume profile
+            self.assertEqual(len(asked), 15)             # 14 full sessions plus today
             todays = [request for request in data.requests if (request.start if request.start.tzinfo else request.start.replace(tzinfo=timezone.utc)).date() == date(2026, 11, 12)
                       and not str(request.timeframe.unit.value).lower().startswith("day")]
             end = todays[-1].end if todays[-1].end.tzinfo else todays[-1].end.replace(tzinfo=timezone.utc)
