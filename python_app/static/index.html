@@ -595,6 +595,7 @@
                       <option value="orb">Opening-range breakout</option>
                       <option value="allocation">Buy and hold: index with trend switch</option>
                       <option value="inplay">Day trade: stocks-in-play breakout</option>
+                      <option value="movers">Market movers: weighted score (no RSI or extension vetoes)</option>
                     </select>
                   </label>
                   <label title="Opening-range breakout only: the range is the high/low of this many minutes after 9:30 ET.">
@@ -670,6 +671,54 @@
                       <option value="range_mid" selected>Range middle</option>
                       <option value="range_low">Range low</option>
                     </select>
+                  </label>
+                  <label title="Movers mode: points for today's volume against the stock's usual volume by this time of day.">
+                    Movers: Volume Weight
+                    <input id="moverWeightVolume" type="number" min="0" max="100" step="1" value="45" />
+                  </label>
+                  <label title="Movers mode: points for the price move over the last 30 minutes.">
+                    Movers: 30-Minute Move Weight
+                    <input id="moverWeightHalfHourMove" type="number" min="0" max="100" step="1" value="15" />
+                  </label>
+                  <label title="Movers mode: points for how far the price is above VWAP.">
+                    Movers: Above VWAP Weight
+                    <input id="moverWeightVwap" type="number" min="0" max="100" step="1" value="15" />
+                  </label>
+                  <label title="Movers mode: points for the price move over the last 5 minutes.">
+                    Movers: 5-Minute Move Weight
+                    <input id="moverWeightFiveMinMove" type="number" min="0" max="100" step="1" value="10" />
+                  </label>
+                  <label title="Movers mode: points for stocks with a wide average daily range.">
+                    Movers: Daily Range Weight
+                    <input id="moverWeightRange" type="number" min="0" max="100" step="1" value="10" />
+                  </label>
+                  <label title="Movers mode: points for the move since the open.">
+                    Movers: Session Move Weight
+                    <input id="moverWeightSession" type="number" min="0" max="100" step="1" value="5" />
+                  </label>
+                  <label title="Movers mode: points for a high RSI. RSI is only ever a weight here, never a ceiling.">
+                    Movers: RSI Weight
+                    <input id="moverWeightRsi" type="number" min="0" max="100" step="1" value="0" />
+                  </label>
+                  <label title="Movers mode: volume this many times the usual earns the full volume points.">
+                    Movers: Full Volume Points At (x usual)
+                    <input id="moverVolumeFullAt" type="number" min="1.5" max="50" step="0.5" value="5" />
+                  </label>
+                  <label title="Movers mode: 20-day average dollars traded per day, in millions.">
+                    Movers: Min $ Volume (millions)
+                    <input id="moverMinDollarVolumeMillions" type="number" min="0" step="5" value="20" />
+                  </label>
+                  <label title="Movers mode: the stop sits this fraction of the stock's average daily range below the buy.">
+                    Movers: Stop (fraction of daily range)
+                    <input id="moverStopAtrFraction" type="number" min="0.05" max="2" step="0.05" value="0.35" />
+                  </label>
+                  <label title="Movers mode: the stop is never closer than this.">
+                    Movers: Stop Min %
+                    <input id="moverStopMinPercent" type="number" min="0.25" max="20" step="0.25" value="1.25" />
+                  </label>
+                  <label title="Movers mode: the stop is never further than this.">
+                    Movers: Stop Max %
+                    <input id="moverStopMaxPercent" type="number" min="0.25" max="25" step="0.25" value="6" />
                   </label>
                   <label title="Never buy when RSI is above this.">
                     Max Entry RSI (0 = off)

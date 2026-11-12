@@ -86,6 +86,41 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertIn("entry_mode: fields.entryMode.value", self.app_js)
         self.assertIn('entry_mode: "momentum"', self.app_js)
 
+    def test_movers_controls_are_wired(self) -> None:
+        ids = (
+            "moverWeightVolume",
+            "moverWeightHalfHourMove",
+            "moverWeightVwap",
+            "moverWeightFiveMinMove",
+            "moverWeightRange",
+            "moverWeightSession",
+            "moverWeightRsi",
+            "moverVolumeFullAt",
+            "moverMinDollarVolumeMillions",
+            "moverStopAtrFraction",
+            "moverStopMinPercent",
+            "moverStopMaxPercent",
+        )
+        keys = (
+            "mover_weight_volume",
+            "mover_weight_half_hour_move",
+            "mover_weight_vwap",
+            "mover_weight_five_min_move",
+            "mover_weight_range",
+            "mover_weight_session",
+            "mover_weight_rsi",
+            "mover_volume_full_at",
+            "mover_min_dollar_volume_millions",
+            "mover_stop_atr_fraction",
+            "mover_stop_min_percent",
+            "mover_stop_max_percent",
+        )
+        for element_id in ids:
+            self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
+        self.assertIn('<option value="movers"', self.index_html)
+        for key in keys:
+            self.assertIn(f'"{key}"', self.app_js)
+
     def test_hold_and_day_trade_controls_are_wired(self) -> None:
         hold_ids = (
             "allocationRiskOnSymbols",
