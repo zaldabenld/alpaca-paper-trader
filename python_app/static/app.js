@@ -145,6 +145,7 @@ const appFields = {
 const els = {
   dailyUniverseStatus: document.querySelector("#dailyUniverseStatus"),
   statusText: document.querySelector("#statusText"),
+  watchdogStatus: document.querySelector("#watchdogStatus"),
   runtimeHealthBanner: document.querySelector("#runtimeHealthBanner"),
   runtimeHealthTitle: document.querySelector("#runtimeHealthTitle"),
   runtimeHealthText: document.querySelector("#runtimeHealthText"),
@@ -1952,7 +1953,24 @@ function renderRuntimeNote(text) {
   els.runtimeNote.hidden = !text;
 }
 
+function renderWatchdogStatus(watchdog) {
+  const labels = {
+    disabled: "Off",
+    waiting: "Waiting for n8n",
+    unreachable: "n8n unreachable",
+    halted: "Trading halted",
+    connected: "Connected",
+  };
+  const label = labels[watchdog?.status];
+  els.watchdogStatus.hidden = !label;
+  const text = label
+    ? `Watchdog: ${label}${watchdog.blocks_orders ? " · order changes paused" : ""}`
+    : "";
+  if (els.watchdogStatus.textContent !== text) els.watchdogStatus.textContent = text;
+}
+
 function renderRuntimeHealth(health) {
+  renderWatchdogStatus(health?.watchdog);
   runtimeHealth = health || null;
   runtimeStale = Boolean(health && health.current === false);
   if (!els.runtimeHealthBanner || !els.runtimeHealthText) return;
@@ -1977,6 +1995,7 @@ function renderRuntimeHealth(health) {
 }
 
 function renderRuntimeHealthError(message) {
+  renderWatchdogStatus(null);
   runtimeStale = true;
   if (els.runtimeHealthBanner && els.runtimeHealthText) {
     if (els.runtimeHealthTitle) els.runtimeHealthTitle.textContent = "Runtime health unavailable";

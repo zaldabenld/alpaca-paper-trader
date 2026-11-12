@@ -32,7 +32,8 @@ Use **Purge Selected** when strategy changes require a clean run:
 
 ## Restart Behavior During Paper Testing
 
-- `launch-alpaca-paper-trader.sh --install-service` installs a systemd user service that starts the backend at boot (the user has linger enabled, so no login is needed). Accounts with **Auto-connect** and **Auto-start trading** on then trade from the open without anyone opening the window. The stop-protection timer still covers the case where the backend is not running.
+- `launch-alpaca-paper-trader.sh --install-service` installs a systemd user service that starts the backend at boot (the user has linger enabled, so no login is needed). Accounts with **Auto-connect** and **Auto-start trading** on then trade from the open without anyone opening the window. The desktop launcher uses the same service when it is installed for that checkout. To switch from an existing standalone instance, stop it and reopen the desktop app. The stop-protection timer still covers the case where the backend is not running.
+- A backend configured for the n8n watchdog waits for the first successful heartbeat before making order changes. During an outage after the first reply, it keeps the last received halt state. The app header shows the watchdog status and whether it blocks order changes.
 
 - Do not disable trading on restart unless the user explicitly asks to pause/stop trading or a change is dangerous to run immediately.
 - When restarting the local app during active paper testing, preserve the previous trading state and restart selected accounts that were running before the restart.

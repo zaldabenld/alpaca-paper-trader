@@ -42,8 +42,8 @@ def main() -> int:
         return 0
     if HEARTBEAT.enabled:
         HEARTBEAT.beat_once(source="probe")  # read the kill switch without counting as a live app beat
-        if HEARTBEAT.halted:
-            log("Trading halted by the n8n kill switch; protect job sends no orders.")
+        if HEARTBEAT.blocks_orders:
+            log(f"n8n watchdog is {HEARTBEAT.status()}; protect job sends no orders.")
             return 0
     load_saved_settings_to_manager()
     for engine in manager.list_engines():

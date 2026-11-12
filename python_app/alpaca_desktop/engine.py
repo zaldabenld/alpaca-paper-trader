@@ -14,6 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from alpaca.common.enums import Sort
+from alpaca.common.exceptions import APIError
 from alpaca.data.enums import Adjustment, DataFeed, MostActivesBy
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.news import NewsClient
@@ -2386,7 +2387,7 @@ class TraderEngine:
 
     def submit_order_request(self, order: Any) -> Any:
         if trading_halted():
-            raise TradingHaltedError("Trading halted by the n8n kill switch; order not sent")
+            raise TradingHaltedError("n8n watchdog is blocking order changes")
         try:
             return self.backtester_boundary().orders.submit_order(order)
         except OrderExecutionError as exc:
@@ -2400,6 +2401,8 @@ class TraderEngine:
             raise
 
     def cancel_order_request(self, order_id: str) -> None:
+        if trading_halted():
+            raise TradingHaltedError("n8n watchdog is blocking order changes")
         try:
             self.backtester_boundary().orders.cancel_order_by_id(order_id)
         except OrderExecutionError as exc:
@@ -2518,6 +2521,8 @@ class TraderEngine:
         self.refresh(run_strategy=False)
 
     def purge_account(self) -> None:
+        if trading_halted():
+            raise TradingHaltedError("n8n watchdog is blocking order changes")
         client = self.require_trading_client()
         with self.lock:
             self.trading_enabled = False
@@ -2791,7 +2796,12 @@ class TraderEngine:
             manage_exits = bool(config.use_bracket_orders and not config.dry_run and not allocation_mode)
             loss_breached = False if allocation_mode else self.evaluate_daily_loss_limit(config, account_dict, session_date)
             status_message = ""
-            if should_trade and config.market_hours_only and not market_open:
+            watchdog_blocked = trading_halted()
+            if watchdog_blocked:
+                should_trade = False
+                manage_exits = False
+                status_message = "Order changes paused by n8n watchdog"
+            elif should_trade and config.market_hours_only and not market_open:
                 should_trade = False
                 status_message = "Market closed; auto trading paused by setting"
             opening_guard_detail = "" if allocation_mode else self.entry_open_guard_message(clock, config)
@@ -2842,7 +2852,7 @@ class TraderEngine:
                 flatten_reason = "daily loss limit flatten"
             elif close_flatten_detail:
                 flatten_reason = "flatten before close"
-            if flatten_reason and market_open and not config.dry_run:
+            if flatten_reason and market_open and not config.dry_run and not watchdog_blocked:
                 flatten_events, flattened_symbols = self.flatten_all_positions(position_map, flat_orders, flatten_reason)
                 for level, message in flatten_events:
                     self.log(level, message)
@@ -3007,6 +3017,8 @@ class TraderEngine:
                 if stop_now:
                     self.trading_enabled = False
                     self.status = "Auto trading stopped by risk rule"
+                elif watchdog_blocked:
+                    self.status = status_message
                 elif loss_breached:
                     self.status = f"Daily loss limit hit: {self.daily_loss_detail}"
                 elif close_flatten_detail:
@@ -5575,6 +5587,8 @@ class TraderEngine:
         events: list[tuple[str, str]] = []
         handled: set[str] = set()
         for symbol, position in sorted(position_map.items()):
+            if trading_halted():
+                break
             raw_qty = decimal_value(position.get("qty"))
             if raw_qty <= 0 or str(position.get("side") or "long").lower() == "short":
                 continue  # long-only bot: never "flatten" a short by selling more
@@ -5621,7 +5635,14 @@ class TraderEngine:
             ):
                 events.append(("warn", f"Waiting for {symbol} order cancellation before {reason}."))
                 continue
-            events.extend(self.submit_exit_order(symbol, qty, self.snapshot(symbol), reason))
+            # A stop can fill during cancellation or between the position and order snapshots.
+            fresh_qty = self.fresh_sellable_qty(symbol)
+            if fresh_qty is None:
+                events.append(("warn", f"Waiting for a fresh {symbol} position before {reason}."))
+                continue
+            qty = min(qty, fresh_qty)
+            if qty > 0:
+                events.extend(self.submit_exit_order(symbol, qty, self.snapshot(symbol), reason))
         return events, handled
 
     def ensure_offhours_stop(
@@ -6750,9 +6771,11 @@ class TraderEngine:
             return None
         try:
             fresh = model_dict(getter(symbol))
+        except APIError as exc:
+            return Decimal("0") if exc.status_code == 404 else None
         except Exception:
             return None
-        if not fresh or decimal_value(fresh.get("qty")) <= 0:
+        if not fresh or decimal_value(fresh.get("qty")) <= 0 or str(fresh.get("side", "")).lower() == "short":
             return Decimal("0") if fresh else None
         return self.sellable_qty(fresh)
 

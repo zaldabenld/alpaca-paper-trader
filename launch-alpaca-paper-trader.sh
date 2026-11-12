@@ -16,6 +16,7 @@ INSTANCE="$APP_DATA/instance.json"
 PORT="${ALPACA_TRADER_PORT:-8765}"
 URL="http://127.0.0.1:$PORT"
 DESKTOP_ID="alpaca-paper-trader"
+BACKEND_SERVICE="alpaca-paper-trader.service"
 
 fail() {
     command -v notify-send >/dev/null && notify-send -i dialog-error "Alpaca Paper Trader" "$1"
@@ -32,7 +33,27 @@ instance_pid() {
     "$PYTHON" -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("pid") or 0))' "$INSTANCE" 2>/dev/null || true
 }
 
+uses_managed_backend() {
+    # Explicit data-directory or port overrides are for standalone instances, including worktrees.
+    [ -z "${LOCALAPPDATA:-}" ] && [ -z "${ALPACA_TRADER_PORT:-}" ] &&
+        command -v systemctl >/dev/null &&
+        [[ "$(systemctl --user show -p ExecStart --value "$BACKEND_SERVICE" 2>/dev/null)" == *"$ROOT/python_app/run.py --no-browser"* ]]
+}
+
+managed_backend_healthy() {
+    local pid
+    pid="$(systemctl --user show -p MainPID --value "$BACKEND_SERVICE")" || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    curl -fsS --max-time 1 "$URL/api/health" 2>/dev/null |
+        "$PYTHON" -c 'import json, sys; sys.exit(str(json.load(sys.stdin).get("pid")) != sys.argv[1])' "$pid" 2>/dev/null
+}
+
 stop_backend() {
+    if uses_managed_backend && systemctl --user is-active --quiet "$BACKEND_SERVICE"; then
+        systemctl --user stop "$BACKEND_SERVICE"
+        return
+    fi
+
     local pid
     pid="$(instance_pid)"
     # Only signal the pid if it is still this checkout's backend, not a reused pid.
@@ -133,12 +154,23 @@ esac
 
 mkdir -p "$APP_DATA"
 chmod 700 "$APP_DATA"
-# run.py reuses a current backend, restarts a stale one, or starts a new one.
-setsid "$PYTHON" "$ROOT/python_app/run.py" --no-browser >>"$APP_DATA/launcher.log" 2>&1 &
-
-for _ in $(seq 1 60); do
-    healthy && break
-    sleep 0.5
-done
-healthy || fail "Backend did not start. See $APP_DATA/launcher.log"
+if uses_managed_backend; then
+    if ! systemctl --user is-active --quiet "$BACKEND_SERVICE" && healthy; then
+        fail "Another backend is listening on port $PORT. Stop it before starting the configured service."
+    fi
+    systemctl --user start "$BACKEND_SERVICE" || fail "Could not start $BACKEND_SERVICE."
+    for _ in $(seq 1 60); do
+        managed_backend_healthy && break
+        sleep 0.5
+    done
+    managed_backend_healthy || fail "Managed backend did not start. See the user journal for $BACKEND_SERVICE."
+else
+    # Standalone mode is used on desktops without an installed user service.
+    setsid "$PYTHON" "$ROOT/python_app/run.py" --no-browser >>"$APP_DATA/launcher.log" 2>&1 &
+    for _ in $(seq 1 60); do
+        healthy && break
+        sleep 0.5
+    done
+    healthy || fail "Backend did not start. See $APP_DATA/launcher.log"
+fi
 open_window

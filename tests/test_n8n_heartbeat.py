@@ -65,6 +65,23 @@ class HeartbeatTests(unittest.TestCase):
         self.assertTrue(beat.halted)
         self.assertIn("unexpected", beat.last_error)
 
+    def test_configured_process_waits_for_valid_initial_reply(self) -> None:
+        poster = FakePoster(OSError("down"), {"ok": False, "halt": False}, {"ok": True, "halt": False}, OSError("down"))
+        beat = hb.N8nHeartbeat("https://n8n/h", "secret", poster=poster)
+        self.assertEqual(beat.status(), "waiting")
+        self.assertTrue(beat.blocks_orders)
+        self.assertIsNone(beat.beat_once())
+        self.assertEqual(beat.status(), "unreachable")
+        self.assertTrue(beat.blocks_orders)
+        self.assertIsNone(beat.beat_once())
+        self.assertTrue(beat.blocks_orders)
+        self.assertFalse(beat.beat_once())
+        self.assertEqual(beat.status(), "connected")
+        self.assertFalse(beat.blocks_orders)
+        self.assertIsNone(beat.beat_once())
+        self.assertEqual(beat.status(), "unreachable")
+        self.assertFalse(beat.blocks_orders)
+
     def test_probe_source(self) -> None:
         poster = FakePoster({"ok": True, "halt": False})
         beat = hb.N8nHeartbeat("https://n8n/h", "secret", poster=poster)
@@ -81,6 +98,15 @@ class EngineHaltTests(unittest.TestCase):
             with self.assertRaises(OrderExecutionError) as caught:
                 engine.submit_order_request(object())
             self.assertIsInstance(caught.exception, hb.TradingHaltedError)
+            boundary.assert_not_called()
+
+    def test_halt_refuses_an_order_cancellation_before_touching_broker(self) -> None:
+        engine = TraderEngine("halted")
+        with mock.patch.object(hb.HEARTBEAT, "_halted") as flag, \
+                mock.patch.object(TraderEngine, "backtester_boundary") as boundary:
+            flag.is_set.return_value = True
+            with self.assertRaises(hb.TradingHaltedError):
+                engine.cancel_order_request("stop")
             boundary.assert_not_called()
 
     def test_submit_order_request_unchanged_when_not_halted(self) -> None:
