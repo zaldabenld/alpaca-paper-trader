@@ -181,15 +181,21 @@ class EntryTests(unittest.TestCase):
         engine.mover_volume_at = clock_module.monotonic() - 11 * 60
         self.assertIn("volume reading not in yet", hold(engine))
 
-    def test_no_volume_reading_waits_and_a_stock_is_bought_once_a_day(self) -> None:
+    def test_no_volume_reading_waits(self) -> None:
         engine = movers_engine()
         engine.mover_volume = {}
         self.assertIn("volume reading not in yet", hold(engine))
+
+    def test_no_hidden_re_entry_limit(self) -> None:
+        # A stock already bought today is bought again when it scores; only the account's visible
+        # Max Buys per Symbol per Day (0 = off) limits re-entries.
         engine = movers_engine()
-        engine.entries_today_by_symbol = {"HOT": 1}
-        self.assertIn("bought 1x today", hold(engine))
-        engine.config = engine.config.model_copy(update={"max_entries_per_symbol_per_day": 2})
+        engine.entries_today_by_symbol = {"HOT": 3}
         self.assertEqual(hold(engine), "")
+        self.assertIsNotNone(engine.entry_candidate("HOT", 0, {}, None, 0, [], True))
+        engine.config = engine.config.model_copy(update={"max_entries_per_symbol_per_day": 3})
+        self.assertIsNone(engine.entry_candidate("HOT", 0, {}, None, 0, [], True))
+        self.assertEqual(engine.strategy_state.last_action["HOT"], "Hold (bought 3x today)")
 
     def test_candidate_carries_the_weighted_score(self) -> None:
         engine = movers_engine()
