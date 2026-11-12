@@ -314,13 +314,36 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual([(order.symbol, order.side.value) for order in broker.submitted], [("HOT", "buy")])
 
     def test_held_mover_gets_the_accounts_stop_loss(self) -> None:
-        held = {"symbol": "HOT", "qty": "400", "qty_available": "400", "avg_entry_price": "11.00", "current_price": "11.40",
-                "market_value": "4560", "side": "long"}
+        for entry, expected in (("1.215", "1.20"), ("0.8463", "0.8358"), ("11.00", "10.87"),
+                                ("1.0126", "1.00"), ("100", "98.75")):
+            with self.subTest(entry=entry):
+                held = {"symbol": "HOT", "qty": "0.25", "qty_available": "0.25",
+                        "avg_entry_price": entry, "current_price": entry, "side": "long"}
+                broker = Broker(positions=[held])
+                engine = movers_engine(broker, bars=150)
+                refresh(engine)
+                self.assertEqual(len(broker.submitted), 1)
+                order = broker.submitted[0]
+                self.assertEqual((order.side.value, order.type.value, order.qty), ("sell", "stop", 0.25))
+                self.assertEqual(D(str(order.stop_price)), D(expected))
+                self.assertGreaterEqual(D(str(order.stop_price)), D(entry) * D("0.9875"))
+
+    def test_existing_wide_stop_is_replaced_across_the_dollar_boundary(self) -> None:
+        held = {"symbol": "HOT", "qty": "0.25", "qty_available": "0.25",
+                "avg_entry_price": "1.0126", "current_price": "1.0126", "side": "long"}
         broker = Broker(positions=[held])
         engine = movers_engine(broker, bars=150)
+        old_stop = {"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "0.25",
+                    "stop_price": "0.9999", "client_order_id": "apt-protect-sl-hot-1"}
+        with (
+            patch.object(broker, "get_orders", return_value=[old_stop]),
+            patch.object(broker, "cancel_order_by_id") as cancel,
+        ):
+            refresh(engine)
+        cancel.assert_called_once_with("s1")
+        self.assertEqual(broker.submitted, [])
         refresh(engine)
-        self.assertEqual([(order.side.value, order.type.value, float(order.stop_price)) for order in broker.submitted],
-                         [("sell", "stop", 10.86)])  # Stop Loss 1.25% under the 11.00 entry
+        self.assertEqual(D(str(broker.submitted[0].stop_price)), D("1.00"))
 
     def test_momentum_accounts_never_touch_the_movers_code(self) -> None:
         engine = movers_engine()

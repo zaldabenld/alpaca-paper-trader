@@ -5835,18 +5835,14 @@ class TraderEngine:
             if entry_price <= 0:
                 return Decimal("0")
             percent = max(config.stop_loss_percent, INPLAY_FALLBACK_STOP_PERCENT)
-            return max(Decimal("0"), self.round_exit_price(entry_price * (Decimal("1") - percent / Decimal("100")), ROUND_DOWN))
+            return self.percent_stop_price(entry_price, percent)
         if self.inverse_trend_active(symbol, config):
             # A wide stop from entry, so index noise cannot shake the hold out; the VWAP exit ends
             # it. Once the fund has been up the lock percent the profit is locked: the stop trails
             # the peak, never under entry, in the same quarter-percent steps as the normal trail.
             if entry_price <= 0:
                 return Decimal("0")
-            offset = max(
-                entry_price * config.inverse_trend_stop_percent / Decimal("100"),
-                self.minimum_exit_offset(entry_price),
-            )
-            stop = entry_price - offset
+            stop = self.percent_stop_price(entry_price, config.inverse_trend_stop_percent)
             if config.inverse_trend_lock_at_percent > 0 and config.inverse_trend_trail_percent > 0:
                 peak = self.update_position_peak(symbol, entry_price, current_price if current_price > 0 else entry_price)
                 if percent_change(peak, entry_price) >= config.inverse_trend_lock_at_percent:
@@ -5934,14 +5930,15 @@ class TraderEngine:
             )
             take_profit = self.round_exit_price(entry_price + take_profit_offset, ROUND_UP)
         if config.stop_loss_percent > 0:
-            stop_loss_offset = max(
-                entry_price * config.stop_loss_percent / Decimal("100"),
-                self.minimum_exit_offset(entry_price),
-            )
-            stop_loss = self.round_exit_price(entry_price - stop_loss_offset, ROUND_DOWN)
-            if stop_loss <= 0:
-                stop_loss = Decimal("0")
+            stop_loss = self.percent_stop_price(entry_price, config.stop_loss_percent)
         return take_profit, stop_loss
+
+    def percent_stop_price(self, entry_price: Decimal, percent: Decimal) -> Decimal:
+        """Round a long position's initial sell stop up to avoid widening its configured loss."""
+        stop = entry_price * (Decimal("1") - percent / Decimal("100"))
+        if stop <= 0:
+            return Decimal("0")
+        return self.round_exit_price(stop, ROUND_UP)
 
     def ensure_position_exit_orders(
         self,
@@ -6080,7 +6077,8 @@ class TraderEngine:
                 return self.cancel_open_order(order)
         if kind == "stop_loss" and stop_loss_price > 0:
             stop_price = decimal_value(order.get("stop_price"))
-            increment = self.price_increment_for(stop_loss_price)
+            # Valid stops can differ by less than a cent across the dollar boundary.
+            increment = min(self.price_increment_for(stop_price), self.price_increment_for(stop_loss_price))
             if stop_price > 0 and stop_loss_price - stop_price >= increment:
                 return self.cancel_open_order(order)  # raise the stop (trail ratchet or config change)
             # Lower a stop only when it is a plain base stop below entry (a settings change). A stop
