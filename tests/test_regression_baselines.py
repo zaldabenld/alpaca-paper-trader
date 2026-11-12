@@ -929,6 +929,30 @@ class MarketStreamBaselineTests(unittest.TestCase):
 
         self.assertEqual(bar_symbols, ["SPY", "QQQ"])
 
+    def test_hold_and_day_trade_positions_never_displace_the_momentum_accounts_stream_list(self) -> None:
+        most_active = [f"A{index:02d}" for index in range(40)]
+
+        def stream_for(other_modes: list[tuple[str, list[str]]]) -> list[str]:
+            manager = fresh_manager()
+            momentum = manager.create_account("Momentum", AppConfig(use_top_volume_symbols=True, use_market_stream=True))
+            momentum.connected = True
+            momentum.top_volume_symbols = list(most_active)
+            momentum.positions = [{"symbol": "HELD", "qty": "1"}]
+            for mode, held in other_modes:
+                other = manager.create_account(mode, AppConfig(entry_mode=mode, use_top_volume_symbols=True, use_market_stream=True))
+                other.connected = True
+                other.top_volume_symbols = list(most_active)
+                other.positions = [{"symbol": symbol, "qty": "1"} for symbol in held]
+            manager.selected_account_id = momentum.account_id
+            return manager.market_data_symbols()[1]
+
+        alone = stream_for([])
+        with_others = stream_for([("allocation", ["IEF", "GLD"]), ("inplay", ["PICK1", "PICK2", "PICK3"])])
+        self.assertEqual(with_others, alone)
+        self.assertEqual(alone[0], "HELD")  # the momentum account's own position still comes first
+        # A momentum or ORB neighbour keeps the old behaviour: its positions do take slots.
+        self.assertIn("ZZZ", stream_for([("orb", ["ZZZ"])]))
+
     def test_held_position_symbols_are_in_shared_market_stream_bars(self) -> None:
         manager = fresh_manager()
         engine = manager.create_account(

@@ -496,6 +496,8 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
 
 
 ENTRY_MODES = {"momentum", "orb", "allocation", "inplay"}
+# Accounts in these modes do not put their held positions at the front of the shared price stream.
+STREAM_LEFTOVER_ENTRY_MODES = {"allocation", "inplay"}
 
 
 def clean_symbol_list(value: Any) -> list[str]:
@@ -8003,6 +8005,11 @@ class TraderManager:
                     add(symbol)
 
         for engine in ordered_engines:
+            # Hold-mode and day-trade accounts never take a slot ahead of the most-active list: their
+            # exits are a weekly switch or broker stops, not the stream, and what they hold must not
+            # change which symbols a momentum account sees live. They still get any slots left over.
+            if engine.config.entry_mode in STREAM_LEFTOVER_ENTRY_MODES:
+                continue
             for symbol in without_invalid_market_data_symbols(engine.position_symbols_for_market_data()):
                 add(symbol)
         source_trading = source.trading_symbols() if source in engines else []
