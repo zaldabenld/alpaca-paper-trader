@@ -580,9 +580,6 @@ PROFILE_STRATEGY_KEYS = {
     "mover_weight_rsi",
     "mover_volume_full_at",
     "mover_min_dollar_volume_millions",
-    "mover_stop_atr_fraction",
-    "mover_stop_min_percent",
-    "mover_stop_max_percent",
     "volume_period",
     "volume_multiplier",
     "min_avg_volume",
@@ -708,9 +705,8 @@ class AppConfig(BaseModel):
     # it is bought when the total reaches min_entry_score. Volume is today's total so far against
     # the stock's own usual total by this time of day (consolidated data, read about 16 minutes
     # late), worth full points at mover_volume_full_at times usual. RSI is a weight, never a
-    # ceiling. The stop sits mover_stop_atr_fraction of the stock's average daily range below the
-    # buy (between the min and max percent); once the position is up that far the stop follows the
-    # peak at the same distance. There is no take-profit. See movers.py for the evidence.
+    # ceiling. Exits are the account's own Stop Loss %, Take Profit %, Break-even and Profit Trail
+    # settings, the same ones every other mode shows; movers mode has no stop of its own.
     mover_weight_volume: Decimal = Decimal("45")
     mover_weight_half_hour_move: Decimal = Decimal("15")
     mover_weight_vwap: Decimal = Decimal("15")
@@ -720,9 +716,6 @@ class AppConfig(BaseModel):
     mover_weight_rsi: Decimal = Decimal("0")
     mover_volume_full_at: Decimal = Decimal("5")
     mover_min_dollar_volume_millions: Decimal = Decimal("20")
-    mover_stop_atr_fraction: Decimal = Decimal("0.35")
-    mover_stop_min_percent: Decimal = Decimal("1.25")
-    mover_stop_max_percent: Decimal = Decimal("6")
     max_entries_per_symbol_per_day: int = 0
     # Buy only while the price is still rising: the last completed 1-min bar closed at or above the
     # bar before it, and the latest streamed trade (when fresh) is not below that earlier close.
@@ -1065,9 +1058,6 @@ class AppConfig(BaseModel):
             setattr(self, name, min(max(getattr(self, name), Decimal("0")), Decimal("100")))
         self.mover_volume_full_at = min(max(self.mover_volume_full_at, Decimal("1.5")), Decimal("50"))
         self.mover_min_dollar_volume_millions = min(max(self.mover_min_dollar_volume_millions, Decimal("0")), Decimal("100000"))
-        self.mover_stop_atr_fraction = min(max(self.mover_stop_atr_fraction, Decimal("0.05")), Decimal("2"))
-        self.mover_stop_min_percent = min(max(self.mover_stop_min_percent, Decimal("0.25")), Decimal("20"))
-        self.mover_stop_max_percent = min(max(self.mover_stop_max_percent, self.mover_stop_min_percent), Decimal("25"))
         self.inplay_min_relative_volume = min(max(self.inplay_min_relative_volume, Decimal("0")), Decimal("50"))
         self.inplay_min_atr_percent = min(max(self.inplay_min_atr_percent, Decimal("0")), Decimal("50"))
         self.inplay_min_dollar_volume_millions = min(max(self.inplay_min_dollar_volume_millions, Decimal("0")), Decimal("100000"))
@@ -4148,18 +4138,6 @@ class TraderEngine:
             volume_full_at=config.mover_volume_full_at,
         )
 
-    def mover_stop_distance(self, symbol: str, config: AppConfig) -> Decimal:
-        """The stop distance for this stock in percent. With no daily history on record the widest
-        allowed stop is used, so a missing reading can never tighten a stop that is already live."""
-        with self.lock:
-            stat = self.mover_stats.get(symbol.strip().upper())
-        return movers_logic.stop_distance_percent(
-            stat.atr_percent if stat is not None else None,
-            config.mover_stop_atr_fraction,
-            config.mover_stop_min_percent,
-            config.mover_stop_max_percent,
-            fallback=config.mover_stop_max_percent,
-        )
 
     def mover_price_change(self, symbol: str, price: Decimal | None, minutes: int) -> Decimal | None:
         """Percent change of price against the session bar from `minutes` ago (or the session's
@@ -5846,22 +5824,6 @@ class TraderEngine:
                         trailed = entry_price + ((trailed - entry_price) // step) * step
                     stop = max(stop, entry_price, trailed)
             return max(Decimal("0"), self.round_exit_price(stop, ROUND_DOWN))
-        if config.entry_mode == "movers":
-            # Sized to the stock: a fraction of its average daily range below the buy. Once the
-            # position has been up that far the stop follows the peak at the same distance, in
-            # quarter-percent steps, and never goes back down.
-            if entry_price <= 0:
-                return Decimal("0")
-            distance = self.mover_stop_distance(symbol, config)
-            stop = entry_price * (Decimal("1") - distance / Decimal("100"))
-            peak = self.update_position_peak(symbol, entry_price, current_price if current_price > 0 else entry_price)
-            if percent_change(peak, entry_price) >= distance:
-                trailed = peak * (Decimal("1") - distance / Decimal("100"))
-                step = entry_price * Decimal("0.0025")
-                if trailed > entry_price and step > 0:
-                    trailed = entry_price + ((trailed - entry_price) // step) * step
-                stop = max(stop, trailed)
-            return max(Decimal("0"), self.round_exit_price(stop, ROUND_DOWN))
         _, stop = self.exit_prices(entry_price, config)
         if entry_price <= 0:
             return stop
@@ -5904,12 +5866,6 @@ class TraderEngine:
                     implied_peak,
                     entry_price * (Decimal("1") + config.inverse_trend_lock_at_percent / Decimal("100")),
                 )
-            elif config.entry_mode == "movers":
-                if stop_price > entry_price:
-                    # Use the smallest stop distance: the real one is at least that, so the stop
-                    # worked out from this peak can never sit above the stop that is already live
-                    # (not even when the stock's daily range only loads later).
-                    implied_peak = stop_price / (Decimal("1") - config.mover_stop_min_percent / Decimal("100"))
             elif config.profit_trail_drop_percent > 0 and stop_price > entry_price:
                 implied_peak = stop_price / (Decimal("1") - config.profit_trail_drop_percent / Decimal("100"))
             elif config.breakeven_at_percent > 0:
@@ -5919,7 +5875,7 @@ class TraderEngine:
     def position_take_profit_price(self, symbol: str, entry_price: Decimal, config: AppConfig) -> Decimal:
         """The profit target for a held position; none while an inverse fund is on trend hold, and none
         in day-trade mode, where winners run until the stop or the sale before the close."""
-        if self.inverse_trend_active(symbol, config) or config.entry_mode in {"inplay", "movers"}:
+        if self.inverse_trend_active(symbol, config) or config.entry_mode == "inplay":
             return Decimal("0")
         return self.exit_prices(entry_price, config)[0]
 
@@ -5932,8 +5888,6 @@ class TraderEngine:
                 return ((pick.high - pick.stop) / pick.high * Decimal("100")).quantize(Decimal("0.01"))
         if self.inverse_trend_active(symbol, config):
             return config.inverse_trend_stop_percent
-        if config.entry_mode == "movers":
-            return self.mover_stop_distance(symbol, config)
         return config.stop_loss_percent
 
     def exit_prices(self, entry_price: Decimal, config: AppConfig) -> tuple[Decimal, Decimal]:
@@ -6105,7 +6059,7 @@ class TraderEngine:
                 stop_price > 0
                 and stop_price < entry_price
                 and stop_price - stop_loss_price >= increment
-                and self.config.entry_mode not in {"inplay", "movers"}
+                and self.config.entry_mode != "inplay"
             ):
                 return self.cancel_open_order(order)
         return False
@@ -6226,7 +6180,7 @@ class TraderEngine:
 
         if (
             config.take_profit_percent > 0
-            and config.entry_mode not in {"inplay", "movers"}
+            and config.entry_mode != "inplay"
             and current_gain >= config.take_profit_percent
             and not has_take_profit_order
         ):

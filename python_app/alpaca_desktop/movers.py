@@ -129,17 +129,6 @@ def direction_hold_reason(readings: Readings) -> str:
     return ""
 
 
-def stop_distance_percent(
-    daily_range: Decimal | None, fraction: Decimal, minimum: Decimal, maximum: Decimal, fallback: Decimal
-) -> Decimal:
-    """How far below the buy the stop sits, as a percent: a fraction of the daily range, kept in bounds."""
-    if daily_range is None or daily_range <= 0:
-        return min(max(fallback, minimum), maximum)
-    return min(max(daily_range * fraction, minimum), maximum).quantize(Decimal("0.01"))
-
-
-# ----- time-of-day volume -------------------------------------------------------------------------
-
 
 def slot_of(minute_of_day: int) -> int | None:
     """The 5-minute slot a bar starting at minute_of_day (ET) belongs to; None outside regular hours."""

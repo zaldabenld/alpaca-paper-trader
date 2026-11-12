@@ -75,12 +75,6 @@ class ScoreTests(unittest.TestCase):
         self.assertIn("fell 0.30% in the last 5 minutes", M.direction_hold_reason(readings(five_min_move=-0.3)))
         self.assertIn("warming up", M.direction_hold_reason(readings(five_min_move=None)))
 
-    def test_stop_is_sized_to_the_daily_range_within_bounds(self) -> None:
-        args = (D("0.35"), D("1.25"), D("6"), D("6"))
-        self.assertEqual(M.stop_distance_percent(D("8"), *args), D("2.80"))
-        self.assertEqual(M.stop_distance_percent(D("2"), *args), D("1.25"))
-        self.assertEqual(M.stop_distance_percent(D("30"), *args), D("6"))
-        self.assertEqual(M.stop_distance_percent(None, *args), D("6"))  # unknown range: the widest stop
 
 
 class VolumeTests(unittest.TestCase):
@@ -118,9 +112,11 @@ def stamp(minute: int) -> str:
 def movers_engine(broker: Any = None, *, climb: str = "0.01", bars: int = 120, **config: Any) -> TraderEngine:
     """An account in movers mode with HOT climbing steadily from $10 since the open (RSI pinned at 100)."""
     engine = TraderEngine("movers")
-    engine.config = AppConfig(entry_mode="movers", use_top_volume_symbols=False, symbols=["HOT"], dry_run=False,
-                              min_entry_score="60", take_profit_percent="2.5", stop_loss_percent="1.25",
-                              max_trade_percent="5", max_open_positions=20, **config)
+    settings: dict[str, Any] = dict(entry_mode="movers", use_top_volume_symbols=False, symbols=["HOT"], dry_run=False,
+                                    min_entry_score="60", stop_loss_percent="1.25", take_profit_percent="0",
+                                    max_trade_percent="5", max_open_positions=20)
+    settings.update(config)
+    engine.config = AppConfig(**settings)
     engine.connected = True
     engine.trading_enabled = True
     engine.trading_client = broker  # type: ignore[assignment]
@@ -213,59 +209,32 @@ class EntryTests(unittest.TestCase):
 
 
 class StopTests(unittest.TestCase):
-    def test_stop_is_a_fraction_of_the_daily_range_and_follows_the_peak(self) -> None:
+    """Movers mode has no stop of its own: exits are the account's Stop Loss %, Take Profit %,
+    Break-even and Profit Trail settings, the same fields the app shows for every mode."""
+
+    def test_stop_is_the_accounts_stop_loss_percent(self) -> None:
         engine = movers_engine()
         config = engine.config
-        self.assertEqual(engine.mover_stop_distance("HOT", config), D("2.80"))
-        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("100"), config), D("97.20"))
-        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("102"), config), D("97.20"))  # not up 2.8% yet
-        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("106"), config), D("103.00"))  # 106 less 2.8%, in 0.25 steps
-        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("101"), config), D("103.00"))  # never back down
-        self.assertEqual(engine.position_stop_percent("HOT", config), D("2.80"))
+        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("100"), config), D("98.75"))
+        self.assertEqual(engine.position_stop_percent("HOT", config), D("1.25"))
+        # The stock's daily range does not move the stop.
+        engine.mover_stats = {"HOT": inplay_logic.DailyStats(atr_percent=D("30"), dollar_volume=D("90000000"))}
+        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("100"), config), D("98.75"))
 
-    def test_unknown_daily_range_uses_the_widest_stop(self) -> None:
-        engine = movers_engine()
-        engine.mover_stats = {}
-        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("100"), engine.config), D("94.00"))
+    def test_profit_trail_and_take_profit_settings_apply(self) -> None:
+        engine = movers_engine(profit_trail_start_percent="3", profit_trail_drop_percent="1", take_profit_percent="5")
+        config = engine.config
+        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("102"), config), D("98.75"))  # not up 3% yet
+        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("104"), config), D("102.75"))  # 104 less 1%, in 0.25 steps
+        self.assertEqual(engine.position_stop_price("HOT", D("100"), D("101"), config), D("102.75"))  # never back down
+        self.assertEqual(engine.position_take_profit_price("HOT", D("100"), config), D("105.00"))
+        held = {"qty": "10", "avg_entry_price": "100", "current_price": "105.20"}
+        reason, _ = engine.local_protection_exit_decision("HOT", config, held, D("105.20"), False, True)
+        self.assertIn("take-profit 5", reason)
 
-    def test_no_take_profit_and_a_live_stop_is_never_loosened(self) -> None:
+    def test_no_take_profit_when_the_setting_is_zero(self) -> None:
         engine = movers_engine()
         self.assertEqual(engine.position_take_profit_price("HOT", D("100"), engine.config), D("0"))
-        held = {"qty": "10", "avg_entry_price": "100", "current_price": "104"}
-        self.assertEqual(engine.local_protection_exit_decision("HOT", engine.config, held, D("104"), False, True), ("", ""))
-        live = {"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "10", "stop_price": "97.20",
-                "client_order_id": "apt-protect-sl-hot-1"}
-        with patch.object(engine, "cancel_open_order", return_value=True) as cancel:
-            self.assertFalse(engine.cancel_stale_protective_order(live, D("10"), D("0"), D("94.00"), D("100")))
-            cancel.assert_not_called()
-            self.assertTrue(engine.cancel_stale_protective_order(live, D("10"), D("0"), D("103.00"), D("100")))  # raising is fine
-
-    def test_daily_range_loading_late_never_lifts_the_stop_over_the_live_one(self) -> None:
-        # A stop at 101 is live on a position bought at 100 and the stock's daily range is not on
-        # record yet. When it loads (a 1.4% stop distance) the stop must not jump above the price.
-        engine = movers_engine()
-        engine.mover_stats = {}
-        live = [{"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "10", "stop_price": "101.00",
-                 "client_order_id": "apt-protect-sl-hot-1"}]
-        engine.seed_peak_from_live_stops("HOT", D("100"), live, engine.config)
-        engine.mover_stats = {"HOT": inplay_logic.DailyStats(atr_percent=D("4"), dollar_volume=D("90000000"))}
-        engine.seed_peak_from_live_stops("HOT", D("100"), live, engine.config)
-        stop = engine.position_stop_price("HOT", D("100"), D("101.50"), engine.config)
-        self.assertLessEqual(stop, D("101.00"))
-        with patch.object(engine, "cancel_open_order", return_value=True) as cancel:
-            self.assertFalse(engine.cancel_stale_protective_order(live[0], D("10"), D("0"), stop, D("100")))
-            cancel.assert_not_called()
-
-    def test_restart_reads_the_peak_back_from_a_live_trailed_stop(self) -> None:
-        engine = movers_engine()
-        live = [{"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "10", "stop_price": "103.00",
-                 "client_order_id": "apt-protect-sl-hot-1"}]
-        engine.seed_peak_from_live_stops("HOT", D("100"), live, engine.config)
-        # The peak is read back conservatively, so the computed stop is at or under the live one
-        # (which is then kept), and well above the first stop at 97.20.
-        stop = engine.position_stop_price("HOT", D("100"), D("101"), engine.config)
-        self.assertLessEqual(stop, D("103.00"))
-        self.assertGreaterEqual(stop, D("101.00"))
 
 
 def refresh(engine: TraderEngine) -> None:
@@ -297,14 +266,14 @@ class RefreshTests(unittest.TestCase):
             refresh(engine)
         self.assertEqual([(order.symbol, order.side.value) for order in broker.submitted], [("HOT", "buy")])
 
-    def test_held_mover_gets_its_range_sized_stop(self) -> None:
+    def test_held_mover_gets_the_accounts_stop_loss(self) -> None:
         held = {"symbol": "HOT", "qty": "400", "qty_available": "400", "avg_entry_price": "11.00", "current_price": "11.40",
                 "market_value": "4560", "side": "long"}
         broker = Broker(positions=[held])
         engine = movers_engine(broker, bars=150)
         refresh(engine)
         self.assertEqual([(order.side.value, order.type.value, float(order.stop_price)) for order in broker.submitted],
-                         [("sell", "stop", 11.05)])  # 11.40 peak less 2.8% is 11.08, floored to quarter-percent steps above 11.00
+                         [("sell", "stop", 10.86)])  # Stop Loss 1.25% under the 11.00 entry
 
     def test_momentum_accounts_never_touch_the_movers_code(self) -> None:
         engine = movers_engine()
@@ -449,9 +418,13 @@ class WorkerTests(unittest.TestCase):
 class ConfigTests(unittest.TestCase):
     def test_defaults_and_bounds(self) -> None:
         config = AppConfig(entry_mode="movers")
-        self.assertEqual((config.mover_weight_volume, config.mover_weight_rsi, config.mover_stop_atr_fraction), (D("45"), D("0"), D("0.35")))
-        clamped = AppConfig(mover_weight_volume="500", mover_stop_min_percent="3", mover_stop_max_percent="1", mover_volume_full_at="1")
-        self.assertEqual((clamped.mover_weight_volume, clamped.mover_stop_max_percent, clamped.mover_volume_full_at), (D("100"), D("3"), D("1.5")))
+        self.assertEqual((config.mover_weight_volume, config.mover_weight_rsi), (D("45"), D("0")))
+        clamped = AppConfig(mover_weight_volume="500", mover_volume_full_at="1")
+        self.assertEqual((clamped.mover_weight_volume, clamped.mover_volume_full_at), (D("100"), D("1.5")))
+        # Settings saved before the movers stop fields were removed still load.
+        old = AppConfig(entry_mode="movers", mover_stop_max_percent="6", stop_loss_percent="1.25")
+        self.assertFalse(hasattr(old, "mover_stop_max_percent"))
+        self.assertEqual(old.stop_loss_percent, D("1.25"))
 
 
 if __name__ == "__main__":
