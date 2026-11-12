@@ -686,7 +686,7 @@
                   </label>
                   <label title="Most new positions the bot may open in one 5-second scan. Spreads out the burst of buys when the open guard lifts.">
                     Max New Buys per Scan (0 = off)
-                    <input id="maxEntriesPerScan" type="number" min="0" max="50" step="1" value="2" />
+                    <input id="maxEntriesPerScan" type="number" min="0" max="50" step="1" value="0" />
                   </label>
                   <label title="After a buy is sent, wait this long before sending another.">
                     Seconds Between New Buys (0 = off)
@@ -730,7 +730,7 @@
                   </label>
                   <label title="Inverse trend hold only: sell once the fund is this far under its session VWAP.">
                     Trend Hold Exit % under VWAP
-                    <input id="inverseTrendExitPercent" type="number" min="0" max="5" step="0.05" value="0.3" />
+                    <input id="inverseTrendExitPercent" type="number" min="0" max="5" step="0.05" value="0" />
                   </label>
                   <label title="Inverse trend hold only: hard stop this far below the entry price, in place of the normal stop.">
                     Trend Hold Stop %
@@ -802,10 +802,6 @@
                   <label title="Movers mode: volume this many times the usual earns the full volume points.">
                     Full Volume Points At (x usual)
                     <input id="moverVolumeFullAt" type="number" min="1.5" max="50" step="0.5" value="5" />
-                  </label>
-                  <label title="Movers mode: 20-day average dollars traded per day, in millions.">
-                    Min $ Volume (millions)
-                    <input id="moverMinDollarVolumeMillions" type="number" min="0" step="5" value="20" />
                   </label>
                 </div>
               </div>
