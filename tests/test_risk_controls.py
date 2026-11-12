@@ -59,6 +59,9 @@ class FakeTradingClient:
             }
         ]
 
+    def get_open_position(self, symbol: str) -> dict[str, Any]:
+        return next(position for position in self.get_all_positions() if position["symbol"] == symbol)
+
     def get_orders(self, request: Any) -> list[dict[str, Any]]:
         status = str(getattr(request, "status", "")).lower()
         return list(self.open_orders) if "open" in status else list(self.closed_orders)
@@ -307,11 +310,54 @@ class StopProtectionTests(unittest.TestCase):
                 "stop_price": "98.75", "client_order_id": "apt-protect-sl-aaa-1"}
         client = FakeTradingClient(is_open=True, orders=[stop])
         engine = connected_engine(client)
+        client.get_open_position = lambda symbol: {"symbol": symbol, "qty": "32.7446", "qty_available": "32.7446"}
         position = {"symbol": "AAA", "qty": "32.7446", "qty_available": "12.7446", "side": "long",
                     "current_price": "100", "avg_entry_price": "100"}
         engine.flatten_all_positions({"AAA": position}, [stop], "flatten before close")
         self.assertEqual(kinds(client), [("sell", "market")])
         self.assertEqual(str(client.submitted[0].qty), "32.7446")
+
+    def test_close_sells_only_broker_quantity_after_stop_partially_fills_during_cancel(self) -> None:
+        stop = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "0.25",
+                "filled_qty": "0", "stop_price": "98.75", "client_order_id": "apt-protect-sl-aaa-1"}
+        client = FakeTradingClient(is_open=True, orders=[stop])
+        engine = connected_engine(client, flatten_before_close_minutes=180)
+
+        def remaining_position(symbol: str) -> dict[str, Any]:
+            self.assertEqual(client.open_orders, [])
+            return {"symbol": symbol, "qty": "0.15", "qty_available": "0.15"}
+
+        client.get_open_position = remaining_position
+        run_refresh(engine)
+        self.assertEqual(client.cancelled, ["s1"])
+        self.assertEqual(kinds(client), [("sell", "market")])
+        self.assertEqual(str(client.submitted[0].qty), "0.15")
+
+    def test_close_waits_for_broker_quantity_when_position_lookup_fails_after_cancel(self) -> None:
+        stop = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "0.25",
+                "filled_qty": "0", "stop_price": "98.75", "client_order_id": "apt-protect-sl-aaa-1"}
+        client = FakeTradingClient(is_open=True, orders=[stop])
+        engine = connected_engine(client, flatten_before_close_minutes=180)
+        with patch.object(client, "get_open_position", side_effect=OSError("broker unavailable")):
+            run_refresh(engine)
+        self.assertEqual(client.cancelled, ["s1"])
+        self.assertEqual(client.submitted, [])
+        run_refresh(engine)
+        self.assertEqual(kinds(client), [("sell", "market")])
+
+    def test_halted_refresh_leaves_working_stop_untouched(self) -> None:
+        stop = {"id": "s1", "symbol": "AAA", "side": "sell", "type": "stop", "qty": "0.25",
+                "filled_qty": "0", "stop_price": "98.75", "client_order_id": "apt-protect-sl-aaa-1"}
+        for flatten_minutes in (0, 180):
+            with self.subTest(flatten_minutes=flatten_minutes):
+                client = FakeTradingClient(is_open=True, price="103", orders=[stop])
+                engine = connected_engine(client, flatten_before_close_minutes=flatten_minutes)
+                with patch.object(engine_module, "trading_halted", return_value=True):
+                    run_refresh(engine, run_strategy=True)
+                self.assertEqual(client.cancelled, [])
+                self.assertEqual(client.submitted, [])
+                self.assertEqual(client.open_orders, [stop])
+                self.assertIn("paused by n8n", engine.state()["status"])
 
     def test_flatten_never_sells_a_short_position(self) -> None:
         client = FakeTradingClient(is_open=True)

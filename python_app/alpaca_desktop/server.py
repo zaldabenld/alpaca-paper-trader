@@ -347,6 +347,7 @@ async def get_health(request: Request) -> dict[str, Any]:
     payload = currentness_payload(url=runtime_url)
     payload["paper_trading_only"] = True
     payload["broker_mode"] = "paper"
+    payload["watchdog"] = {"status": HEARTBEAT.status(), "blocks_orders": HEARTBEAT.blocks_orders}
     payload["settings_diagnostics"] = manager.settings_diagnostics()
     payload["runtime_diagnostics"] = runtime_diagnostics_snapshot()
     return payload

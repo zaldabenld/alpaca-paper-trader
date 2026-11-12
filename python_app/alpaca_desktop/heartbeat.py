@@ -4,7 +4,8 @@ A background thread POSTs to ``N8N_HEARTBEAT_URL`` every 60 seconds, around the 
 ``X-Control-Token`` header set to ``N8N_CONTROL_TOKEN``. n8n answers ``{"ok": true, "halt": bool}``;
 ``halt`` becomes the process-wide ``trading_halted()`` flag that the engine checks before it sends
 any order. If either variable is unset the heartbeat is off and trading is never halted. When n8n
-cannot be reached the last known flag is kept.
+cannot be reached the last known flag is kept. A configured process waits for its first valid
+reply before making order changes.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ DEFAULT_INTERVAL_SECONDS = 60.0
 
 
 class TradingHaltedError(OrderExecutionError):
-    """The n8n kill switch is on, so the order was not sent."""
+    """The watchdog has halted trading or has yet to confirm its initial state."""
 
 
 Poster = Callable[[str, dict[str, str], bytes, float], dict[str, Any]]
@@ -64,6 +65,21 @@ class N8nHeartbeat:
     def halted(self) -> bool:
         return self._halted.is_set()
 
+    @property
+    def blocks_orders(self) -> bool:
+        return self.halted or (self.enabled and self.last_ok is None)
+
+    def status(self) -> str:
+        if not self.enabled:
+            return "disabled"
+        if self.halted:
+            return "halted"
+        if self.last_error:
+            return "unreachable"
+        if self.last_ok is None:
+            return "waiting"
+        return "connected"
+
     def beat_once(self, source: str = "app") -> bool | None:
         """Send one heartbeat. Returns the halt flag, or None if n8n did not answer."""
         if not self.enabled:
@@ -72,8 +88,8 @@ class N8nHeartbeat:
         body = json.dumps({"source": source}).encode("utf-8")
         try:
             reply = self._poster(self.url, headers, body, self.timeout)
-            if not isinstance(reply, dict) or not isinstance(reply.get("halt"), bool):
-                raise ValueError(f"unexpected heartbeat reply: {str(reply)[:120]}")
+            if not isinstance(reply, dict) or reply.get("ok") is not True or not isinstance(reply.get("halt"), bool):
+                raise ValueError("unexpected heartbeat reply")
         except Exception as exc:  # network, HTTP 401/5xx, bad JSON: keep the last known flag
             message = f"{type(exc).__name__}: {exc}"
             if message != self.last_error:
@@ -82,8 +98,8 @@ class N8nHeartbeat:
             self.last_error = message
             return None
         self.last_error = None
-        self.last_ok = time.time()
         self._set_halted(reply["halt"])
+        self.last_ok = time.time()
         return reply["halt"]
 
     def _set_halted(self, halted: bool) -> None:
@@ -118,4 +134,4 @@ HEARTBEAT = N8nHeartbeat()
 
 
 def trading_halted() -> bool:
-    return HEARTBEAT.halted
+    return HEARTBEAT.blocks_orders
