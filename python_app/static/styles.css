@@ -2580,3 +2580,8 @@ button.news-symbol:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* Settings another entry mode owns are hidden (see syncEntryModeFields). */
+#advancedSettings [data-modes][hidden] {
+  display: none !important;
+}

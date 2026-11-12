@@ -71,9 +71,6 @@ const fields = {
   moverWeightRsi: document.querySelector("#moverWeightRsi"),
   moverVolumeFullAt: document.querySelector("#moverVolumeFullAt"),
   moverMinDollarVolumeMillions: document.querySelector("#moverMinDollarVolumeMillions"),
-  moverStopAtrFraction: document.querySelector("#moverStopAtrFraction"),
-  moverStopMinPercent: document.querySelector("#moverStopMinPercent"),
-  moverStopMaxPercent: document.querySelector("#moverStopMaxPercent"),
   maxEntriesPerSymbolPerDay: document.querySelector("#maxEntriesPerSymbolPerDay"),
   requireRisingPrice: document.querySelector("#requireRisingPrice"),
   maxEntriesPerScan: document.querySelector("#maxEntriesPerScan"),
@@ -342,9 +339,6 @@ const configKeys = [
   "mover_weight_rsi",
   "mover_volume_full_at",
   "mover_min_dollar_volume_millions",
-  "mover_stop_atr_fraction",
-  "mover_stop_min_percent",
-  "mover_stop_max_percent",
   "sell_rsi",
   "volume_period",
   "volume_multiplier",
@@ -445,9 +439,6 @@ const strategyProfileKeys = new Set([
   "mover_weight_rsi",
   "mover_volume_full_at",
   "mover_min_dollar_volume_millions",
-  "mover_stop_atr_fraction",
-  "mover_stop_min_percent",
-  "mover_stop_max_percent",
   "sell_rsi",
   "volume_period",
   "volume_multiplier",
@@ -846,6 +837,8 @@ els.scannerAllColumnsToggle?.addEventListener("change", () => {
 });
 
 fields.dryRun.addEventListener("change", () => renderTradingToggle());
+fields.entryMode.addEventListener("change", syncEntryModeFields);
+syncEntryModeFields();
 
 fields.accountSelect.addEventListener("change", async () => {
   await switchToAccount(fields.accountSelect.value);
@@ -1225,9 +1218,6 @@ function readConfig() {
     mover_weight_rsi: readNumber("moverWeightRsi", 0),
     mover_volume_full_at: readNumber("moverVolumeFullAt", 5),
     mover_min_dollar_volume_millions: readNumber("moverMinDollarVolumeMillions", 20),
-    mover_stop_atr_fraction: readNumber("moverStopAtrFraction", 0.35),
-    mover_stop_min_percent: readNumber("moverStopMinPercent", 1.25),
-    mover_stop_max_percent: readNumber("moverStopMaxPercent", 6),
     sell_rsi: readNumber("sellRsi", 72),
     volume_period: readInt("volumePeriod", 20),
     volume_multiplier: readNumber("volumeMultiplier", 1.5),
@@ -1394,8 +1384,18 @@ function applyConfig(config, onlyKeys = null) {
     }
   });
   syncTradeSizeModeControl(onlyKeys ? undefined : normalizedConfig);
+  syncEntryModeFields();
   suppressProfileDirty = false;
   renderProfileStatus();
+}
+
+// Show only the settings the selected entry mode uses; a field another mode owns is hidden so the
+// page never shows a number that does nothing for this account.
+function syncEntryModeFields() {
+  const mode = fields.entryMode.value || "momentum";
+  document.querySelectorAll("#advancedSettings [data-modes]").forEach((el) => {
+    el.hidden = !el.dataset.modes.split(" ").includes(mode);
+  });
 }
 
 function sameSettingValue(a, b) {
@@ -1762,9 +1762,6 @@ function presetConfig(profile) {
     mover_weight_rsi: 0,
     mover_volume_full_at: 5,
     mover_min_dollar_volume_millions: 20,
-    mover_stop_atr_fraction: 0.35,
-    mover_stop_min_percent: 1.25,
-    mover_stop_max_percent: 6,
     sell_rsi: 72,
     volume_period: 20,
     volume_multiplier: 1.5,

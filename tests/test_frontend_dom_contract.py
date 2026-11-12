@@ -97,9 +97,6 @@ class FrontendDomContractTests(unittest.TestCase):
             "moverWeightRsi",
             "moverVolumeFullAt",
             "moverMinDollarVolumeMillions",
-            "moverStopAtrFraction",
-            "moverStopMinPercent",
-            "moverStopMaxPercent",
         )
         keys = (
             "mover_weight_volume",
@@ -111,15 +108,28 @@ class FrontendDomContractTests(unittest.TestCase):
             "mover_weight_rsi",
             "mover_volume_full_at",
             "mover_min_dollar_volume_millions",
-            "mover_stop_atr_fraction",
-            "mover_stop_min_percent",
-            "mover_stop_max_percent",
         )
         for element_id in ids:
             self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
         self.assertIn('<option value="movers"', self.index_html)
+        self.assertNotIn("moverStop", self.index_html)  # movers exits are the Basic Settings stop fields
         for key in keys:
             self.assertIn(f'"{key}"', self.app_js)
+
+    def test_settings_form_shows_only_the_selected_modes_fields(self) -> None:
+        # The movers weights sit in their own section; the momentum score weights and gates are
+        # tagged so movers mode hides them, and app.js hides whatever the selected mode does not use.
+        movers = re.search(r'<div class="compact-section" data-modes="movers">\s*<h3>Movers Score Weights</h3>(.*?)</div>\s*</div>', self.index_html, re.S)
+        self.assertIsNotNone(movers)
+        for element_id in ("moverWeightVolume", "moverWeightRsi", "moverVolumeFullAt", "moverMinDollarVolumeMillions"):
+            self.assertIn(f'id="{element_id}"', movers.group(1))
+        self.assertIn('<div class="compact-section" data-modes="momentum">\n                <h3>Score Weights (momentum)</h3>', self.index_html)
+        for element_id in ("buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice"):
+            self.assertRegex(self.index_html, rf'(?s)<label data-modes="momentum"[^>]*>(?:(?!</label>).)*id="{element_id}"', )
+        self.assertRegex(self.index_html, r'(?s)<label data-modes="momentum orb"[^>]*>(?:(?!</label>).)*id="minBuyVolumeRatio"')  # ORB's order-flow check
+        self.assertRegex(self.index_html, r'(?s)<label data-modes="momentum orb movers"[^>]*>(?:(?!</label>).)*id="minEntryScore"')
+        self.assertIn("function syncEntryModeFields()", self.app_js)
+        self.assertIn('fields.entryMode.addEventListener("change", syncEntryModeFields)', self.app_js)
 
     def test_hold_and_day_trade_controls_are_wired(self) -> None:
         hold_ids = (
