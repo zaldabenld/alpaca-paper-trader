@@ -79,8 +79,10 @@ from .runtime_diagnostics import (
 )
 from .storage import APP_DIR, write_private_json
 from .strategy import StrategyState, clean_symbols, decimal_value, money, number, order_quantity
+from .strategy import _bar_local_time, _latest_session_points
 from . import allocation as allocation_logic
 from . import inplay as inplay_logic
+from . import movers as movers_logic
 from . import app_settings
 from . import market_overview
 from . import symbol_info as symbol_info_logic
@@ -495,7 +497,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
-ENTRY_MODES = {"momentum", "orb", "allocation", "inplay"}
+ENTRY_MODES = {"momentum", "orb", "allocation", "inplay", "movers"}
 # Accounts in these modes do not put their held positions at the front of the shared price stream.
 STREAM_LEFTOVER_ENTRY_MODES = {"allocation", "inplay"}
 
@@ -569,6 +571,18 @@ PROFILE_STRATEGY_KEYS = {
     "inplay_max_picks",
     "inplay_max_chase_percent",
     "inplay_stop",
+    "mover_weight_volume",
+    "mover_weight_half_hour_move",
+    "mover_weight_vwap",
+    "mover_weight_five_min_move",
+    "mover_weight_range",
+    "mover_weight_session",
+    "mover_weight_rsi",
+    "mover_volume_full_at",
+    "mover_min_dollar_volume_millions",
+    "mover_stop_atr_fraction",
+    "mover_stop_min_percent",
+    "mover_stop_max_percent",
     "volume_period",
     "volume_multiplier",
     "min_avg_volume",
@@ -689,6 +703,26 @@ class AppConfig(BaseModel):
     inplay_max_picks: int = 10
     inplay_max_chase_percent: Decimal = Decimal("1")
     inplay_stop: str = "range_mid"
+    # entry_mode "movers": a weighted buy score with no technical vetoes. A stock that is up on the
+    # session, above VWAP and not falling over the last five minutes earns points for each reading;
+    # it is bought when the total reaches min_entry_score. Volume is today's total so far against
+    # the stock's own usual total by this time of day (consolidated data, read about 16 minutes
+    # late), worth full points at mover_volume_full_at times usual. RSI is a weight, never a
+    # ceiling. The stop sits mover_stop_atr_fraction of the stock's average daily range below the
+    # buy (between the min and max percent); once the position is up that far the stop follows the
+    # peak at the same distance. There is no take-profit. See movers.py for the evidence.
+    mover_weight_volume: Decimal = Decimal("45")
+    mover_weight_half_hour_move: Decimal = Decimal("15")
+    mover_weight_vwap: Decimal = Decimal("15")
+    mover_weight_five_min_move: Decimal = Decimal("10")
+    mover_weight_range: Decimal = Decimal("10")
+    mover_weight_session: Decimal = Decimal("5")
+    mover_weight_rsi: Decimal = Decimal("0")
+    mover_volume_full_at: Decimal = Decimal("5")
+    mover_min_dollar_volume_millions: Decimal = Decimal("20")
+    mover_stop_atr_fraction: Decimal = Decimal("0.35")
+    mover_stop_min_percent: Decimal = Decimal("1.25")
+    mover_stop_max_percent: Decimal = Decimal("6")
     max_entries_per_symbol_per_day: int = 0
     # Buy only while the price is still rising: the last completed 1-min bar closed at or above the
     # bar before it, and the latest streamed trade (when fresh) is not below that earlier close.
@@ -1024,6 +1058,16 @@ class AppConfig(BaseModel):
         self.orb_max_breakout_percent = min(max(self.orb_max_breakout_percent, Decimal("0")), Decimal("10"))
         self.allocation_sma_days = min(max(int(self.allocation_sma_days), 20), 400)
         self.inplay_range_minutes = min(max(int(self.inplay_range_minutes) // 5 * 5, 5), 30)
+        for name in (
+            "mover_weight_volume", "mover_weight_half_hour_move", "mover_weight_vwap", "mover_weight_five_min_move",
+            "mover_weight_range", "mover_weight_session", "mover_weight_rsi",
+        ):
+            setattr(self, name, min(max(getattr(self, name), Decimal("0")), Decimal("100")))
+        self.mover_volume_full_at = min(max(self.mover_volume_full_at, Decimal("1.5")), Decimal("50"))
+        self.mover_min_dollar_volume_millions = min(max(self.mover_min_dollar_volume_millions, Decimal("0")), Decimal("100000"))
+        self.mover_stop_atr_fraction = min(max(self.mover_stop_atr_fraction, Decimal("0.05")), Decimal("2"))
+        self.mover_stop_min_percent = min(max(self.mover_stop_min_percent, Decimal("0.25")), Decimal("20"))
+        self.mover_stop_max_percent = min(max(self.mover_stop_max_percent, self.mover_stop_min_percent), Decimal("25"))
         self.inplay_min_relative_volume = min(max(self.inplay_min_relative_volume, Decimal("0")), Decimal("50"))
         self.inplay_min_atr_percent = min(max(self.inplay_min_atr_percent, Decimal("0")), Decimal("50"))
         self.inplay_min_dollar_volume_millions = min(max(self.inplay_min_dollar_volume_millions, Decimal("0")), Decimal("100000"))
@@ -2113,6 +2157,19 @@ class TraderEngine:
         self.inplay_retry_at = 0.0
         self.inplay_failures = 0
         self.inplay_view: dict[str, Any] = {}
+        # Movers mode (entry_mode "movers"): each symbol's usual volume by time of day and today's
+        # relative volume, loaded on a worker thread from consolidated data.
+        self.mover_session = ""
+        self.mover_profiles: dict[str, list[float] | None] = {}
+        self.mover_stats: dict[str, inplay_logic.DailyStats] = {}
+        self.mover_volume: dict[str, Decimal] = {}
+        self.mover_volume_slot: int | None = None
+        self.mover_volume_at = 0.0
+        self.mover_scores: dict[str, movers_logic.Score] = {}
+        self.mover_worker: threading.Thread | None = None
+        self.mover_retry_at = 0.0
+        self.mover_failures = 0
+        self.mover_view: dict[str, Any] = {}
         self.restore_trade_guards_from_replay()
 
     def configure_saved(self, settings: AccountSettings) -> None:
@@ -2766,6 +2823,8 @@ class TraderEngine:
             if config.entry_mode == "inplay":
                 inplay_status = self.inplay_pass(clock, market_open)
                 entry_symbols = self.mode_entry_symbols()
+            elif config.entry_mode == "movers":
+                inplay_status = self.movers_pass(clock, market_open)
 
             position_map = {str(item.get("symbol", "")).upper(): item for item in position_dicts}
             open_positions = [item for item in position_dicts if abs(decimal_value(item.get("qty"))) > Decimal("0")]
@@ -4071,6 +4130,353 @@ class TraderEngine:
         self.strategy_state.last_action[symbol] = "Candidate in-play breakout"
         return {"symbol": symbol, "rank": pick_rank, "score": score}
 
+    # ----- Movers mode (entry_mode "movers") ---------------------------------------------------
+
+    MOVERS_PATH = APP_DIR / "movers_volume.json"
+    MOVERS_REFRESH_SECONDS = 150
+    MOVERS_STALE_SECONDS = 10 * 60
+
+    def mover_weights(self, config: AppConfig) -> movers_logic.Weights:
+        return movers_logic.Weights(
+            volume=config.mover_weight_volume,
+            half_hour_move=config.mover_weight_half_hour_move,
+            vwap=config.mover_weight_vwap,
+            five_min_move=config.mover_weight_five_min_move,
+            daily_range=config.mover_weight_range,
+            session=config.mover_weight_session,
+            rsi=config.mover_weight_rsi,
+            volume_full_at=config.mover_volume_full_at,
+        )
+
+    def mover_stop_distance(self, symbol: str, config: AppConfig) -> Decimal:
+        """The stop distance for this stock in percent. With no daily history on record the widest
+        allowed stop is used, so a missing reading can never tighten a stop that is already live."""
+        with self.lock:
+            stat = self.mover_stats.get(symbol.strip().upper())
+        return movers_logic.stop_distance_percent(
+            stat.atr_percent if stat is not None else None,
+            config.mover_stop_atr_fraction,
+            config.mover_stop_min_percent,
+            config.mover_stop_max_percent,
+            fallback=config.mover_stop_max_percent,
+        )
+
+    def mover_price_change(self, symbol: str, price: Decimal | None, minutes: int) -> Decimal | None:
+        """Percent change of price against the session bar from `minutes` ago (or the session's
+        first bar while the session is younger than that)."""
+        if price is None or price <= 0:
+            return None
+        session = _latest_session_points(self.strategy_state.histories.get(symbol.strip().upper(), []))
+        if not session:
+            return None
+        latest = _bar_local_time(session[-1].timestamp)
+        if latest is None:
+            return None
+        cutoff = latest - timedelta(minutes=minutes)
+        base = session[0].close
+        for point in reversed(session):
+            local = _bar_local_time(point.timestamp)
+            if local is not None and local <= cutoff:
+                base = point.close
+                break
+        if base <= 0:
+            return None
+        return (price / base - Decimal("1")) * Decimal("100")
+
+    def mover_readings(self, symbol: str, snapshot: Any) -> movers_logic.Readings:
+        clean = symbol.strip().upper()
+        with self.lock:
+            relative = self.mover_volume.get(clean)
+            stat = self.mover_stats.get(clean)
+            volume_age = time.monotonic() - self.mover_volume_at
+        if volume_age > self.MOVERS_STALE_SECONDS:
+            # The volume worker has not succeeded for a while: an old reading earns no points.
+            relative = None
+        price = self.latest_stream_price(clean) or snapshot.price
+        return movers_logic.Readings(
+            relative_volume=relative,
+            half_hour_move=self.mover_price_change(clean, price, 30),
+            five_min_move=self.mover_price_change(clean, price, 5),
+            vwap_distance=getattr(snapshot, "vwap_distance_percent", None),
+            session_change=getattr(snapshot, "session_change_percent", None),
+            daily_range=stat.atr_percent if stat is not None else None,
+            rsi=snapshot.rsi,
+        )
+
+    def movers_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
+        """Why this stock is not a buy right now; empty when its weighted score clears the bar.
+
+        Only three readings are yes/no (up on the session, above VWAP, not falling over the last
+        five minutes). Everything else, RSI included, only moves the score.
+        """
+        clean = symbol.strip().upper()
+        for reason in (self.inverse_etf_hold_reason(symbol, config), self.halt_hold_reason(symbol)):
+            if reason:
+                return reason
+        session_change = getattr(snapshot, "session_change_percent", None)
+        vwap_distance = getattr(snapshot, "vwap_distance_percent", None)
+        if session_change is not None and session_change <= 0:
+            return f"Hold (movers: down {abs(session_change):.2f}% on the session)"
+        if vwap_distance is not None and vwap_distance <= 0:
+            return f"Hold (movers: {abs(vwap_distance):.2f}% under VWAP)"
+        readings = self.mover_readings(symbol, snapshot)
+        direction = movers_logic.direction_hold_reason(readings)
+        if direction:
+            return direction
+        with self.lock:
+            known = clean in self.mover_profiles
+            profile = self.mover_profiles.get(clean)
+            stat = self.mover_stats.get(clean)
+        if not known:
+            return "Hold (movers: volume history loading)"
+        if profile is None or stat is None:
+            return "Hold (movers: not enough volume history)"
+        floor = config.mover_min_dollar_volume_millions * Decimal("1000000")
+        if floor > 0 and stat.dollar_volume < floor:
+            return (
+                f"Hold (movers: trades ${stat.dollar_volume / Decimal('1000000'):.0f}M a day, "
+                f"under ${config.mover_min_dollar_volume_millions:.0f}M)"
+            )
+        # One buy per stock per day unless the account sets its own cap: a stock that just stopped
+        # out would otherwise be bought straight back while it still scores.
+        daily_cap = config.max_entries_per_symbol_per_day if config.max_entries_per_symbol_per_day > 0 else 1
+        with self.lock:
+            entries_today = self.entries_today_by_symbol.get(clean, 0)
+        if entries_today >= daily_cap:
+            return f"Hold (movers: bought {entries_today}x today)"
+        if readings.relative_volume is None:
+            # Volume carries the most weight; without a current reading the score would be a
+            # price-only score, so wait for it (first readable about 09:51 ET, then every few minutes).
+            return "Hold (movers: volume reading not in yet)"
+        result = movers_logic.score(readings, self.mover_weights(config))
+        with self.lock:
+            self.mover_scores[clean] = result
+        self.set_entry_score(symbol, result.total)
+        if result.total < config.min_entry_score:
+            return f"Hold (score {result.total:.0f} of {config.min_entry_score:.0f}: {result.describe() or 'no points yet'})"
+        return self.asset_tradeability_hold_reason(symbol)
+
+    def movers_entry_candidate(self, symbol: str, rank: int, snapshot: Any, config: AppConfig) -> dict[str, Any] | None:
+        hold = self.movers_entry_hold_reason(symbol, snapshot, config)
+        if hold:
+            self.strategy_state.last_action[symbol] = hold
+            return None
+        with self.lock:
+            result = self.mover_scores.get(symbol.strip().upper())
+        total = result.total if result is not None else Decimal("0")
+        self.strategy_state.last_action[symbol] = f"Candidate movers score {total:.0f}"
+        return {"symbol": symbol, "rank": rank, "score": total}
+
+    def movers_pass(self, clock: Any, market_open: bool) -> str:
+        """Keep the volume data fresh (on a worker thread) and describe where it stands."""
+        today = self.allocation_today(clock)
+        with self.lock:
+            new_session = self.mover_session != today.isoformat()
+            if new_session:
+                self.mover_session = today.isoformat()
+                self.mover_profiles = {}
+                self.mover_stats = {}
+                self.mover_volume = {}
+                self.mover_scores = {}
+                self.mover_volume_slot = None
+                self.mover_volume_at = 0.0
+        if new_session:
+            self.load_mover_data(today)
+        symbols = [symbol for symbol in self.scan_symbols() if not symbol[:1].isdigit()]
+        with self.lock:
+            missing = [symbol for symbol in symbols if symbol not in self.mover_profiles]
+            stale = time.monotonic() - self.mover_volume_at >= self.MOVERS_REFRESH_SECONDS
+            volume = dict(self.mover_volume)
+            slot = self.mover_volume_slot
+        if market_open and (missing or stale):
+            self.start_mover_worker(today, symbols)
+        leaders = sorted(volume.items(), key=lambda item: -item[1])[:10]
+        as_of = ""
+        if slot is not None:
+            stamp = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=30) + timedelta(
+                minutes=movers_logic.SLOT_MINUTES * (slot + 1)
+            )
+            as_of = stamp.strftime("%I:%M %p ET").lstrip("0")
+        view = {
+            "session": today.isoformat(),
+            "volume_as_of": as_of,
+            "symbols_with_volume": len(volume),
+            "symbols_loading": len(missing),
+            "leaders": [{"symbol": symbol, "relative_volume": f"{value:.2f}"} for symbol, value in leaders],
+        }
+        with self.lock:
+            self.mover_view = view
+        if market_open and not volume:
+            return "Movers: loading volume data; buys start once it is in"
+        return ""
+
+    def load_mover_data(self, today: date) -> None:
+        try:
+            saved = (json.loads(self.MOVERS_PATH.read_text(encoding="utf-8")) or {}).get(self.account_id) or {}
+            if saved.get("session") != today.isoformat():
+                return
+            profiles = {
+                str(symbol).upper(): ([float(value) for value in values] if values else None)
+                for symbol, values in (saved.get("profiles") or {}).items()
+            }
+            stats = {
+                str(symbol).upper(): inplay_logic.DailyStats(atr_percent=Decimal(str(item[0])), dollar_volume=Decimal(str(item[1])))
+                for symbol, item in (saved.get("stats") or {}).items()
+            }
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError, AttributeError, IndexError):
+            return
+        with self.lock:
+            self.mover_profiles.update(profiles)
+            self.mover_stats.update(stats)
+
+    def save_mover_data(self, today: date) -> None:
+        with self.lock:
+            entry = {
+                "session": today.isoformat(),
+                "profiles": {symbol: values for symbol, values in self.mover_profiles.items()},
+                "stats": {symbol: [str(stat.atr_percent), str(stat.dollar_volume)] for symbol, stat in self.mover_stats.items()},
+            }
+        try:
+            payload = json.loads(self.MOVERS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload[self.account_id] = entry
+        try:
+            write_private_json(self.MOVERS_PATH, payload)
+        except OSError as exc:
+            self.log("warn", f"Movers: could not save the volume data: {exc}")
+
+    def start_mover_worker(self, today: date, symbols: list[str]) -> None:
+        with self.lock:
+            if self.mover_worker is not None and self.mover_worker.is_alive():
+                return
+            if time.monotonic() < self.mover_retry_at:
+                return
+            api_key, secret_key = self.api_key, self.secret_key
+            if not api_key or not secret_key:
+                return
+            worker = threading.Thread(
+                target=self.mover_work, args=(today, list(symbols), api_key, secret_key), daemon=True, name=f"movers-{self.account_id[:6]}"
+            )
+            self.mover_worker = worker
+        worker.start()
+
+    def mover_work(self, today: date, symbols: list[str], api_key: str, secret_key: str) -> None:
+        """Worker thread: load the usual volume by time of day for new symbols, then today's volume so far."""
+        try:
+            data_client = StockHistoricalDataClient(api_key, secret_key)
+            with self.lock:
+                known = set(self.mover_profiles)
+            missing = [symbol for symbol in symbols if symbol not in known]
+            if missing:
+                trading_client = TradingClient(api_key, secret_key, paper=True)
+                sessions = self.mover_previous_sessions(trading_client, today)
+                per_symbol: dict[str, list[list[float]]] = {symbol: [] for symbol in missing}
+                for session in sessions:
+                    bars = self.mover_fetch_volume(data_client, missing, session, None)
+                    for symbol in missing:
+                        per_symbol[symbol].append(movers_logic.cumulative_volume(bars.get(symbol, [])))
+                stats = self.inplay_fetch_daily_stats(data_client, missing, today)
+                profiles = {symbol: movers_logic.average_profile(per_symbol[symbol]) for symbol in missing}
+                with self.lock:
+                    current = self.mover_session == today.isoformat()
+                    if current:
+                        self.mover_profiles.update(profiles)
+                        self.mover_stats.update(stats)
+                if not current:
+                    return
+                self.save_mover_data(today)
+            open_et = datetime.combine(today, datetime.min.time(), MARKET_TIMEZONE).replace(hour=9, minute=30)
+            minutes = (datetime.now(MARKET_TIMEZONE) - open_et).total_seconds() / 60
+            slot = movers_logic.last_complete_slot(minutes, self.INPLAY_SIP_DELAY_MINUTES)
+            volumes: dict[str, Decimal] = {}
+            if slot is not None:
+                with self.lock:
+                    profiles_now = {symbol: self.mover_profiles.get(symbol) for symbol in symbols}
+                wanted = [symbol for symbol in symbols if profiles_now.get(symbol)]
+                end = open_et + timedelta(minutes=movers_logic.SLOT_MINUTES * (slot + 1))
+                bars = self.mover_fetch_volume(data_client, wanted, today, end) if wanted else {}
+                for symbol in wanted:
+                    value = movers_logic.relative_volume(
+                        movers_logic.cumulative_volume(bars.get(symbol, [])), profiles_now[symbol], slot
+                    )
+                    if value is not None:
+                        volumes[symbol] = value
+            with self.lock:
+                if self.mover_session == today.isoformat():
+                    if slot is not None:
+                        self.mover_volume = volumes
+                        self.mover_volume_slot = slot
+                    self.mover_volume_at = time.monotonic()
+                    self.mover_failures = 0
+        except Exception as exc:
+            with self.lock:
+                self.mover_failures += 1
+                wait = min(600, 60 * 2 ** (self.mover_failures - 1))
+                self.mover_retry_at = time.monotonic() + wait
+            self.log("warn", f"Movers volume data load failed; retrying in {wait // 60} min: {exc}")
+
+    def mover_previous_sessions(self, trading_client: Any, today: date) -> list[date]:
+        """The last full sessions before today. Half days are left out: their flat afternoon would
+        make every normal afternoon look like heavy volume for weeks."""
+        calendar = trading_client.get_calendar(GetCalendarRequest(start=today - timedelta(days=45), end=today - timedelta(days=1)))
+        sessions: list[date] = []
+        for item in calendar or []:
+            value = getattr(item, "date", None)
+            if isinstance(value, datetime):
+                value = value.date()
+            close = getattr(item, "close", None)
+            close_hour = getattr(close, "hour", 16)
+            if isinstance(value, date) and value < today and close_hour >= 16:
+                sessions.append(value)
+        return sorted(sessions)[-movers_logic.PROFILE_SESSIONS:]
+
+    def mover_fetch_volume(
+        self, data_client: Any, symbols: list[str], session: date, end: datetime | None
+    ) -> dict[str, list[tuple[int, Decimal]]]:
+        """(minute of day ET, volume) for each symbol's consolidated 5-minute bars on session, from
+        the open to `end` (the close when None)."""
+        start = datetime.combine(session, datetime.min.time(), MARKET_TIMEZONE).replace(hour=9, minute=30)
+        stop = end or start.replace(hour=16, minute=0)
+        result: dict[str, list[tuple[int, Decimal]]] = {}
+        for index in range(0, len(symbols), 100):
+            batch = symbols[index : index + 100]
+            while batch:
+                try:
+                    bars = data_client.get_stock_bars(
+                        StockBarsRequest(
+                            symbol_or_symbols=batch,
+                            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                            start=start,
+                            end=stop,
+                            feed=DataFeed.SIP,
+                            adjustment=Adjustment.RAW,
+                            limit=HISTORICAL_BARS_REQUEST_LIMIT,
+                            sort=Sort.ASC,
+                        )
+                    )
+                except Exception as exc:
+                    rejected = rejected_market_data_symbol(exc, batch)
+                    if not rejected:
+                        raise
+                    batch = [symbol for symbol in batch if symbol != rejected]
+                    continue
+                for symbol, symbol_bars in (getattr(bars, "data", {}) or {}).items():
+                    rows: list[tuple[int, Decimal]] = []
+                    for bar in symbol_bars:
+                        stamp = getattr(bar, "timestamp", None)
+                        if stamp is None:
+                            continue
+                        local = stamp.astimezone(MARKET_TIMEZONE)
+                        if not (start <= local < stop):
+                            continue
+                        rows.append((local.hour * 60 + local.minute, decimal_value(getattr(bar, "volume", None))))
+                    result[str(symbol).upper()] = rows
+                break
+        return result
+
     # ----- Hold mode (entry_mode "allocation") -------------------------------------------------
 
     def allocation_today(self, clock: Any) -> date:
@@ -4393,6 +4799,8 @@ class TraderEngine:
             return self.inverse_trend_entry_hold_reason(symbol, snapshot, config)
         if config.entry_mode == "inplay":
             return self.inplay_entry_hold_reason(symbol, snapshot, config)
+        if config.entry_mode == "movers":
+            return self.movers_entry_hold_reason(symbol, snapshot, config)
         limits = entry_profile_limits(config)
         inverse_reason = self.inverse_etf_hold_reason(symbol, config)
         if inverse_reason:
@@ -4639,6 +5047,8 @@ class TraderEngine:
             return self.inverse_trend_entry_candidate(symbol, rank, snapshot, config)
         if config.entry_mode == "inplay":
             return self.inplay_entry_candidate(symbol, rank, snapshot, config)
+        if config.entry_mode == "movers":
+            return self.movers_entry_candidate(symbol, rank, snapshot, config)
         if config.entry_mode == "orb":
             return self.orb_entry_candidate(symbol, rank, snapshot, config)
         quality_hold = self.entry_quality_hold_reason(symbol, snapshot, config)
@@ -4993,7 +5403,8 @@ class TraderEngine:
                 self.strategy_state.last_action[symbol] = f"Hold (score {entry_score:.1f} < {config.min_entry_score})"
                 return events, False, None
             reentry_floor = self.reentry_score_floors.get(symbol)
-            if scored_entry and reentry_floor is not None and entry_score < reentry_floor:
+            # Re-entry floors are set on the momentum score's scale; the movers score has its own.
+            if scored_entry and config.entry_mode != "movers" and reentry_floor is not None and entry_score < reentry_floor:
                 self.strategy_state.last_action[symbol] = f"Hold (re-entry needs {reentry_floor:.1f})"
                 return events, False, None
             if config.max_open_positions > 0 and open_position_count >= config.max_open_positions:
@@ -5025,6 +5436,11 @@ class TraderEngine:
                 events.append(("warn", f"Skipped {symbol}: calculated quantity is zero."))
                 return events, False, None
             entry_notes = [entry_guard_detail]
+            if config.entry_mode == "movers":
+                with self.lock:
+                    mover_score = self.mover_scores.get(symbol)
+                if mover_score is not None:
+                    entry_notes.append(f"movers: {mover_score.describe()}")
             if config.entry_mode == "inplay":
                 with self.lock:
                     day_pick = self.inplay_picks.get(symbol)
@@ -5430,6 +5846,22 @@ class TraderEngine:
                         trailed = entry_price + ((trailed - entry_price) // step) * step
                     stop = max(stop, entry_price, trailed)
             return max(Decimal("0"), self.round_exit_price(stop, ROUND_DOWN))
+        if config.entry_mode == "movers":
+            # Sized to the stock: a fraction of its average daily range below the buy. Once the
+            # position has been up that far the stop follows the peak at the same distance, in
+            # quarter-percent steps, and never goes back down.
+            if entry_price <= 0:
+                return Decimal("0")
+            distance = self.mover_stop_distance(symbol, config)
+            stop = entry_price * (Decimal("1") - distance / Decimal("100"))
+            peak = self.update_position_peak(symbol, entry_price, current_price if current_price > 0 else entry_price)
+            if percent_change(peak, entry_price) >= distance:
+                trailed = peak * (Decimal("1") - distance / Decimal("100"))
+                step = entry_price * Decimal("0.0025")
+                if trailed > entry_price and step > 0:
+                    trailed = entry_price + ((trailed - entry_price) // step) * step
+                stop = max(stop, trailed)
+            return max(Decimal("0"), self.round_exit_price(stop, ROUND_DOWN))
         _, stop = self.exit_prices(entry_price, config)
         if entry_price <= 0:
             return stop
@@ -5472,6 +5904,12 @@ class TraderEngine:
                     implied_peak,
                     entry_price * (Decimal("1") + config.inverse_trend_lock_at_percent / Decimal("100")),
                 )
+            elif config.entry_mode == "movers":
+                if stop_price > entry_price:
+                    # Use the smallest stop distance: the real one is at least that, so the stop
+                    # worked out from this peak can never sit above the stop that is already live
+                    # (not even when the stock's daily range only loads later).
+                    implied_peak = stop_price / (Decimal("1") - config.mover_stop_min_percent / Decimal("100"))
             elif config.profit_trail_drop_percent > 0 and stop_price > entry_price:
                 implied_peak = stop_price / (Decimal("1") - config.profit_trail_drop_percent / Decimal("100"))
             elif config.breakeven_at_percent > 0:
@@ -5481,7 +5919,7 @@ class TraderEngine:
     def position_take_profit_price(self, symbol: str, entry_price: Decimal, config: AppConfig) -> Decimal:
         """The profit target for a held position; none while an inverse fund is on trend hold, and none
         in day-trade mode, where winners run until the stop or the sale before the close."""
-        if self.inverse_trend_active(symbol, config) or config.entry_mode == "inplay":
+        if self.inverse_trend_active(symbol, config) or config.entry_mode in {"inplay", "movers"}:
             return Decimal("0")
         return self.exit_prices(entry_price, config)[0]
 
@@ -5494,6 +5932,8 @@ class TraderEngine:
                 return ((pick.high - pick.stop) / pick.high * Decimal("100")).quantize(Decimal("0.01"))
         if self.inverse_trend_active(symbol, config):
             return config.inverse_trend_stop_percent
+        if config.entry_mode == "movers":
+            return self.mover_stop_distance(symbol, config)
         return config.stop_loss_percent
 
     def exit_prices(self, entry_price: Decimal, config: AppConfig) -> tuple[Decimal, Decimal]:
@@ -5665,7 +6105,7 @@ class TraderEngine:
                 stop_price > 0
                 and stop_price < entry_price
                 and stop_price - stop_loss_price >= increment
-                and self.config.entry_mode != "inplay"
+                and self.config.entry_mode not in {"inplay", "movers"}
             ):
                 return self.cancel_open_order(order)
         return False
@@ -5784,7 +6224,12 @@ class TraderEngine:
                 return f"local stop-loss {config.inverse_trend_stop_percent}% (gain {current_gain:.2f}%)", ""
             return "", ""
 
-        if config.take_profit_percent > 0 and config.entry_mode != "inplay" and current_gain >= config.take_profit_percent and not has_take_profit_order:
+        if (
+            config.take_profit_percent > 0
+            and config.entry_mode not in {"inplay", "movers"}
+            and current_gain >= config.take_profit_percent
+            and not has_take_profit_order
+        ):
             return (
                 f"local take-profit {config.take_profit_percent}%"
                 f" (gain {current_gain:.2f}%)",
@@ -7161,6 +7606,7 @@ class TraderEngine:
                 "protection": self.protection_rows,
                 "allocation": dict(self.allocation_view),
                 "inplay": dict(self.inplay_view),
+                "movers": dict(self.mover_view),
                 "trade_history": self.trade_history,
                 "risk": {
                     "daily_loss_breached": bool(self.daily_loss_breach_session),
