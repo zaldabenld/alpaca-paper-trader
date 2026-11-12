@@ -4214,13 +4214,9 @@ class TraderEngine:
                 f"Hold (movers: trades ${stat.dollar_volume / Decimal('1000000'):.0f}M a day, "
                 f"under ${config.mover_min_dollar_volume_millions:.0f}M)"
             )
-        # One buy per stock per day unless the account sets its own cap: a stock that just stopped
-        # out would otherwise be bought straight back while it still scores.
-        daily_cap = config.max_entries_per_symbol_per_day if config.max_entries_per_symbol_per_day > 0 else 1
-        with self.lock:
-            entries_today = self.entries_today_by_symbol.get(clean, 0)
-        if entries_today >= daily_cap:
-            return f"Hold (movers: bought {entries_today}x today)"
+        # No re-entry limit of its own: a stock sold earlier today is bought again whenever it scores.
+        # The only per-stock daily limit is the account's visible Max Buys per Symbol per Day
+        # (checked in entry_candidate; 0 = off).
         if readings.relative_volume is None:
             # Volume carries the most weight; without a current reading the score would be a
             # price-only score, so wait for it (first readable about 09:51 ET, then every few minutes).
