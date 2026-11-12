@@ -4149,7 +4149,9 @@ class TraderEngine:
             volume_full_at=config.mover_volume_full_at,
         )
 
-    def mover_price_change(self, symbol: str, price: Decimal | None, minutes: int) -> Decimal | None:
+    def mover_price_change(
+        self, symbol: str, price: Decimal | None, minutes: int, price_at: datetime | None = None
+    ) -> Decimal | None:
         """Percent change of price against the session bar from `minutes` ago (or the session's
         first bar while the session is younger than that)."""
         if price is None or price <= 0:
@@ -4157,10 +4159,10 @@ class TraderEngine:
         session = _latest_session_points(self.strategy_state.histories.get(symbol.strip().upper(), []))
         if not session:
             return None
-        latest = _bar_local_time(session[-1].timestamp)
-        if latest is None:
+        price_at = price_at or _bar_local_time(session[-1].timestamp)
+        if price_at is None:
             return None
-        cutoff = latest - timedelta(minutes=minutes)
+        cutoff = price_at - timedelta(minutes=minutes)
         base = session[0].close
         for point in reversed(session):
             local = _bar_local_time(point.timestamp)
@@ -4180,13 +4182,20 @@ class TraderEngine:
         if volume_age > self.MOVERS_STALE_SECONDS:
             # The volume worker has not succeeded for a while: an old reading earns no points.
             relative = None
-        price = self.latest_stream_price(clean) or snapshot.price
+        session = _latest_session_points(self.strategy_state.histories.get(clean, []))
+        bar_at = _bar_local_time(session[-1].timestamp) if session else None
+        price, price_at = snapshot.price, bar_at
+        trade = self.latest_stream_trade(clean)
+        if trade and bar_at and trade[1] >= bar_at and trade[1].astimezone(MARKET_TIMEZONE).date() == bar_at.date():
+            price, price_at = trade
+        vwap = snapshot.vwap
+        opening_close = session[0].close if session else None
         return movers_logic.Readings(
             relative_volume=relative,
-            half_hour_move=self.mover_price_change(clean, price, 30),
-            five_min_move=self.mover_price_change(clean, price, 5),
-            vwap_distance=getattr(snapshot, "vwap_distance_percent", None),
-            session_change=getattr(snapshot, "session_change_percent", None),
+            half_hour_move=self.mover_price_change(clean, price, 30, price_at),
+            five_min_move=self.mover_price_change(clean, price, 5, price_at),
+            vwap_distance=percent_change(price, vwap) if price and vwap else None,
+            session_change=percent_change(price, opening_close) if price and opening_close else None,
             daily_range=stat.atr_percent if stat is not None else None,
             rsi=snapshot.rsi,
         )
@@ -4201,12 +4210,6 @@ class TraderEngine:
         for reason in (self.inverse_etf_hold_reason(symbol, config), self.halt_hold_reason(symbol)):
             if reason:
                 return reason
-        session_change = getattr(snapshot, "session_change_percent", None)
-        vwap_distance = getattr(snapshot, "vwap_distance_percent", None)
-        if session_change is not None and session_change <= 0:
-            return f"Hold (movers: down {abs(session_change):.2f}% on the session)"
-        if vwap_distance is not None and vwap_distance <= 0:
-            return f"Hold (movers: {abs(vwap_distance):.2f}% under VWAP)"
         readings = self.mover_readings(symbol, snapshot)
         direction = movers_logic.direction_hold_reason(readings)
         if direction:
@@ -4883,8 +4886,8 @@ class TraderEngine:
         if current is None or traded_at >= current[1]:
             self.latest_stream_trades[symbol] = (price, traded_at)
 
-    def latest_stream_price(self, symbol: str, max_age_seconds: float = 120.0) -> Decimal | None:
-        """The last streamed trade price for symbol when it is fresh; None otherwise (no API call)."""
+    def latest_stream_trade(self, symbol: str, max_age_seconds: float = 120.0) -> tuple[Decimal, datetime] | None:
+        """The latest cached trade and its time when fresh, without an API call."""
         with self.lock:
             entry = self.latest_stream_trades.get(symbol.strip().upper())
         if not entry:
@@ -4892,7 +4895,11 @@ class TraderEngine:
         price, traded_at = entry
         if price <= 0 or (datetime.now(timezone.utc) - traded_at).total_seconds() > max_age_seconds:
             return None
-        return price
+        return entry
+
+    def latest_stream_price(self, symbol: str, max_age_seconds: float = 120.0) -> Decimal | None:
+        trade = self.latest_stream_trade(symbol, max_age_seconds)
+        return trade[0] if trade else None
 
     def rising_price_hold_reason(self, symbol: str, snapshot: Any) -> str:
         """Hold unless the price is still rising: the last completed bar closed at or above the one
@@ -5398,6 +5405,14 @@ class TraderEngine:
                 return events, False, None
 
             order_price = self.current_trade_price(symbol, snapshot.price)
+            if config.entry_mode == "movers" and scored_entry:
+                # The order lookup can reveal a more recent trade than the one used for ranking.
+                self.clear_entry_score(symbol)
+                hold = self.movers_entry_hold_reason(symbol, self.snapshot(symbol), config)
+                if hold:
+                    self.strategy_state.last_action[symbol] = hold
+                    return events, False, None
+                entry_score = self.strategy_state.entry_score.get(symbol)
             if config.entry_mode == "inplay":
                 # The order goes at the live price, which can be past the chase limit by now.
                 with self.lock:
@@ -6377,6 +6392,11 @@ class TraderEngine:
             price = decimal_value(raw.get("price"))
             if price > 0:
                 candidates.append(price)
+                if self.config.entry_mode == "movers" and not self.inverse_trend_active(symbol, self.config):
+                    traded_at = self.parse_order_datetime(raw.get("timestamp"))
+                    if traded_at is not None:
+                        with self.lock:
+                            self.remember_stream_trade(symbol.strip().upper(), price, traded_at)
         except Exception as exc:
             self.log("warn", f"Latest trade price lookup failed for {symbol}; using strategy price: {exc}")
         try:
