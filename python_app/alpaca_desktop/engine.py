@@ -208,10 +208,6 @@ INVERSE_ETF_SYMBOLS = {
 }
 
 MARKET_PROXY_SYMBOLS = ("SPY", "QQQ")
-# Inverse trend hold buys only once the fund is clearly above its session VWAP, not on a touch.
-INVERSE_TREND_ENTRY_VWAP_PERCENT = Decimal("0.1")
-# Session VWAP from fewer regular-hours bars than this is one or two prints, not a trend line.
-INVERSE_TREND_MIN_SESSION_BARS = 5
 TOP_VOLUME_INVERSE_ETF_SYMBOLS = ("SQQQ", "SPXU", "SDS", "SH", "TZA")
 
 LEVERAGED_OR_VOLATILITY_ETP_SYMBOLS = {
@@ -334,7 +330,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "inverse_trend_hold": False,
-        "inverse_trend_exit_percent": "0.3",
+        "inverse_trend_exit_percent": "0",
         "inverse_trend_stop_percent": "3",
         "inverse_trend_lock_at_percent": "3",
         "inverse_trend_trail_percent": "2",
@@ -403,7 +399,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "inverse_trend_hold": False,
-        "inverse_trend_exit_percent": "0.3",
+        "inverse_trend_exit_percent": "0",
         "inverse_trend_stop_percent": "3",
         "inverse_trend_lock_at_percent": "3",
         "inverse_trend_trail_percent": "2",
@@ -472,7 +468,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "reentry_score_boost": "10",
         "inverse_etf_mode": "allow",
         "inverse_trend_hold": False,
-        "inverse_trend_exit_percent": "0.3",
+        "inverse_trend_exit_percent": "0",
         "inverse_trend_stop_percent": "3",
         "inverse_trend_lock_at_percent": "3",
         "inverse_trend_trail_percent": "2",
@@ -579,7 +575,6 @@ PROFILE_STRATEGY_KEYS = {
     "mover_weight_session",
     "mover_weight_rsi",
     "mover_volume_full_at",
-    "mover_min_dollar_volume_millions",
     "volume_period",
     "volume_multiplier",
     "min_avg_volume",
@@ -715,7 +710,6 @@ class AppConfig(BaseModel):
     mover_weight_session: Decimal = Decimal("5")
     mover_weight_rsi: Decimal = Decimal("0")
     mover_volume_full_at: Decimal = Decimal("5")
-    mover_min_dollar_volume_millions: Decimal = Decimal("20")
     max_entries_per_symbol_per_day: int = 0
     # Buy only while the price is still rising: the last completed 1-min bar closed at or above the
     # bar before it, and the latest streamed trade (when fresh) is not below that earlier close.
@@ -723,7 +717,7 @@ class AppConfig(BaseModel):
     # Entry pacing per account: at most this many new buys per scan, and no new buy within this
     # many seconds of the last one (0 = off). Spreads the burst that fires the moment a guard lifts.
     # Spacing is a timed lock on the entry path, so it stays off unless the user turns it on.
-    max_entries_per_scan: int = 2
+    max_entries_per_scan: int = 0
     entry_spacing_seconds: int = 0
     flatten_on_daily_loss: bool = False
     # Sell every position this many minutes before the close (0 = off; for pure day trading).
@@ -749,7 +743,7 @@ class AppConfig(BaseModel):
     # below the peak and never under entry (either at 0 = no lock). Being above VWAP is the downturn
     # signal: there is no separate market detector, and nothing else is blocked. Sizing is unchanged.
     inverse_trend_hold: bool = False
-    inverse_trend_exit_percent: Decimal = Decimal("0.3")
+    inverse_trend_exit_percent: Decimal = Decimal("0")
     inverse_trend_stop_percent: Decimal = Decimal("3")
     inverse_trend_lock_at_percent: Decimal = Decimal("3")
     inverse_trend_trail_percent: Decimal = Decimal("2")
@@ -1057,7 +1051,6 @@ class AppConfig(BaseModel):
         ):
             setattr(self, name, min(max(getattr(self, name), Decimal("0")), Decimal("100")))
         self.mover_volume_full_at = min(max(self.mover_volume_full_at, Decimal("1.5")), Decimal("50"))
-        self.mover_min_dollar_volume_millions = min(max(self.mover_min_dollar_volume_millions, Decimal("0")), Decimal("100000"))
         self.inplay_min_relative_volume = min(max(self.inplay_min_relative_volume, Decimal("0")), Decimal("50"))
         self.inplay_min_atr_percent = min(max(self.inplay_min_atr_percent, Decimal("0")), Decimal("50"))
         self.inplay_min_dollar_volume_millions = min(max(self.inplay_min_dollar_volume_millions, Decimal("0")), Decimal("100000"))
@@ -4200,27 +4193,10 @@ class TraderEngine:
         direction = movers_logic.direction_hold_reason(readings)
         if direction:
             return direction
-        with self.lock:
-            known = clean in self.mover_profiles
-            profile = self.mover_profiles.get(clean)
-            stat = self.mover_stats.get(clean)
-        if not known:
-            return "Hold (movers: volume history loading)"
-        if profile is None or stat is None:
-            return "Hold (movers: not enough volume history)"
-        floor = config.mover_min_dollar_volume_millions * Decimal("1000000")
-        if floor > 0 and stat.dollar_volume < floor:
-            return (
-                f"Hold (movers: trades ${stat.dollar_volume / Decimal('1000000'):.0f}M a day, "
-                f"under ${config.mover_min_dollar_volume_millions:.0f}M)"
-            )
-        # No re-entry limit of its own: a stock sold earlier today is bought again whenever it scores.
-        # The only per-stock daily limit is the account's visible Max Buys per Symbol per Day
-        # (checked in entry_candidate; 0 = off).
-        if readings.relative_volume is None:
-            # Volume carries the most weight; without a current reading the score would be a
-            # price-only score, so wait for it (first readable about 09:51 ET, then every few minutes).
-            return "Hold (movers: volume reading not in yet)"
+        # No other yes/no checks. A stock with no volume reading yet (no history on record, or
+        # before the first reading about 09:51 ET) or no daily range simply earns no points for it.
+        # No re-entry limit of its own: the only per-stock daily limit is the account's visible
+        # Max Buys per Symbol per Day (checked in entry_candidate; 0 = off).
         result = movers_logic.score(readings, self.mover_weights(config))
         with self.lock:
             self.mover_scores[clean] = result
@@ -5063,7 +5039,7 @@ class TraderEngine:
             return "Hold (trend hold warming)"
         if not self.inverse_trend_session_ready(symbol):
             return "Hold (trend hold warming)"
-        if vwap_distance <= INVERSE_TREND_ENTRY_VWAP_PERCENT:
+        if vwap_distance <= 0:
             return f"Hold (trend hold: {vwap_distance:+.2f}% vs VWAP)"
         if snapshot.bias != "Bullish":
             return f"Hold (trend {snapshot.bias})"
@@ -5085,15 +5061,14 @@ class TraderEngine:
         return {"symbol": symbol, "rank": rank, "score": score}
 
     def inverse_trend_session_ready(self, symbol: str) -> bool:
-        """Today's session VWAP is worth acting on: the bars are from the current session (when the
-        market clock says which one that is) and there are enough of them. Right at the open the
-        newest bar is still yesterday's, and a minute later VWAP is a single bar's midpoint."""
+        """Today's session VWAP exists: the bars are from the current session (when the market clock
+        says which one that is). Right at the open the newest bar is still yesterday's."""
         session_date, regular_bars = self.strategy_state.session_bar_info(symbol)
         with self.lock:
             clock_date = str(self.market_clock.get("session_date") or "")
         if clock_date and session_date and session_date != clock_date:
             return False
-        return regular_bars >= INVERSE_TREND_MIN_SESSION_BARS
+        return regular_bars >= 1
 
     def inverse_trend_exit_reason(self, symbol: str, config: AppConfig, current_gain: Decimal) -> str:
         """The trend is over once the fund is back under its session VWAP by the exit buffer."""

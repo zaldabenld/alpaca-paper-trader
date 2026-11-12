@@ -101,7 +101,7 @@ def score(readings: Readings, weights: Weights) -> Score:
     """The weighted buy score, 0-100 with the default weights."""
     zero = Decimal("0")
     volume_label = (
-        f"volume {readings.relative_volume:.1f}x" if readings.relative_volume is not None else "volume loading"
+        f"volume {readings.relative_volume:.1f}x" if readings.relative_volume is not None else "no volume reading"
     )
     parts = (
         (volume_label, weights.volume * volume_fraction(readings.relative_volume, weights.volume_full_at)),

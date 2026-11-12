@@ -25,7 +25,7 @@ class RisingPriceGateTests(unittest.TestCase):
     def test_defaults_are_on(self) -> None:
         config = AppConfig(symbols=["SPY"])
         self.assertTrue(config.require_rising_price)
-        self.assertEqual(config.max_entries_per_scan, 2)
+        self.assertEqual(config.max_entries_per_scan, 0)  # opt-in only
         self.assertEqual(config.entry_spacing_seconds, 0)  # a timed lock on entries: opt-in only
 
     def test_session_pullback_floor_is_clamped_to_the_cap(self) -> None:

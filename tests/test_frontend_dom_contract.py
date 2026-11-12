@@ -96,7 +96,6 @@ class FrontendDomContractTests(unittest.TestCase):
             "moverWeightSession",
             "moverWeightRsi",
             "moverVolumeFullAt",
-            "moverMinDollarVolumeMillions",
         )
         keys = (
             "mover_weight_volume",
@@ -107,7 +106,6 @@ class FrontendDomContractTests(unittest.TestCase):
             "mover_weight_session",
             "mover_weight_rsi",
             "mover_volume_full_at",
-            "mover_min_dollar_volume_millions",
         )
         for element_id in ids:
             self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
@@ -121,7 +119,7 @@ class FrontendDomContractTests(unittest.TestCase):
         # tagged so movers mode hides them, and app.js hides whatever the selected mode does not use.
         movers = re.search(r'<div class="compact-section" data-modes="movers">\s*<h3>Movers Score Weights</h3>(.*?)</div>\s*</div>', self.index_html, re.S)
         self.assertIsNotNone(movers)
-        for element_id in ("moverWeightVolume", "moverWeightRsi", "moverVolumeFullAt", "moverMinDollarVolumeMillions"):
+        for element_id in ("moverWeightVolume", "moverWeightRsi", "moverVolumeFullAt"):
             self.assertIn(f'id="{element_id}"', movers.group(1))
         self.assertIn('<div class="compact-section" data-modes="momentum">\n                <h3>Score Weights (momentum)</h3>', self.index_html)
         for element_id in ("buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice"):

@@ -51,9 +51,10 @@ class TrendHoldEntryTests(unittest.TestCase):
     def test_trend_hold_buys_the_same_fund(self) -> None:
         self.assertEqual(self.hold(engine_with(inverse_trend_hold=True)), "")
 
-    def test_needs_to_be_clearly_above_vwap_in_an_uptrend_and_up_on_the_session(self) -> None:
+    def test_needs_to_be_above_vwap_in_an_uptrend_and_up_on_the_session(self) -> None:
         engine = engine_with(inverse_trend_hold=True)
-        self.assertEqual(self.hold(engine, snapshot=snap(vwap="0.1")), "Hold (trend hold: +0.10% vs VWAP)")
+        self.assertEqual(self.hold(engine, snapshot=snap(vwap="0")), "Hold (trend hold: +0.00% vs VWAP)")
+        self.assertEqual(self.hold(engine, snapshot=snap(vwap="0.01")), "")  # above VWAP is enough, no buffer
         self.assertEqual(self.hold(engine, snapshot=snap(vwap="-0.4")), "Hold (trend hold: -0.40% vs VWAP)")
         self.assertEqual(self.hold(engine, snapshot=snap(bias="Bearish")), "Hold (trend Bearish)")
         self.assertEqual(self.hold(engine, snapshot=snap(change="-0.2")), "Hold (trend hold: session -0.20%)")
@@ -133,9 +134,8 @@ class TrendHoldSessionDataTests(unittest.TestCase):
             engine.strategy_state.add_bar("SQQQ", 44 - index * 0.01, stamp, 1000, 44, 43)
         return engine
 
-    def test_vwap_from_a_handful_of_bars_is_not_acted_on(self) -> None:
-        self.assertFalse(self.engine(bars=4).inverse_trend_session_ready("SQQQ"))
-        self.assertTrue(self.engine(bars=5).inverse_trend_session_ready("SQQQ"))
+    def test_any_bar_from_today_is_enough(self) -> None:
+        self.assertTrue(self.engine(bars=1).inverse_trend_session_ready("SQQQ"))
 
     def test_yesterdays_bars_are_not_todays_vwap(self) -> None:
         self.assertFalse(self.engine(bars=30, day_offset=-1).inverse_trend_session_ready("SQQQ"))
@@ -143,7 +143,7 @@ class TrendHoldSessionDataTests(unittest.TestCase):
         self.assertTrue(self.engine(bars=30, day_offset=-1, clock_date="").inverse_trend_session_ready("SQQQ"))
 
     def test_no_exit_and_no_entry_until_the_session_is_ready(self) -> None:
-        engine = self.engine(bars=3)
+        engine = self.engine(bars=30, day_offset=-1)  # only yesterday's bars so far
         with patch.object(engine, "snapshot", return_value=snap(vwap="-2")):
             self.assertEqual(engine.inverse_trend_exit_reason("SQQQ", engine.config, Decimal("1")), "")
         with patch.object(engine, "asset_tradeability_hold_reason", return_value=""):
@@ -165,7 +165,7 @@ class TrendHoldExitTests(unittest.TestCase):
                              profit_trail_drop_percent="1")
         self.assertEqual(self.decide(engine, "44", "1.5", has_stop=False), "")  # +10%: no take-profit
         self.assertEqual(self.decide(engine, "43.3", "0.4", has_stop=False), "")  # 1.6% off the peak: the 1% trail is not used
-        self.assertEqual(self.decide(engine, "43.3", "-0.2", has_stop=False), "")  # inside the exit buffer
+        self.assertEqual(self.decide(engine, "43.3", "0", has_stop=False), "")  # at VWAP, not under it
 
     def test_locked_profit_is_taken_when_the_fund_gives_back_the_trail(self) -> None:
         engine = engine_with(inverse_trend_hold=True)

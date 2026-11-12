@@ -165,26 +165,27 @@ class EntryTests(unittest.TestCase):
         reason = hold(dipping)
         self.assertTrue("fell" in reason or "under VWAP" in reason, reason)
 
-    def test_missing_volume_history_and_thin_stocks_wait(self) -> None:
+    def test_no_history_or_liquidity_gates(self) -> None:
+        # No volume history on record and a thinly traded stock are not reasons to hold on their own.
         engine = movers_engine()
         engine.mover_profiles = {}
-        self.assertIn("volume history loading", hold(engine))
-        engine.mover_profiles = {"HOT": None}
-        self.assertIn("not enough volume history", hold(engine))
-        engine = movers_engine()
+        self.assertEqual(hold(engine), "")
         engine.mover_stats = {"HOT": inplay_logic.DailyStats(atr_percent=D("8"), dollar_volume=D("3000000"))}
-        self.assertIn("trades $3M a day, under $20M", hold(engine))
+        self.assertEqual(hold(engine), "")
 
     def test_a_volume_reading_the_worker_could_not_refresh_earns_no_points(self) -> None:
         engine = movers_engine()
         self.assertEqual(hold(engine), "")
         engine.mover_volume_at = clock_module.monotonic() - 11 * 60
-        self.assertIn("volume reading not in yet", hold(engine))
+        reason = hold(engine)
+        self.assertIn("no volume reading +0", reason)  # scored without the volume points, not held for them
 
-    def test_no_volume_reading_waits(self) -> None:
+    def test_no_volume_reading_only_costs_the_volume_points(self) -> None:
         engine = movers_engine()
         engine.mover_volume = {}
-        self.assertIn("volume reading not in yet", hold(engine))
+        self.assertRegex(hold(engine), r"^Hold \(score \d+ of 60: no volume reading \+0")
+        engine.config = engine.config.model_copy(update={"min_entry_score": D("40")})
+        self.assertEqual(hold(engine), "")  # the price readings alone can clear a lower bar
 
     def test_no_hidden_re_entry_limit(self) -> None:
         # A stock already bought today is bought again when it scores; only the account's visible
