@@ -317,6 +317,28 @@ class EnginePassTests(unittest.TestCase):
         refresh(engine)
         self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("IEF", "sell")])
 
+    def test_a_dead_placeholder_with_no_price_does_not_block_funding(self) -> None:
+        # Nov 12: Account 2 held only a CVR placeholder that Alpaca reports with no price at all. It
+        # was treated as a holding to sell, the sell was rejected, and QQQ/SPY were never bought.
+        cvr = {"symbol": "046CVR015", "qty": "3.5107", "qty_available": "3.5107", "avg_entry_price": "0.37",
+               "current_price": None, "market_value": None, "side": "long"}
+        client = FakeClient(THURSDAY_LATE, positions=[cvr], cash="996.51")
+        engine = hold_engine(client, PRICES_UP)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("QQQ", "buy"), ("SPY", "buy")])
+
+    def test_a_holding_whose_sell_was_rejected_does_not_block_the_buys(self) -> None:
+        client = FakeClient(THURSDAY_LATE, positions=[position("XYZ", "1", "5")], cash="995")
+        engine = hold_engine(client, PRICES_UP)
+        engine.hold_rejected_order("XYZ", engine_module.OrderSide.SELL, 1800)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("QQQ", "buy"), ("SPY", "buy")])
+        # Without a rejection the stray holding is still sold first, as before.
+        client = FakeClient(THURSDAY_LATE, positions=[position("XYZ", "1", "5")], cash="995")
+        engine = hold_engine(client, PRICES_UP)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("XYZ", "sell")])
+
     def test_a_manual_order_on_another_symbol_does_not_block(self) -> None:
         manual = {"id": "m1", "symbol": "TSLA", "side": "buy", "type": "limit", "qty": "1", "client_order_id": "my-own-order"}
         client = FakeClient(THURSDAY_LATE, open_orders=[manual])

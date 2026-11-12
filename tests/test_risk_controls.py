@@ -358,6 +358,9 @@ class StopProtectionTests(unittest.TestCase):
         self.assertEqual(bbb_calls[0].args[4], 1)  # only AAA counts toward max_open_positions
         self.assertTrue(engine_module.is_placeholder_position(cvr))
         self.assertFalse(engine_module.is_placeholder_position({"symbol": "AAA", "qty": "1"}))  # no price reported yet
+        # Alpaca reports some placeholders with no price at all (Account 2, Nov 12).
+        self.assertTrue(engine_module.is_placeholder_position({"symbol": "046CVR015", "qty": "3.5", "current_price": None}))
+        self.assertFalse(engine_module.is_placeholder_position({"symbol": "AAA", "qty": "1", "current_price": None}))
 
 
 class DailyLossLimitTests(unittest.TestCase):
