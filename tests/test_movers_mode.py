@@ -165,6 +165,23 @@ class EntryTests(unittest.TestCase):
         reason = hold(dipping)
         self.assertTrue("fell" in reason or "under VWAP" in reason, reason)
 
+    def test_newer_trade_controls_vwap_and_session_direction(self) -> None:
+        engine = movers_engine()
+        snapshot = engine.snapshot("HOT")
+        self.assertGreater(snapshot.vwap_distance_percent, D("0"))
+        self.assertGreater(snapshot.session_change_percent, D("0"))
+        at = OPEN_UTC + timedelta(minutes=120)
+        with patch.object(engine, "latest_stream_trade", return_value=(D("10.50"), at)):
+            self.assertIn("under VWAP", hold(engine))
+        with patch.object(engine, "latest_stream_trade", return_value=(D("9.95"), at)):
+            self.assertIn("down", hold(engine))
+
+    def test_trade_older_than_latest_bar_does_not_replace_its_price(self) -> None:
+        engine = movers_engine()
+        older = OPEN_UTC + timedelta(minutes=118)
+        with patch.object(engine, "latest_stream_trade", return_value=(D("9.95"), older)):
+            self.assertEqual(hold(engine), "")
+
     def test_no_history_or_liquidity_gates(self) -> None:
         # No volume history on record and a thinly traded stock are not reasons to hold on their own.
         engine = movers_engine()
@@ -264,6 +281,29 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual([(order.symbol, order.side.value) for order in broker.submitted], [("HOT", "buy")])
         reason = engine.order_intents[-1]["reason"]
         self.assertIn("movers: volume 5.0x +45", reason)
+
+    def test_order_price_lookup_detects_a_vwap_cross_before_submitting(self) -> None:
+        broker = Broker()
+        engine = movers_engine(broker, bars=150)
+        engine.data_client = SimpleNamespace(
+            get_stock_latest_trade=lambda request: {"HOT": SimpleNamespace(price="10.50", timestamp=NOON)},
+            get_stock_latest_quote=lambda request: {},
+        )
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOON.astimezone(tz)
+
+        with (
+            patch("alpaca_desktop.engine.datetime", FixedClock),
+            patch.object(engine, "portfolio_history_daily_pl_payload", return_value={}),
+            patch.object(engine, "asset_tradeability_hold_reason", return_value=""),
+            patch.object(engine, "start_mover_worker"),
+        ):
+            engine.refresh(run_strategy=True, shared_bars={symbol: [] for symbol in ("HOT", "SPY", "QQQ")})
+        self.assertEqual(broker.submitted, [])
+        self.assertIn("under VWAP", engine.strategy_state.last_action["HOT"])
+        self.assertNotIn("HOT", engine.strategy_state.entry_score)
 
     def test_a_re_entry_floor_from_the_old_score_does_not_block(self) -> None:
         broker = Broker()
