@@ -115,17 +115,31 @@ class FrontendDomContractTests(unittest.TestCase):
             self.assertIn(f'"{key}"', self.app_js)
 
     def test_settings_form_shows_only_the_selected_modes_fields(self) -> None:
-        # The movers weights sit in their own section; the momentum score weights and gates are
-        # tagged so movers mode hides them, and app.js hides whatever the selected mode does not use.
-        movers = re.search(r'<div class="compact-section" data-modes="movers">\s*<h3>Movers Score Weights</h3>(.*?)</div>\s*</div>', self.index_html, re.S)
-        self.assertIsNotNone(movers)
-        for element_id in ("moverWeightVolume", "moverWeightRsi", "moverVolumeFullAt"):
-            self.assertIn(f'id="{element_id}"', movers.group(1))
-        self.assertIn('<div class="compact-section" data-modes="momentum">\n                <h3>Score Weights (momentum)</h3>', self.index_html)
-        for element_id in ("buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice"):
-            self.assertRegex(self.index_html, rf'(?s)<label data-modes="momentum"[^>]*>(?:(?!</label>).)*id="{element_id}"', )
-        self.assertRegex(self.index_html, r'(?s)<label data-modes="momentum orb"[^>]*>(?:(?!</label>).)*id="minBuyVolumeRatio"')  # ORB's order-flow check
-        self.assertRegex(self.index_html, r'(?s)<label data-modes="momentum orb movers"[^>]*>(?:(?!</label>).)*id="minEntryScore"')
+        # Buy Rules is the buy decision: the selected mode's score weights and Min Score sit in it,
+        # with no separate weights section. app.js hides whatever the selected mode does not use.
+        buy = re.search(r'<h3>Buy Rules</h3>(.*?)<h3>Buy Limits</h3>', self.index_html, re.S)
+        self.assertIsNotNone(buy)
+        rules = buy.group(1)
+        for element_id in ("entryMode", "minEntryScore", "moverWeightVolume", "moverWeightRsi", "moverVolumeFullAt",
+                           "scoreWeightRsi", "scoreWeightVwap"):
+            self.assertIn(f'id="{element_id}"', rules)
+        self.assertNotIn("Movers Score Weights", self.index_html)
+        self.assertNotIn("Score Weights (momentum)", self.index_html)
+        self.assertEqual(self.index_html.count("<h3>Score Weights</h3>"), 1)  # the backtest panel's own
+        for element_id in ("moverWeightVolume", "moverVolumeFullAt"):
+            self.assertRegex(rules, rf'(?s)<label data-modes="movers"[^>]*>(?:(?!</label>).)*id="{element_id}"')
+        for element_id in ("scoreWeightRsi", "buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice",
+                           "momentumPeriod", "smiPeriod", "atrPeriod", "volumePeriod"):
+            self.assertRegex(rules, rf'(?s)<label data-modes="momentum"[^>]*>(?:(?!</label>).)*id="{element_id}"')
+        self.assertRegex(rules, r'(?s)<label data-modes="momentum orb"[^>]*>(?:(?!</label>).)*id="minBuyVolumeRatio"')  # ORB's order-flow check
+        self.assertRegex(rules, r'(?s)<label data-modes="momentum orb movers"[^>]*>(?:(?!</label>).)*id="minEntryScore"')
+        # Limits and inverse funds are their own sections, out of the buy decision.
+        for heading, ids in (("Buy Limits", ("maxEntriesPerSymbolPerDay", "maxEntriesPerScan", "entrySpacingSeconds")),
+                             ("Inverse ETFs", ("inverseEtfMode", "inverseTrendHold", "inverseTrendMaxEntries"))):
+            section = re.search(rf'<h3>{heading}</h3>(.*?)</div>\s*</div>', self.index_html, re.S)
+            self.assertIsNotNone(section)
+            for element_id in ids:
+                self.assertIn(f'id="{element_id}"', section.group(1))
         self.assertIn("function syncEntryModeFields()", self.app_js)
         self.assertIn('fields.entryMode.addEventListener("change", syncEntryModeFields)', self.app_js)
 
