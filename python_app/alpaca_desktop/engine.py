@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -4669,12 +4670,18 @@ class TraderEngine:
             config.allocation_rebalance_drift_percent,
             rebalance=check_day or switching,
         )
-        # A holding whose sell the broker rejected cannot be sold, so it must not hold up the buys:
-        # plan again without it (buys only ever spend cash, never margin).
-        stuck = {symbol for symbol, _, _ in plan.sells if self.sell_rejected(symbol)}
-        if stuck and stuck == {symbol for symbol, _, _ in plan.sells}:
+        # A stray holding (in neither fund set) whose sell the broker rejected cannot be sold, so it
+        # must not hold up the buys: plan again with it kept as a holding but with nothing to sell.
+        # A fund in the sets whose sell was rejected (a trim, or the old side of a switch) still
+        # waits, so a failed trim never buys more of the fund and a switch never holds both sides.
+        # Buys only ever spend cash, never margin.
+        stray_stuck = {
+            symbol for symbol, _, _ in plan.sells
+            if symbol not in risk_on and symbol not in risk_off and self.sell_rejected(symbol)
+        }
+        if stray_stuck and stray_stuck == {symbol for symbol, _, _ in plan.sells}:
             plan = allocation_logic.plan_allocation(
-                [item for item in holdings if item.symbol not in stuck],
+                [dataclasses.replace(item, qty_available=Decimal("0")) if item.symbol in stray_stuck else item for item in holdings],
                 target,
                 equity,
                 decimal_value(account.get("cash")),
