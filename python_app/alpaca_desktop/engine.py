@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -1678,8 +1679,13 @@ def is_already_stopped_stream_error(exc: Exception) -> bool:
 
 def is_placeholder_position(position: dict[str, Any]) -> bool:
     # Corporate-action leftovers such as CVR rights (046CVR015) have no market price, cannot be sold,
-    # and hold no exposure, so they must not use up a max-open-positions slot.
-    return decimal_value(position.get("current_price"), Decimal("-1")) == 0
+    # and hold no exposure, so they must not use up a max-open-positions slot or be traded. Alpaca
+    # reports their price as 0 or as missing; a missing price only counts for a CUSIP-style symbol
+    # (one with a digit), since a real ticker's price can be missing for a moment after a fill.
+    price = position.get("current_price")
+    if price is None or str(price).strip() == "":
+        return any(ch.isdigit() for ch in str(position.get("symbol") or ""))
+    return decimal_value(price, Decimal("-1")) == 0
 
 
 def is_pending_cancel_error(exc: Exception) -> bool:
@@ -4664,6 +4670,26 @@ class TraderEngine:
             config.allocation_rebalance_drift_percent,
             rebalance=check_day or switching,
         )
+        # A stray holding (in neither fund set) whose sell the broker rejected cannot be sold, so it
+        # must not hold up the buys: plan again with it kept as a holding but with nothing to sell.
+        # A fund in the sets whose sell was rejected (a trim, or the old side of a switch) still
+        # waits, so a failed trim never buys more of the fund and a switch never holds both sides.
+        # Buys only ever spend cash, never margin.
+        stray_stuck = {
+            symbol for symbol, _, _ in plan.sells
+            if symbol not in risk_on and symbol not in risk_off and self.sell_rejected(symbol)
+        }
+        if stray_stuck and stray_stuck == {symbol for symbol, _, _ in plan.sells}:
+            plan = allocation_logic.plan_allocation(
+                [dataclasses.replace(item, qty_available=Decimal("0")) if item.symbol in stray_stuck else item for item in holdings],
+                target,
+                equity,
+                decimal_value(account.get("cash")),
+                decimal_value(account.get("buying_power")),
+                config.allocation_invest_percent,
+                config.allocation_rebalance_drift_percent,
+                rebalance=check_day or switching,
+            )
         if not plan.sells and not plan.buys:
             return finish(plan.note or "on target")
         if config.dry_run:
@@ -6412,6 +6438,13 @@ class TraderEngine:
         until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
         with self.lock:
             self.order_reject_holds[key] = until
+
+    def sell_rejected(self, symbol: str) -> bool:
+        """True while a sell of this symbol is on hold after the broker rejected it."""
+        key = (symbol.strip().upper(), self.order_side_text(OrderSide.SELL))
+        with self.lock:
+            until = self.order_reject_holds.get(key)
+        return bool(until and until > datetime.now(timezone.utc))
 
     def hold_submitted_order(self, symbol: str, side: OrderSide, seconds: int = ORDER_SUBMIT_HOLD_SECONDS) -> None:
         clean_symbol = symbol.strip().upper()

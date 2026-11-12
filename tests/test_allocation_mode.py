@@ -317,6 +317,40 @@ class EnginePassTests(unittest.TestCase):
         refresh(engine)
         self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("IEF", "sell")])
 
+    def test_a_dead_placeholder_with_no_price_does_not_block_funding(self) -> None:
+        # Nov 12: Account 2 held only a CVR placeholder that Alpaca reports with no price at all. It
+        # was treated as a holding to sell, the sell was rejected, and QQQ/SPY were never bought.
+        cvr = {"symbol": "046CVR015", "qty": "3.5107", "qty_available": "3.5107", "avg_entry_price": "0.37",
+               "current_price": None, "market_value": None, "side": "long"}
+        client = FakeClient(THURSDAY_LATE, positions=[cvr], cash="996.51")
+        engine = hold_engine(client, PRICES_UP)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("QQQ", "buy"), ("SPY", "buy")])
+
+    def test_a_holding_whose_sell_was_rejected_does_not_block_the_buys(self) -> None:
+        client = FakeClient(THURSDAY_LATE, positions=[position("XYZ", "1", "5")], cash="995")
+        engine = hold_engine(client, PRICES_UP)
+        engine.hold_rejected_order("XYZ", engine_module.OrderSide.SELL, 1800)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("QQQ", "buy"), ("SPY", "buy")])
+        # A rejected trim of a fund in the target never buys more of that fund.
+        client = FakeClient(FRIDAY_LATE, positions=[position("QQQ", "6.3636", "110"), position("SPY", "0.5", "500")], cash="50")
+        engine = hold_engine(client, PRICES_UP)
+        engine.hold_rejected_order("QQQ", engine_module.OrderSide.SELL, 1800)
+        refresh(engine)
+        self.assertEqual(client.submitted, [])
+        # A rejected sell on the old side of a switch waits instead of buying the new side alongside it.
+        client = FakeClient(FRIDAY_LATE, positions=[position("IEF", "5.1579", "95")], cash="500")
+        engine = hold_engine(client, PRICES_UP)
+        engine.hold_rejected_order("IEF", engine_module.OrderSide.SELL, 1800)
+        refresh(engine)
+        self.assertEqual(client.submitted, [])
+        # Without a rejection the stray holding is still sold first, as before.
+        client = FakeClient(THURSDAY_LATE, positions=[position("XYZ", "1", "5")], cash="995")
+        engine = hold_engine(client, PRICES_UP)
+        refresh(engine)
+        self.assertEqual([(order.symbol, order.side.value) for order in client.submitted], [("XYZ", "sell")])
+
     def test_a_manual_order_on_another_symbol_does_not_block(self) -> None:
         manual = {"id": "m1", "symbol": "TSLA", "side": "buy", "type": "limit", "qty": "1", "client_order_id": "my-own-order"}
         client = FakeClient(THURSDAY_LATE, open_orders=[manual])
