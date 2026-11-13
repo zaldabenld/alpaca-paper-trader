@@ -583,6 +583,14 @@
                     Full Volume Points At (x usual)
                     <input id="moverVolumeFullAt" type="number" min="1.5" max="50" step="0.5" value="5" />
                   </label>
+                  <label data-modes="movers" class="check-row" title="Movers mode: volume points use the lower of two readings, today's volume so far and the last half hour's, each against the stock's usual. One block print or a busy first hour then stops earning full volume points once the stock goes quiet. Off: only today's volume so far counts.">
+                    <input id="moverVolumeCurrent" type="checkbox" checked />
+                    <span>Volume must be current (last half hour)</span>
+                  </label>
+                  <label data-modes="movers" title="Movers mode: points taken OFF the score for the bid/ask spread. All of them come off when the spread is as wide as the stop loss, and in proportion below that (a 0.8% spread against a 1.25% stop takes off 64% of this number). Every round trip pays the spread, so it is measured against the stop. A weight, not a cut-off. 0 turns it off.">
+                    Spread Cost Weight (points off)
+                    <input id="moverWeightSpread" type="number" min="0" max="100" step="1" value="40" />
+                  </label>
                   <label data-modes="momentum movers" title="Number of bars used to calculate RSI (a 0-100 overbought/oversold gauge).">
                     RSI Period
                     <input id="rsiPeriod" type="number" min="1" step="1" value="14" />
@@ -793,7 +801,7 @@
                     Buy Flow Ratio
                     <input id="minBuyVolumeRatio" type="number" min="0" max="1" step="0.01" value="0.5" />
                   </label>
-                  <label data-modes="momentum movers" title="After a losing exit, a re-buy needs this many extra score points. Movers: each losing exit that day adds this many to Min Score (Min Score 60 and a boost of 20 means 80 after one loss, 100 after two, then no more buys of that stock that day). 0 turns it off.">
+                  <label data-modes="momentum movers" title="After a losing exit, a re-buy needs this many extra score points. Movers: each losing exit that day adds this many to Min Score (Min Score 60 and a boost of 20 means 80 after one loss, 100 after two, then no more buys of that stock that day). A sale at a gain adds the same amount once, only until the stock trades above the high it was sold from. 0 turns both off.">
                     Re-entry Boost
                     <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="12" />
                   </label>

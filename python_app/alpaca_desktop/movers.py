@@ -1,4 +1,4 @@
-"""Market movers (entry_mode "movers"): a weighted buy score and a stop sized to the stock.
+"""Market movers (entry_mode "movers"): a weighted buy score.
 
 The idea: a stock that is going up on unusually heavy volume tends to keep going. No single reading
 vetoes a buy. Each reading earns points and the buy happens when the total clears the account's
@@ -15,11 +15,18 @@ symbols, one buy per symbol per day, at most 20 a day at 5% each, volume read 15
   - this score at 60 with the stop below: about +28% a year, both halves of the year positive;
   - of those buys, the ones with RSI above 65 made most of the money.
 Volume is measured as today's total volume so far against the stock's own average by this time of
-day over its last 14 sessions.
+day over its last 14 sessions. With "current volume" on, the last half hour is measured the same
+way and the lower of the two readings earns the points: one block print at noon, or a busy first
+hour, does not keep a quiet stock at full volume points for the rest of the day.
 
-The stop is sized to the stock: a fraction of its average daily range, so a stock that moves 8% a
-day is not shaken out by a 1.25% wiggle. Once the position is up by that same distance the stop
-follows the peak at that distance and never goes back down.
+One reading takes points away: the bid/ask spread, as a share of the account's stop distance. Every
+round trip pays the spread, so a stock whose spread is most of the stop starts each trade most of
+the way to its stop (a $1.24 stock quoted a cent wide is 0.8% against a 1.25% stop). It is a weight
+like the others, not a cut-off: enough volume and movement still outweigh it.
+
+The research above was run with a stop sized to each stock's daily range and one buy per symbol per
+day. The account now exits on its own visible stop and trail settings, so those figures describe the
+weights, not the account's current exits.
 
 Nothing here talks to the broker or the network.
 """
@@ -44,6 +51,7 @@ RANGE_FULL = Decimal("8")              # ... and where they are full
 FULL_SESSION_MOVE = Decimal("5")       # +5% on the session
 RSI_FLOOR = Decimal("50")
 RSI_FULL = Decimal("90")
+RECENT_SLOTS = 6                       # "the last half hour" of volume: six 5-minute bars
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,8 @@ class Weights:
     session: Decimal = Decimal("5")
     rsi: Decimal = Decimal("0")
     volume_full_at: Decimal = Decimal("5")  # times the usual volume that earns the full volume points
+    spread: Decimal = Decimal("0")          # points taken off when the spread is the whole stop distance
+    volume_current: bool = False            # volume points use the lower of the day and the last half hour
 
 
 @dataclass(frozen=True)
@@ -67,6 +77,10 @@ class Readings:
     session_change: Decimal | None       # % change on the session
     daily_range: Decimal | None          # 14-day average true range as % of price
     rsi: Decimal | None = None
+    recent_relative_volume: Decimal | None = None  # the last half hour's volume / usual for that half hour
+    spread_percent: Decimal | None = None          # bid/ask spread as % of price
+    stop_percent: Decimal | None = None            # the stop distance a buy would get, % under the fill
+    price: Decimal | None = None                   # the price these readings were taken at
 
 
 @dataclass(frozen=True)
@@ -77,9 +91,9 @@ class Score:
     def describe(self) -> str:
         """The points each reading earned. Volume is always shown, even at zero, since it carries the most."""
         return ", ".join(
-            f"{label} +{points:.0f}"
+            f"{label} {points:+.0f}"
             for index, (label, points) in enumerate(self.parts)
-            if index == 0 or points >= Decimal("0.5")
+            if index == 0 or abs(points) >= Decimal("0.5")
         )
 
 
@@ -97,20 +111,32 @@ def volume_fraction(relative_volume: Decimal | None, full_at: Decimal) -> Decima
     return Decimal(str(min(1.0, max(0.0, fraction))))
 
 
+def spread_cost_fraction(spread_percent: Decimal | None, stop_percent: Decimal | None) -> Decimal:
+    """The spread as a share of the stop distance, 0 to 1. Unknown spread or no stop costs nothing."""
+    if spread_percent is None or stop_percent is None or spread_percent <= 0 or stop_percent <= 0:
+        return Decimal("0")
+    return min(Decimal("1"), spread_percent / stop_percent)
+
+
 def score(readings: Readings, weights: Weights) -> Score:
-    """The weighted buy score, 0-100 with the default weights."""
+    """The weighted buy score: up to 100 with the default weights, less the spread cost."""
     zero = Decimal("0")
-    volume_label = (
-        f"volume {readings.relative_volume:.1f}x" if readings.relative_volume is not None else "no volume reading"
-    )
+    volume = readings.relative_volume
+    volume_label = f"volume {volume:.1f}x" if volume is not None else "no volume reading"
+    recent = readings.recent_relative_volume
+    if weights.volume_current and volume is not None and recent is not None and recent < volume:
+        volume_label = f"volume {recent:.1f}x in the last half hour ({volume:.1f}x on the day)"
+        volume = recent
+    spread_label = f"spread {readings.spread_percent:.2f}%" if readings.spread_percent is not None else "spread"
     parts = (
-        (volume_label, weights.volume * volume_fraction(readings.relative_volume, weights.volume_full_at)),
+        (volume_label, weights.volume * volume_fraction(volume, weights.volume_full_at)),
         ("30-min move", weights.half_hour_move * _fraction(readings.half_hour_move, zero, FULL_HALF_HOUR_MOVE)),
         ("above VWAP", weights.vwap * _fraction(readings.vwap_distance, zero, FULL_VWAP_DISTANCE)),
         ("5-min move", weights.five_min_move * _fraction(readings.five_min_move, zero, FULL_FIVE_MIN_MOVE)),
         ("daily range", weights.daily_range * _fraction(readings.daily_range, RANGE_FLOOR, RANGE_FULL)),
         ("session", weights.session * _fraction(readings.session_change, zero, FULL_SESSION_MOVE)),
         ("RSI", weights.rsi * _fraction(readings.rsi, RSI_FLOOR, RSI_FULL)),
+        (spread_label, -weights.spread * spread_cost_fraction(readings.spread_percent, readings.stop_percent)),
     )
     total = sum((points for _, points in parts), zero)
     return Score(total=total.quantize(Decimal("0.1")), parts=tuple((label, points) for label, points in parts))
@@ -176,3 +202,14 @@ def relative_volume(today: list[float], profile: list[float] | None, slot: int |
     if usual <= 0:
         return None
     return Decimal(str(round(today[slot] / usual, 4)))
+
+
+def recent_relative_volume(today: list[float], profile: list[float] | None, slot: int | None) -> Decimal | None:
+    """The last half hour's volume against the usual volume for that same half hour. None in the
+    first half hour (the day so far is the last half hour) and when that half hour is usually empty."""
+    if profile is None or slot is None or not (RECENT_SLOTS <= slot < SLOTS) or len(today) != SLOTS:
+        return None
+    usual = profile[slot] - profile[slot - RECENT_SLOTS]
+    if usual <= 0:
+        return None
+    return Decimal(str(round((today[slot] - today[slot - RECENT_SLOTS]) / usual, 4)))

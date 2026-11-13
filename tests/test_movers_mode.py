@@ -69,6 +69,38 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(M.score(readings(rsi=90), weights).total - M.score(readings(rsi=50), weights).total, D("10.0"))
         self.assertEqual(M.score(readings(rsi=20), weights).total, M.score(readings(rsi=50), weights).total)
 
+    def test_the_spread_takes_points_off_in_proportion_to_the_stop(self) -> None:
+        # Quotes the app recorded on 2026-11-13 against the account's 1.25% stop.
+        weights = M.Weights(spread=D("40"))
+        strong = dict(relative_volume=D("5"), vwap_distance=D("3"), five_min_move=D("0.7"), daily_range=D("8"),
+                      session_change=D("5"), stop_percent=D("1.25"))
+        self.assertEqual(M.score(readings(**strong), weights).total, D("85.0"))                       # no quote: no cost
+        mrln = M.score(readings(spread_percent="0.80", **strong), weights)                            # $1.24 / $1.25
+        self.assertEqual(mrln.total, D("59.4"))
+        self.assertIn("spread 0.80% -26", mrln.describe())
+        self.assertEqual(M.score(readings(spread_percent="0.03", **strong), weights).total, D("84.0"))   # KDP $36.50 / $36.51
+        self.assertEqual(M.score(readings(spread_percent="13.78", **strong), weights).total, D("45.0"))  # SOC: never more than the weight
+        full = dict(strong, half_hour_move=D("2"))
+        self.assertEqual(M.score(readings(spread_percent="0.80", **full), weights).total, D("74.4"))  # a weight, not a cut-off
+        self.assertEqual(M.score(readings(spread_percent="0.80", **strong), M.Weights()).total, D("85.0"))   # weight 0: off
+        no_stop = dict(strong, stop_percent=D("0"))
+        self.assertEqual(M.score(readings(spread_percent="0.80", **no_stop), weights).total, D("85.0"))
+
+    def test_volume_points_need_the_volume_to_be_current(self) -> None:
+        current = M.Weights(volume_current=True)
+        # PAAS on 2026-11-13: one block print at noon, then half its usual volume all afternoon.
+        block = readings(relative_volume="6.7", recent_relative_volume="0.5")
+        self.assertEqual(M.score(block, M.Weights()).parts[0][1], D("45"))
+        after = M.score(block, current)
+        self.assertEqual(after.parts[0][1], D("0"))
+        self.assertIn("volume 0.5x in the last half hour (6.7x on the day)", after.describe())
+        # MRLN the same afternoon was heavy on both readings and keeps its points.
+        self.assertEqual(M.score(readings(relative_volume="23.9", recent_relative_volume="15.1"), current).parts[0][1], D("45"))
+        # A stock only now waking up is not ahead of its day: the lower reading still decides.
+        self.assertEqual(M.score(readings(relative_volume="1.0", recent_relative_volume="9"), current).parts[0][1], D("0"))
+        first_half_hour = readings(relative_volume="5", recent_relative_volume=None)
+        self.assertEqual(M.score(first_half_hour, current).parts[0][1], D("45"))
+
     def test_the_three_direction_checks(self) -> None:
         self.assertEqual(M.direction_hold_reason(readings()), "")
         self.assertIn("down 0.50% on the session", M.direction_hold_reason(readings(session_change=-0.5)))
@@ -104,6 +136,21 @@ class VolumeTests(unittest.TestCase):
         self.assertEqual(M.relative_volume(today, profile, 6), D("2.5"))
         self.assertIsNone(M.relative_volume(today, None, 0))
         self.assertIsNone(M.relative_volume(today, profile, None))
+
+
+class RecentVolumeTests(unittest.TestCase):
+    def test_the_last_half_hour_against_the_usual_for_that_half_hour(self) -> None:
+        profile = [100.0 * (index + 1) for index in range(M.SLOTS)]        # usually 100 a bar
+        today = [100.0 * (index + 1) for index in range(M.SLOTS)]
+        self.assertEqual(M.recent_relative_volume(today, profile, 20), D("1"))
+        burst = [value + (5000.0 if index >= 10 else 0.0) for index, value in enumerate(today)]  # one print in bar 10
+        self.assertGreater(M.relative_volume(burst, profile, 20), D("3"))
+        self.assertEqual(M.recent_relative_volume(burst, profile, 20), D("1"))    # the half hour after it is ordinary
+        self.assertEqual(M.recent_relative_volume(burst, profile, 12), D("9.3333"))
+        self.assertIsNone(M.recent_relative_volume(today, profile, 5))            # first half hour: the day is the half hour
+        flat = [100.0] * M.SLOTS
+        self.assertIsNone(M.recent_relative_volume(today, flat, 20))              # usually nothing trades then
+        self.assertIsNone(M.recent_relative_volume(today, None, 20))
 
 
 def stamp(minute: int) -> str:
@@ -204,6 +251,51 @@ class EntryTests(unittest.TestCase):
         self.assertRegex(hold(engine), r"^Hold \(score \d+ of 60: no volume reading \+0")
         engine.config = engine.config.model_copy(update={"min_entry_score": D("40")})
         self.assertEqual(hold(engine), "")  # the price readings alone can clear a lower bar
+
+    def test_spread_is_the_quote_read_before_the_order_and_never_under_a_tick(self) -> None:
+        engine = movers_engine()
+        self.assertEqual(round(engine.mover_spread_percent("HOT", D("1.24")), 3), D("0.806"))    # one cent on $1.24
+        self.assertEqual(round(engine.mover_spread_percent("HOT", D("36.50")), 3), D("0.027"))
+        self.assertEqual(round(engine.mover_spread_percent("HOT", D("0.72")), 3), D("0.014"))    # under $1 a tick is $0.0001
+        engine.mover_quotes["HOT"] = (D("0.5688"), D("0.70"), clock_module.monotonic())           # SOC's quote that day
+        self.assertEqual(round(engine.mover_spread_percent("HOT", D("0.72")), 1), D("18.2"))
+        engine.mover_quotes["HOT"] = (D("1.24"), D("1.24"), clock_module.monotonic())             # locked: still a tick
+        self.assertEqual(round(engine.mover_spread_percent("HOT", D("1.24")), 3), D("0.806"))
+        engine.mover_quotes["HOT"] = (D("1.20"), D("1.30"), clock_module.monotonic() - 11 * 60)   # too old to trust
+        self.assertEqual(round(engine.mover_spread_percent("HOT", D("1.24")), 3), D("0.806"))
+        self.assertIsNone(engine.mover_spread_percent("HOT", None))
+
+    def test_a_wide_quote_holds_a_mover_that_would_otherwise_be_bought(self) -> None:
+        engine = movers_engine()
+        self.assertEqual(hold(engine), "")
+        score = engine.strategy_state.entry_score["HOT"]
+        price = engine.mover_readings("HOT", engine.snapshot("HOT")).price
+        engine.mover_quotes["HOT"] = (price - D("0.07"), price + D("0.07"), clock_module.monotonic())  # 1.25% wide: the whole stop
+        reason = hold(engine)
+        self.assertIn("Hold (score", reason)
+        self.assertIn("spread 1.25% -40", reason)
+        self.assertLess(engine.strategy_state.entry_score["HOT"], D("60"))
+        engine.config = engine.config.model_copy(update={"mover_weight_spread": D("0")})
+        self.assertEqual(hold(engine), "")
+        self.assertGreater(engine.strategy_state.entry_score["HOT"], score)   # not even the one-tick cost
+
+    def test_the_order_lookup_remembers_the_quote(self) -> None:
+        engine = movers_engine()
+        engine.data_client = SimpleNamespace(
+            get_stock_latest_trade=lambda request: {"HOT": SimpleNamespace(price="1.25", timestamp=NOON)},
+            get_stock_latest_quote=lambda request: {"HOT": SimpleNamespace(symbol="HOT", bid_price="1.24", ask_price="1.25")},
+        )
+        with patch("alpaca_desktop.engine.append_market_trade"), patch("alpaca_desktop.engine.append_market_quote"):
+            self.assertEqual(engine.current_trade_price("HOT", D("1.24")), D("1.25"))
+        self.assertEqual(engine.mover_quotes["HOT"][:2], (D("1.24"), D("1.25")))
+        self.assertEqual(round(engine.mover_spread_percent("HOT", D("1.25")), 2), D("0.80"))
+
+    def test_the_last_half_hour_reading_reaches_the_score(self) -> None:
+        engine = movers_engine()
+        engine.mover_volume_recent = {"HOT": D("0.5")}
+        self.assertIn("volume 0.5x in the last half hour (5.0x on the day)", hold(engine))
+        engine.config = engine.config.model_copy(update={"mover_volume_current": False})
+        self.assertEqual(hold(engine), "")
 
     def test_no_hidden_re_entry_limit(self) -> None:
         # A stock already bought today is bought again when it scores; only the account's visible
@@ -385,6 +477,98 @@ class ReentryBarTests(unittest.TestCase):
                 self.assertEqual([(order.symbol, order.side.value) for order in broker.submitted], bought)
                 if not bought:
                     self.assertIn("re-entry needs 100 after 2 losing exits today", engine.strategy_state.last_action["HOT"])
+
+    def test_a_sale_at_a_gain_sets_the_price_the_stock_has_to_beat(self) -> None:
+        # MRLN 2026-11-13 12:25:10: the trail sold at $1.31 (+4.8%) and the app bought it back one
+        # second later at $1.32 with its price reading $1.33, then lost 0.76% on that.
+        engine = movers_engine(reentry_score_boost="20", profit_trail_drop_percent="1")
+        orders = [filled("b1", "buy", "1.25", 30), filled("s1", "sell", "1.31", 10)]
+        engine.sync_loss_reentry_floors_from_closed_orders(orders)
+        self.assertEqual(engine.reentry_new_highs, {"HOT": ("s1", D("1.33"))})   # 1.31 plus the 1% trail drop, rounded up
+        self.assertEqual(engine.movers_unbeaten_high("HOT", D("1.33")), D("1.33"))
+        self.assertIn("re-buying needs 20 more points", engine.logs[-1]["message"])
+        self.assertIsNone(engine.movers_unbeaten_high("HOT", D("1.34")))          # a new high releases it
+        engine.sync_loss_reentry_floors_from_closed_orders(orders)
+        self.assertEqual(engine.reentry_new_highs, {})                             # and it stays released
+        self.assertIsNone(engine.movers_unbeaten_high("HOT", D("1.30")))
+
+    def test_only_the_newest_sale_counts_and_only_when_it_won(self) -> None:
+        def pending(orders: list[dict[str, Any]], **config: Any) -> dict[str, Any]:
+            engine = movers_engine(reentry_score_boost="20", **config)
+            engine.sync_loss_reentry_floors_from_closed_orders(orders)
+            return engine.reentry_new_highs
+        win = [filled("b1", "buy", "1.25", 30), filled("s1", "sell", "1.31", 20)]
+        self.assertEqual(pending(win), {"HOT": ("s1", D("1.31"))})                                  # no trail: the sale price
+        self.assertEqual(pending(win + [filled("b2", "buy", "1.32", 10)]), {})                      # bought again since
+        self.assertEqual(pending(win + [filled("b2", "buy", "1.32", 10), filled("s2", "sell", "1.30", 5)]), {})  # then a loss
+        self.assertEqual(pending([filled("b1", "buy", "1.25", 30), filled("s1", "sell", "1.25", 20)]), {})       # flat
+        self.assertEqual(pending([filled("s1", "sell", "1.31", 20)]), {})                           # buy unknown: result unknown
+        day_ago = 24 * 60
+        self.assertEqual(pending([filled("b1", "buy", "1.25", day_ago + 9), filled("s1", "sell", "1.31", day_ago)]), {})
+        fund = [filled("b1", "buy", "42.40", 30, symbol="SQQQ"), filled("s1", "sell", "42.90", 20, symbol="SQQQ")]
+        self.assertEqual(pending(fund, inverse_trend_hold=True), {})                                # trend-hold funds are exempt
+        self.assertEqual(pending(win, entry_mode="momentum"), {})
+
+    def test_a_mover_sold_at_a_gain_needs_the_boost_until_it_makes_a_new_high(self) -> None:
+        engine = movers_engine(reentry_score_boost="45", profit_trail_drop_percent="1")
+        price = engine.mover_readings("HOT", engine.snapshot("HOT")).price
+        self.assertEqual(hold(engine), "")
+        score = engine.strategy_state.entry_score["HOT"]
+        sold_above = [filled("b1", "buy", str(price - D("0.50")), 30), filled("s1", "sell", str(price), 10)]
+        engine.sync_loss_reentry_floors_from_closed_orders(sold_above)
+        target = engine.reentry_new_highs["HOT"][1]
+        self.assertGreater(target, price)
+        self.assertEqual(
+            hold(engine),
+            f"Hold (re-entry needs 105 after a sale at a gain, until it trades above ${target}; score {score:.0f})",
+        )
+        engine.config = engine.config.model_copy(update={"reentry_score_boost": D("0")})    # 0 switches it off
+        self.assertEqual(hold(engine), "")
+        engine.config = engine.config.model_copy(update={"reentry_score_boost": D("45")})
+        engine.reentry_new_highs["HOT"] = ("s1", price - D("0.01"))                          # it has traded above the old high
+        self.assertEqual(hold(engine), "")
+        self.assertEqual(engine.reentry_new_highs, {})
+
+    def test_a_new_high_since_the_sale_releases_it_whatever_the_score_was(self) -> None:
+        # The stock ran past the old high while it scored too low to be looked at (or between
+        # scans, or before a restart) and has since come back under it. It made the new high.
+        def engine_with(bar_minutes_after_sale: int, high: str) -> TraderEngine:
+            engine = movers_engine(reentry_score_boost="20", profit_trail_drop_percent="1")
+            sale = filled("s1", "sell", "11.00", 30)
+            sold_at = datetime.fromisoformat(sale["filled_at"].replace("Z", "+00:00"))
+            for minute in range(-3, 4):
+                at = sold_at + timedelta(minutes=minute)
+                top = D(high) if minute == bar_minutes_after_sale else D("11.00")
+                engine.strategy_state.add_bar("HOT", D("11.00"), at.isoformat(), 1000, top, D("10.95"))
+            engine.sync_loss_reentry_floors_from_closed_orders([filled("b1", "buy", "10.50", 60), sale])
+            return engine
+        self.assertEqual(engine_with(2, "11.11").reentry_new_highs, {"HOT": ("s1", D("11.12"))})   # not above it
+        released = engine_with(2, "11.13")
+        self.assertEqual(released.reentry_new_highs, {})
+        self.assertEqual(released.reentry_released_sells, {"s1"})
+        self.assertEqual(engine_with(-2, "11.50").reentry_new_highs, {"HOT": ("s1", D("11.12"))})  # the high before the sale
+        self.assertEqual(engine_with(0, "11.50").reentry_new_highs, {"HOT": ("s1", D("11.12"))})   # the sale's own minute
+
+    def test_a_loss_and_a_sale_at_a_gain_add_up(self) -> None:
+        engine = movers_engine(reentry_score_boost="20", profit_trail_drop_percent="1")
+        price = engine.mover_readings("HOT", engine.snapshot("HOT")).price
+        engine.sync_loss_reentry_floors_from_closed_orders([
+            filled("b1", "buy", str(price), 60), filled("s1", "sell", str(price - D("0.20")), 50),
+            filled("b2", "buy", str(price - D("0.30")), 30), filled("s2", "sell", str(price), 10),
+        ])
+        target = engine.reentry_new_highs["HOT"][1]
+        self.assertIn(f"re-entry needs 100 after 1 losing exit today and a sale at a gain, until it trades above ${target}", hold(engine))
+
+    def test_the_restart_log_leaves_out_trend_hold_funds(self) -> None:
+        engine = movers_engine(reentry_score_boost="20", inverse_trend_hold=True)
+        engine.sync_loss_reentry_floors_from_closed_orders([
+            filled("b1", "buy", "1.31", 30), filled("s1", "sell", "1.29", 25),
+            filled("b2", "buy", "42.40", 20, symbol="SQQQ"), filled("s2", "sell", "42.10", 15, symbol="SQQQ"),
+        ])
+        messages = [entry["message"] for entry in engine.logs if "Re-entry score" in entry["message"]]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("HOT needs 80", messages[0])
+        self.assertNotIn("SQQQ", messages[0])
 
     def test_the_whole_session_is_read_once_then_the_usual_list(self) -> None:
         broker = ClosedOrdersBroker([filled("b1", "buy", "11.40", 30), filled("s1", "sell", "11.20", 25)])
@@ -643,6 +827,8 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_and_bounds(self) -> None:
         config = AppConfig(entry_mode="movers")
         self.assertEqual((config.mover_weight_volume, config.mover_weight_rsi), (D("45"), D("0")))
+        self.assertEqual((config.mover_weight_spread, config.mover_volume_current), (D("40"), True))
+        self.assertEqual(AppConfig(mover_weight_spread="500").mover_weight_spread, D("100"))
         clamped = AppConfig(mover_weight_volume="500", mover_volume_full_at="1")
         self.assertEqual((clamped.mover_weight_volume, clamped.mover_volume_full_at), (D("100"), D("1.5")))
         # Settings saved before the movers stop fields were removed still load.
