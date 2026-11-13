@@ -20,11 +20,12 @@ configure_test_environment()
 
 from alpaca_desktop import inplay as inplay_logic  # noqa: E402
 from alpaca_desktop import movers as M  # noqa: E402
-from alpaca_desktop.engine import AppConfig, TraderEngine  # noqa: E402
+from alpaca_desktop.engine import MARKET_TIMEZONE, AppConfig, TraderEngine  # noqa: E402
 
 from .test_inplay_mode import NOON, Broker  # noqa: E402
 
 D = Decimal
+M_TZ = MARKET_TIMEZONE
 TODAY = "2026-11-12"
 OPEN_UTC = datetime(2026, 11, 12, 14, 30, tzinfo=timezone.utc)  # 09:30 ET
 
@@ -256,9 +257,143 @@ class StopTests(unittest.TestCase):
         reason, _ = engine.local_protection_exit_decision("HOT", config, held, D("105.20"), False, True)
         self.assertIn("take-profit 5", reason)
 
+    def test_the_trail_on_a_cheap_stock_is_a_stop_under_the_price_not_the_price(self) -> None:
+        # MRLN 2026-11-13: bought $1.22, peaked $1.245. 1% under the peak is $1.2326; rounded up
+        # that is $1.24, the market itself, and Alpaca rejected it. Rounded down it is a real stop.
+        engine = movers_engine(profit_trail_start_percent="2", profit_trail_drop_percent="1")
+        config = engine.config
+        self.assertEqual(engine.position_stop_price("HOT", D("1.22"), D("1.24"), config), D("1.20"))  # not up 2% yet
+        self.assertEqual(engine.position_stop_price("HOT", D("1.22"), D("1.245"), config), D("1.23"))
+        self.assertEqual(engine.position_stop_price("HOT", D("1.22"), D("1.24"), config), D("1.23"))  # never back down
+        for entry, peak in (("1.22", "1.245"), ("1.35", "1.3799"), ("3.19", "3.27"), ("36.51", "37.40"), ("100", "104")):
+            with self.subTest(entry=entry, peak=peak):
+                stop = engine.position_stop_price(f"T{entry}", D(entry), D(peak), config)
+                self.assertLessEqual(stop, D(peak) * D("0.99"))  # never tighter than the Profit Trail drop
+
     def test_no_take_profit_when_the_setting_is_zero(self) -> None:
         engine = movers_engine()
         self.assertEqual(engine.position_take_profit_price("HOT", D("100"), engine.config), D("0"))
+
+
+def filled(order_id: str, side: str, price: str, minutes_ago: int, qty: str = "10", symbol: str = "HOT") -> dict[str, Any]:
+    # Counted back from noon ET today, so the fixture's "today" does not depend on when the test runs.
+    noon = datetime.combine(datetime.now(M_TZ).date(), datetime.min.time(), tzinfo=M_TZ) + timedelta(hours=12)
+    at = (noon - timedelta(minutes=minutes_ago)).astimezone(timezone.utc)
+    return {"id": order_id, "symbol": symbol, "side": side, "status": "filled", "filled_qty": qty,
+            "filled_avg_price": price, "filled_at": at.isoformat().replace("+00:00", "Z")}
+
+
+class ClosedOrdersBroker(Broker):
+    """A broker whose closed-order list is set by the test; it has no open orders."""
+
+    def __init__(self, closed: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.closed = closed
+        self.closed_requests: list[Any] = []
+
+    def get_orders(self, request: Any) -> list[dict[str, Any]]:
+        if "closed" not in str(getattr(request, "status", "")).lower():
+            return []
+        self.closed_requests.append(request)
+        return list(self.closed)
+
+
+class ReentryBarTests(unittest.TestCase):
+    """After a losing round trip a mover needs a higher score to be bought again that day:
+    Min Score plus the account's Re-entry Boost for each loss (60, 80, 100 at a boost of 20)."""
+
+    def losses(self, orders: list[dict[str, Any]], **config: Any) -> dict[str, int]:
+        engine = movers_engine(reentry_score_boost="20", **config)
+        engine.sync_loss_reentry_floors_from_closed_orders(orders)
+        return {symbol: len(trips) for symbol, trips in engine.reentry_losses_today.items()}
+
+    def test_the_bar_climbs_by_the_boost_for_each_losing_exit(self) -> None:
+        engine = movers_engine(reentry_score_boost="20")
+        self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("60"), 0))
+        engine.reentry_losses_date = datetime.now(M_TZ).date()
+        for count, needed in ((1, "80"), (2, "100"), (3, "120")):
+            engine.reentry_losses_today = {"HOT": {f"b{index}" for index in range(count)}}
+            self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D(needed), count))
+        self.assertEqual(engine.movers_reentry_bar("OTHER", engine.config), (D("60"), 0))
+        engine.config = engine.config.model_copy(update={"reentry_score_boost": D("0")})
+        self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("60"), 3))  # 0 switches it off
+
+    def test_yesterdays_losses_do_not_carry_over(self) -> None:
+        engine = movers_engine(reentry_score_boost="20")
+        engine.reentry_losses_date = datetime.now(M_TZ).date() - timedelta(days=1)
+        engine.reentry_losses_today = {"HOT": {"b1", "b2"}}
+        self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("60"), 0))
+
+    def test_losing_round_trips_are_counted_from_the_brokers_fills(self) -> None:
+        orders = [
+            filled("b1", "buy", "1.31", 60), filled("s1", "sell", "1.29", 59),    # loss
+            filled("b2", "buy", "1.25", 50),
+            filled("s2a", "sell", "1.23", 49, qty="4"),                           # the stop filled in two
+            filled("s2b", "sell", "1.23", 48, qty="6"),                           # pieces: one loss
+            filled("b3", "buy", "1.22", 40), filled("s3", "sell", "1.24", 30),    # a winner adds nothing
+            filled("b4", "buy", "1.24", 20),                                      # still held
+        ]
+        self.assertEqual(self.losses(orders), {"HOT": 2})
+
+    def test_only_todays_known_losses_count(self) -> None:
+        day_ago = 24 * 60
+        self.assertEqual(self.losses([filled("b1", "buy", "1.31", day_ago + 5), filled("s1", "sell", "1.29", day_ago)]), {})
+        self.assertEqual(self.losses([filled("s1", "sell", "1.29", 5)]), {})  # its buy is not in the list
+        self.assertEqual(self.losses([filled("b1", "buy", "1.30", 9), filled("s1", "sell", "1.30", 5)]), {})  # flat
+
+    def test_a_loss_that_scrolled_out_of_the_order_list_still_counts(self) -> None:
+        engine = movers_engine(reentry_score_boost="20")
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("b1", "buy", "1.31", 60), filled("s1", "sell", "1.29", 59)])
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("b2", "buy", "1.25", 9), filled("s2", "sell", "1.23", 5)])
+        engine.sync_loss_reentry_floors_from_closed_orders([])
+        self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("100"), 2))
+
+    def test_a_loss_counts_when_its_buy_has_scrolled_out_of_the_order_list(self) -> None:
+        # A busy account closes 100 orders in minutes (every trail step is a cancel and a new stop).
+        engine = movers_engine(reentry_score_boost="20")
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("b1", "buy", "1.31", 120)])  # the pass that saw the buy
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("s1a", "sell", "1.29", 5, qty="4")])
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("s1a", "sell", "1.29", 5, qty="4"), filled("s1b", "sell", "1.29", 4, qty="6")])
+        self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("80"), 1))
+        winner = movers_engine(reentry_score_boost="20")
+        winner.sync_loss_reentry_floors_from_closed_orders([filled("b1", "buy", "1.31", 120)])
+        winner.sync_loss_reentry_floors_from_closed_orders([filled("s1", "sell", "1.33", 5)])
+        self.assertEqual(winner.movers_reentry_bar("HOT", winner.config), (D("60"), 0))
+
+    def test_other_modes_keep_their_own_re_entry_floor(self) -> None:
+        self.assertEqual(self.losses([filled("b1", "buy", "1.31", 9), filled("s1", "sell", "1.29", 5)], entry_mode="momentum"), {})
+
+    def test_a_mover_under_its_raised_bar_is_held_and_says_why(self) -> None:
+        engine = movers_engine(reentry_score_boost="20")
+        self.assertEqual(hold(engine), "")
+        score = engine.strategy_state.entry_score["HOT"]
+        self.assertTrue(D("80") <= score < D("100"), score)
+        engine.reentry_losses_date = datetime.now(M_TZ).date()
+        engine.reentry_losses_today = {"HOT": {"b1"}}
+        self.assertEqual(hold(engine), "")  # one loss: needs 80, has it
+        engine.reentry_losses_today = {"HOT": {"b1", "b2"}}
+        self.assertEqual(hold(engine), f"Hold (re-entry needs 100 after 2 losing exits today; score {score:.0f})")
+
+    def test_refresh_holds_a_twice_stopped_mover_and_buys_a_once_stopped_one(self) -> None:
+        once = [filled("b1", "buy", "11.40", 30), filled("s1", "sell", "11.20", 25)]
+        twice = once + [filled("b2", "buy", "11.45", 20), filled("s2", "sell", "11.30", 15)]
+        for closed, bought in ((once, [("HOT", "buy")]), (twice, [])):
+            with self.subTest(losses=len(closed) // 2):
+                broker = ClosedOrdersBroker(closed)
+                engine = movers_engine(broker, bars=150, reentry_score_boost="20")
+                refresh(engine)
+                self.assertEqual([(order.symbol, order.side.value) for order in broker.submitted], bought)
+                if not bought:
+                    self.assertIn("re-entry needs 100 after 2 losing exits today", engine.strategy_state.last_action["HOT"])
+
+    def test_the_whole_session_is_read_once_then_the_usual_list(self) -> None:
+        broker = ClosedOrdersBroker([filled("b1", "buy", "11.40", 30), filled("s1", "sell", "11.20", 25)])
+        engine = movers_engine(broker, bars=150, reentry_score_boost="20")
+        refresh(engine)
+        refresh(engine)
+        limits = [request.limit for request in broker.closed_requests]
+        self.assertEqual(limits, [100, 500, 100])
+        self.assertIsNotNone(broker.closed_requests[1].after)
 
 
 def refresh(engine: TraderEngine) -> None:

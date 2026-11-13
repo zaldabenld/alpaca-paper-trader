@@ -2132,6 +2132,10 @@ class TraderEngine:
         self.consecutive_refresh_failures = 0
         self.processed_reentry_exit_ids: set[str] = set()
         self.reentry_reset_at: datetime | None = None
+        # Movers mode: today's losing round trips per symbol, keyed by the buy that opened each.
+        self.reentry_losses_today: dict[str, set[str]] = {}
+        self.reentry_losses_date: Any = None
+        self.reentry_open_buys: dict[str, tuple[str, Decimal]] = {}  # symbol -> (buy id, fill price)
         self.entry_lock_dates: dict[str, str] = {}
         self.entry_times: dict[str, datetime] = {}
         self.exit_lock_dates: dict[str, str] = {}
@@ -2464,6 +2468,9 @@ class TraderEngine:
             self.reentry_score_floors = {}
             self.processed_reentry_exit_ids = set()
             self.reentry_reset_at = None
+            self.reentry_losses_today = {}
+            self.reentry_losses_date = None
+            self.reentry_open_buys = {}
 
         account = self.trading_client.get_account()
         with self.lock:
@@ -2636,6 +2643,9 @@ class TraderEngine:
             self.reentry_score_floors = {}
             self.processed_reentry_exit_ids = set()
             self.reentry_reset_at = datetime.now(timezone.utc)
+            self.reentry_losses_today = {}
+            self.reentry_losses_date = None
+            self.reentry_open_buys = {}
             self.last_scan_log_at = 0.0
             self.last_entry_submitted_at = 0.0
 
@@ -2800,7 +2810,9 @@ class TraderEngine:
                     )
             entry_symbols = self.mode_entry_symbols()
 
-            self.sync_loss_reentry_floors_from_closed_orders(closed_order_dicts)
+            self.sync_loss_reentry_floors_from_closed_orders(
+                self.todays_closed_orders_for_reentry(client) or closed_order_dicts
+            )
             self.sync_entries_today_from_orders(closed_order_dicts + order_dicts)
 
             market_clock = self.format_market_clock(clock)
@@ -4234,15 +4246,30 @@ class TraderEngine:
             return direction
         # No other yes/no checks. A stock with no volume reading yet (no history on record, or
         # before the first reading about 09:51 ET) or no daily range simply earns no points for it.
-        # No re-entry limit of its own: the only per-stock daily limit is the account's visible
-        # Max Buys per Symbol per Day (checked in entry_candidate; 0 = off).
         result = movers_logic.score(readings, self.mover_weights(config))
         with self.lock:
             self.mover_scores[clean] = result
         self.set_entry_score(symbol, result.total)
         if result.total < config.min_entry_score:
             return f"Hold (score {result.total:.0f} of {config.min_entry_score:.0f}: {result.describe() or 'no points yet'})"
+        needed, losses = self.movers_reentry_bar(clean, config)
+        if result.total < needed:
+            return (
+                f"Hold (re-entry needs {needed:.0f} after {losses} losing exit{'' if losses == 1 else 's'} today;"
+                f" score {result.total:.0f})"
+            )
         return self.asset_tradeability_hold_reason(symbol)
+
+    def movers_reentry_bar(self, symbol: str, config: AppConfig) -> tuple[Decimal, int]:
+        """The score a mover needs to be bought, and its losing round trips today.
+
+        Each losing round trip today adds the account's Re-entry Boost to Min Score: at 60 and 20
+        a stock that lost once needs 80, twice 100, and after that it is out for the day (a bar
+        above the top score). Winners add nothing; the count starts over each trading day."""
+        today = datetime.now(MARKET_TIMEZONE).date()
+        with self.lock:
+            losses = len(self.reentry_losses_today.get(symbol, ())) if self.reentry_losses_date == today else 0
+        return config.min_entry_score + max(Decimal("0"), config.reentry_score_boost) * losses, losses
 
     def movers_entry_candidate(self, symbol: str, rank: int, snapshot: Any, config: AppConfig) -> dict[str, Any] | None:
         hold = self.movers_entry_hold_reason(symbol, snapshot, config)
@@ -5886,9 +5913,9 @@ class TraderEngine:
             step = entry_price * Decimal("0.0025")
             if trailed > entry_price and step > 0:
                 trailed = entry_price + ((trailed - entry_price) // step) * step
-            # Round the stepped trail up so a broker tick does not erode the locked-in gain.
-            if trailed > stop:
-                return self.round_exit_price(trailed, ROUND_UP)
+            # Rounded down like every other stop: rounded up, the trail on a $1-$2 stock lands on
+            # the price itself (1% under a $1.245 peak is $1.2326; $1.24 is the market, $1.23 is a stop).
+            stop = max(stop, trailed)
         if stop <= 0:
             return Decimal("0")
         return self.round_exit_price(stop, ROUND_DOWN)
@@ -7181,6 +7208,18 @@ class TraderEngine:
         lots: dict[str, list[dict[str, Decimal]]] = {}
         with self.lock:
             reset_at = self.reentry_reset_at
+        movers = self.config.entry_mode == "movers"
+        today = datetime.now(MARKET_TIMEZONE).date()
+        opening_buy: dict[str, str] = {}
+        losing_trips: dict[str, set[str]] = {}
+        rebuilt = False
+        if movers:
+            with self.lock:
+                rebuilt = self.reentry_losses_date != today
+                if rebuilt:
+                    self.reentry_losses_today = {}
+                    self.reentry_open_buys = {}
+                    self.reentry_losses_date = today
 
         for item in sorted(filled_orders, key=self.trade_history_sort_value):
             symbol = str(item.get("symbol") or "").upper()
@@ -7203,8 +7242,11 @@ class TraderEngine:
 
             if side == "buy" and avg_price > 0:
                 lots.setdefault(symbol, []).append({"qty": filled_qty, "price": avg_price})
+                opening_buy[symbol] = self.closed_order_identity(item)
                 with self.lock:
                     self.reentry_score_floors.pop(symbol, None)
+                    if movers:
+                        self.reentry_open_buys[symbol] = (opening_buy[symbol], avg_price)
                 continue
 
             if side != "sell":
@@ -7214,6 +7256,24 @@ class TraderEngine:
             realized_pl: Decimal | None = None
             if cost_basis > 0 and filled_value > 0:
                 realized_pl = filled_value - cost_basis
+
+            if movers:
+                # Movers mode counts losing round trips instead (movers_reentry_bar). A trip is keyed
+                # by its buy, so a stop that fills in two pieces is one loss. The list is only the
+                # newest orders: on a busy day a position's buy has scrolled out by the time it is
+                # sold, so the buy is remembered from the pass that saw it. A sell with no known buy
+                # has no known result and is not counted.
+                trip = opening_buy.get(symbol)
+                lost = realized_pl is not None and realized_pl < 0
+                if trip is None:
+                    with self.lock:
+                        remembered = self.reentry_open_buys.get(symbol)
+                    if remembered is not None:
+                        trip, bought_at = remembered
+                        lost = Decimal("0") < avg_price < bought_at
+                if trip and lost and filled_at is not None and filled_at.astimezone(MARKET_TIMEZONE).date() == today:
+                    losing_trips.setdefault(symbol, set()).add(trip)
+                continue
 
             intent = self.trade_intent_for_order(item, intent_lookup)
             reason = str(intent.get("reason") or "")
@@ -7231,6 +7291,48 @@ class TraderEngine:
                 "local stop-loss filled protective/loss exit",
             )
             self.log("warn", f"{symbol} exit filled; requiring stronger score before re-entry.")
+
+        if movers:
+            self.record_movers_losing_trips(losing_trips, rebuilt)
+
+    def record_movers_losing_trips(self, losing_trips: dict[str, set[str]], rebuilt: bool) -> None:
+        """Add today's losing round trips to the day's count. The count only grows during a day:
+        the order list is a window, and a morning loss that scrolled out of it still counts."""
+        raised: list[tuple[str, int]] = []
+        with self.lock:
+            for symbol, trips in losing_trips.items():
+                known = self.reentry_losses_today.setdefault(symbol, set())
+                if not trips <= known:
+                    known |= trips
+                    raised.append((symbol, len(known)))
+        if not raised:
+            return
+        bars = ", ".join(
+            f"{symbol} needs {self.movers_reentry_bar(symbol, self.config)[0]:.0f} ({losses} losing"
+            f" exit{'' if losses == 1 else 's'} today)"
+            for symbol, losses in sorted(raised)
+        )
+        self.log("warn", f"Re-entry score {'rebuilt from' if rebuilt else 'raised by'} today's fills: {bars}.")
+
+    def todays_closed_orders_for_reentry(self, client: Any) -> list[dict[str, Any]]:
+        """Today's closed orders, read once a day (and after a restart) in movers mode so the losing
+        round trips are counted from the whole session; every later pass adds from the usual list.
+        Empty when there is nothing to rebuild or the read fails."""
+        today = datetime.now(MARKET_TIMEZONE).date()
+        with self.lock:
+            if self.config.entry_mode != "movers" or self.reentry_losses_date == today:
+                return []
+        try:
+            session_start = datetime.combine(today, datetime.min.time(), tzinfo=MARKET_TIMEZONE)
+            orders = client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED, limit=500, after=session_start, nested=True, direction=Sort.DESC
+                )
+            )
+            return [model_dict(item) for item in orders]
+        except Exception as exc:
+            self.log("warn", f"Could not read today's closed orders for the re-entry count: {exc}")
+            return []
 
     def closed_sell_needs_reentry_floor(
         self,
