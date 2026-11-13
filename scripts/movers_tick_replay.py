@@ -555,6 +555,8 @@ def main() -> int:
     if not api_key or not secret_key:
         raise SystemExit("That account has no saved keys.")
     base = saved  # a movers profile of the scored style; each variant sets the settings under test
+    if base.entry_mode not in {"scored", "weighted"} or base.mover_weight_volume <= 0:
+        raise SystemExit(f"{args.account} does not buy on the mover readings; name an account that runs a movers profile.")
     market = Market(api_key, secret_key, Path(args.cache))
     tape_dir = Path(args.tape_dir)
     stamps = args.days or sorted(path.stem.split("-")[1] for path in tape_dir.glob("tape-*.jsonl"))

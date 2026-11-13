@@ -194,7 +194,8 @@ class EntryTests(unittest.TestCase):
 
     def test_the_momentum_rules_would_have_refused_the_same_stock_for_rsi(self) -> None:
         engine = movers_engine()
-        engine.config = engine.config.model_copy(update={"entry_mode": "momentum"})
+        engine.config = AppConfig(entry_mode="momentum", use_top_volume_symbols=False, symbols=["HOT"])
+        self.assertEqual((engine.config.entry_mode, engine.config.use_trend_checks), ("scored", True))
         self.assertIn("RSI 100.0 above", engine.entry_quality_hold_reason("HOT", engine.snapshot("HOT"), engine.config))
 
     def test_below_the_bar_the_reason_shows_the_score_and_what_earned_it(self) -> None:

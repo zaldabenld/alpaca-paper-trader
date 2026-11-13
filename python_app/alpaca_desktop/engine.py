@@ -91,7 +91,7 @@ from . import symbol_info as symbol_info_logic
 from . import universe as rvol_universe
 
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2  # 2: "momentum" and "movers" became profiles of the scored style
 MOST_ACTIVES_MAX = 100  # Alpaca screener maximum for `top`
 DAILY_LIST_MAX = 100
 
@@ -1019,8 +1019,21 @@ class AppConfig(BaseModel):
         if not isinstance(data, dict):
             return data
         mode = str(data.get("entry_mode") or "").strip().lower()
-        if mode == "movers":
+        try:
+            saved_version = int(data["config_version"]) if "config_version" in data else None
+        except (TypeError, ValueError):
+            saved_version = None
+        if mode in {"movers", "momentum"} or (saved_version is not None and saved_version < 2):
             data = dict(data)
+            if saved_version is not None:
+                data["config_version"] = max(saved_version, 2)  # stays unset for an unversioned file
+        if mode in {"orb", "allocation", "inplay"} and saved_version is not None and saved_version < 2:
+            # Saved before the merge: the mover weights it carries were the old defaults and did
+            # nothing in these styles. Left in place they would switch the mover readings on the
+            # day the account is moved to the scored style.
+            for key in MOVER_WEIGHT_KEYS:
+                data[key] = "0"
+        if mode == "movers":
             data["entry_mode"] = "scored"
             for key, value in MOVER_WEIGHT_DEFAULTS.items():
                 data.setdefault(key, value)
@@ -1030,8 +1043,7 @@ class AppConfig(BaseModel):
             for key in DIRECTION_CHECK_KEYS:
                 data[key] = True
             data["reentry_rule"] = "climb"
-        elif mode == "momentum":
-            data = dict(data)
+        elif mode == "momentum" or (not mode and saved_version is not None and saved_version < 2):
             data["entry_mode"] = "scored"
             for key in MOVER_WEIGHT_KEYS:
                 data[key] = "0"
@@ -1301,7 +1313,16 @@ class AccountPayload(BaseModel):
         payload = handler(data)
         raw_config = data.get("config") if isinstance(data, dict) else None
         if isinstance(raw_config, dict):
-            payload._sent_config_keys = frozenset(str(key) for key in raw_config)
+            sent = {str(key) for key in raw_config}
+            # A client that still names a style the old way ("movers", "momentum") is asking for
+            # everything that name stood for, so those settings count as sent. Otherwise the merge
+            # with the account's current settings would keep half of the other style.
+            mode = str(raw_config.get("entry_mode") or "").strip().lower()
+            if mode in {"movers", "momentum"}:
+                sent |= {"entry_mode", "use_trend_checks", "reentry_rule", *DIRECTION_CHECK_KEYS, *MOVER_WEIGHT_KEYS}
+            if mode == "movers":
+                sent |= set(OLD_SCORE_WEIGHT_KEYS)
+            payload._sent_config_keys = frozenset(sent)
         return payload
 
 
@@ -2387,6 +2408,10 @@ class TraderEngine:
                 return payload.config
             merged = payload.config.model_dump()
             merged.update({key: getattr(current, key) for key in unsent})
+            if merged.get("entry_mode") == "weighted" and all(Decimal(str(merged[key])) == 0 for key in MOVER_WEIGHT_KEYS):
+                # Moved to the weighted style with every mover weight at 0 (the account never used
+                # them): it could never buy. Start it on the standard mover weights.
+                merged.update(MOVER_WEIGHT_DEFAULTS)
             return AppConfig.model_validate(merged)
 
     def configure_payload(self, payload: AccountPayload) -> None:
@@ -5351,7 +5376,7 @@ class TraderEngine:
         if score < config.min_entry_score:
             self.strategy_state.last_action[symbol] = f"Hold (score {score:.1f} < {config.min_entry_score})"
             return None
-        climb_hold = self.climbing_reentry_hold_reason(symbol, score, config)
+        climb_hold = self.climbing_reentry_hold_reason(symbol, score, config, snapshot.price)
         if climb_hold:
             self.strategy_state.last_action[symbol] = climb_hold
             return None
@@ -5362,18 +5387,27 @@ class TraderEngine:
         self.strategy_state.last_action[symbol] = f"Candidate score {score:.1f}"
         return {"symbol": symbol, "rank": rank, "score": score}
 
-    def climbing_reentry_hold_reason(self, symbol: str, score: Decimal, config: AppConfig) -> str:
-        """The climbing re-entry bar for a scored account that does not use the mover readings (those
-        accounts are checked in movers_entry_hold_reason, where the new-high rule also has a price)."""
+    def climbing_reentry_hold_reason(
+        self, symbol: str, score: Decimal, config: AppConfig, price: Decimal | None = None
+    ) -> str:
+        """The climbing re-entry rule for a scored account that does not use the mover readings
+        (accounts that do are checked in movers_entry_hold_reason): the bar raised by each losing
+        exit, and by a sale at a gain until the stock trades above the high it was sold from."""
         if not uses_climbing_reentry(config) or uses_mover_readings(config):
             return ""
-        needed, losses = self.movers_reentry_bar(symbol.strip().upper(), config)
-        if losses and score < needed:
-            return (
-                f"Hold (re-entry needs {needed:.0f} after {losses} losing exit{'' if losses == 1 else 's'} today;"
-                f" score {score:.0f})"
-            )
-        return ""
+        clean = symbol.strip().upper()
+        needed, losses = self.movers_reentry_bar(clean, config)
+        old_high = self.movers_unbeaten_high(clean, price)
+        if old_high is not None:
+            needed += max(Decimal("0"), config.reentry_score_boost)
+        if score >= needed or not (losses or old_high is not None):
+            return ""
+        why = []
+        if losses:
+            why.append(f"{losses} losing exit{'' if losses == 1 else 's'} today")
+        if old_high is not None:
+            why.append(f"a sale at a gain, until it trades above ${old_high}")
+        return f"Hold (re-entry needs {needed:.0f} after {' and '.join(why)}; score {score:.0f})"
 
     def inverse_trend_active(self, symbol: str, config: AppConfig) -> bool:
         """True when this symbol trades by the inverse trend-hold rules instead of the profile's own."""
@@ -5708,7 +5742,7 @@ class TraderEngine:
             if scored_entry and entry_score < config.min_entry_score:
                 self.strategy_state.last_action[symbol] = f"Hold (score {entry_score:.1f} < {config.min_entry_score})"
                 return events, False, None
-            climb_hold = self.climbing_reentry_hold_reason(symbol, entry_score, config) if scored_entry else ""
+            climb_hold = self.climbing_reentry_hold_reason(symbol, entry_score, config, snapshot.price) if scored_entry else ""
             if climb_hold:
                 self.strategy_state.last_action[symbol] = climb_hold
                 return events, False, None
@@ -5730,6 +5764,14 @@ class TraderEngine:
                     self.strategy_state.last_action[symbol] = hold
                     return events, False, None
                 entry_score = self.strategy_state.entry_score.get(symbol)
+                if (
+                    uses_reentry_floor(config)
+                    and reentry_floor is not None
+                    and entry_score is not None
+                    and entry_score < reentry_floor
+                ):
+                    self.strategy_state.last_action[symbol] = f"Hold (re-entry needs {reentry_floor:.1f})"
+                    return events, False, None
             if config.entry_mode == "inplay":
                 # The order goes at the live price, which can be past the chase limit by now.
                 with self.lock:
@@ -7054,7 +7096,15 @@ class TraderEngine:
         clean_symbol = symbol.strip().upper()
         if not clean_symbol:
             return
-        score = self.entry_score(snapshot, self.config, self.order_flow_ratio(clean_symbol))
+        if uses_mover_readings(self.config):
+            # The score this account buys on: the mover readings (plus the old-style score when
+            # its weights are on). The old-style score alone would be the wrong scale, or zero.
+            result = movers_logic.score(self.mover_readings(clean_symbol, snapshot), self.mover_weights(self.config))
+            score = result.total
+            if uses_old_score(self.config):
+                score += self.entry_score(snapshot, self.config, self.order_flow_ratio(clean_symbol))
+        else:
+            score = self.entry_score(snapshot, self.config, self.order_flow_ratio(clean_symbol))
         floor = min(Decimal("100"), max(self.config.min_entry_score, score + boost))
         with self.lock:
             self.reentry_score_floors[clean_symbol] = floor

@@ -285,3 +285,80 @@ class WeightedStyleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SettingsMergeTests(unittest.TestCase):
+    """The settings API merges what a client sent with the account's current settings. A client that
+    still names a style the old way has to get that whole style, not half of it."""
+
+    def merged(self, current: AppConfig, sent: dict[str, Any]) -> AppConfig:
+        engine = movers_engine()
+        engine.config = current
+        return engine.payload_config(engine_module.AccountPayload(name="Account", config=sent))
+
+    def test_a_partial_save_naming_movers_gets_the_whole_movers_style(self) -> None:
+        config = self.merged(AppConfig(), {"entry_mode": "movers"})
+        self.assertEqual((config.entry_mode, config.use_trend_checks, config.reentry_rule), ("scored", False, "climb"))
+        self.assertEqual(direction_checks(config), (True, True, True))
+        self.assertEqual((config.mover_weight_volume, config.mover_weight_spread), (D("45"), D("40")))
+        self.assertFalse(uses_old_score(config))
+
+    def test_an_old_page_saving_momentum_over_a_movers_account_gets_the_whole_old_style(self) -> None:
+        old_page = AppConfig().model_dump(mode="json")
+        for key in ("use_trend_checks", "reentry_rule", *DIRECTION_CHECK_KEYS):
+            old_page.pop(key)                                   # a page from before the merge does not know these
+        old_page.update(entry_mode="momentum", mover_weight_volume="45")
+        config = self.merged(AppConfig(**SAVED_MOVERS), old_page)
+        self.assertEqual((config.entry_mode, config.use_trend_checks, config.reentry_rule), ("scored", True, "floor"))
+        self.assertEqual(direction_checks(config), (False, False, False))
+        self.assertFalse(uses_mover_readings(config))
+        self.assertTrue(uses_old_score(config))
+
+    def test_moving_an_account_to_the_weighted_style_gives_it_weights_to_buy_on(self) -> None:
+        config = self.merged(AppConfig(), {"entry_mode": "weighted"})
+        self.assertEqual((config.entry_mode, config.mover_weight_volume, config.mover_weight_spread), ("weighted", D("45"), D("40")))
+        tuned = AppConfig(**(SAVED_MOVERS | {"mover_weight_volume": "30"}))
+        kept = self.merged(tuned, {"entry_mode": "weighted"})
+        self.assertEqual((kept.entry_mode, kept.mover_weight_volume, kept.min_entry_score), ("weighted", D("30"), D("60")))
+
+    def test_a_partial_save_of_one_setting_changes_only_that_setting(self) -> None:
+        current = AppConfig(**SAVED_MOVERS)
+        config = self.merged(current, {"mover_weight_spread": "25"})
+        want = current.model_dump(mode="json") | {"mover_weight_spread": "25"}
+        self.assertEqual(config.model_dump(mode="json"), want)
+
+    def test_an_older_account_in_another_style_does_not_carry_mover_weights_into_scored(self) -> None:
+        # Hold and day-trade accounts saved before the merge hold the old mover defaults, unused.
+        for mode in ("allocation", "inplay", "orb"):
+            saved = AppConfig(entry_mode=mode, mover_weight_volume="45", mover_weight_spread="40", config_version=1)
+            self.assertEqual((saved.entry_mode, saved.mover_weight_volume, saved.config_version), (mode, D("0"), 2))
+            switched = self.merged(saved, {"entry_mode": "scored"})
+            self.assertFalse(uses_mover_readings(switched), mode)
+        fresh = AppConfig(entry_mode="orb", mover_weight_volume="45")          # set on purpose, after the merge
+        self.assertEqual(fresh.mover_weight_volume, D("45"))
+
+    def test_an_unversioned_file_still_gets_its_one_time_retune(self) -> None:
+        config = AppConfig(entry_mode="movers")
+        self.assertNotIn("config_version", config.model_fields_set)
+
+
+class MixedRuleTests(unittest.TestCase):
+    def test_the_floor_on_a_mover_profile_is_set_from_the_score_it_buys_on(self) -> None:
+        engine = movers_engine(reentry_score_boost="10")
+        engine.config = engine.config.model_copy(update={"reentry_rule": "floor"})
+        self.assertEqual(hold(engine), "")
+        score = engine.strategy_state.entry_score["HOT"]
+        self.assertGreater(score, D("60"))
+        engine.record_reentry_floor("HOT", engine.snapshot("HOT"))
+        self.assertEqual(engine.reentry_score_floors["HOT"], min(D("100"), score + D("10")))
+
+    def test_the_climb_rule_keeps_its_new_high_part_without_the_mover_readings(self) -> None:
+        engine = movers_engine()
+        engine.config = AppConfig(use_top_volume_symbols=False, symbols=["HOT"], dry_run=False, reentry_rule="climb",
+                                  reentry_score_boost="20", min_entry_score="40", use_trend_checks=False)
+        engine.reentry_new_highs["HOT"] = ("s1", D("11.50"))
+        self.assertEqual(engine.climbing_reentry_hold_reason("HOT", D("55"), engine.config, D("11.20")),
+                         "Hold (re-entry needs 60 after a sale at a gain, until it trades above $11.50; score 55)")
+        self.assertEqual(engine.climbing_reentry_hold_reason("HOT", D("60"), engine.config, D("11.20")), "")
+        self.assertEqual(engine.climbing_reentry_hold_reason("HOT", D("45"), engine.config, D("11.60")), "")   # new high
+        self.assertEqual(engine.reentry_new_highs, {})
