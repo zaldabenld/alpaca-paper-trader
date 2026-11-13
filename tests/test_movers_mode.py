@@ -529,6 +529,26 @@ class ReentryBarTests(unittest.TestCase):
         self.assertEqual(hold(engine), "")
         self.assertEqual(engine.reentry_new_highs, {})
 
+    def test_a_new_high_since_the_sale_releases_it_whatever_the_score_was(self) -> None:
+        # The stock ran past the old high while it scored too low to be looked at (or between
+        # scans, or before a restart) and has since come back under it. It made the new high.
+        def engine_with(bar_minutes_after_sale: int, high: str) -> TraderEngine:
+            engine = movers_engine(reentry_score_boost="20", profit_trail_drop_percent="1")
+            sale = filled("s1", "sell", "11.00", 30)
+            sold_at = datetime.fromisoformat(sale["filled_at"].replace("Z", "+00:00"))
+            for minute in range(-3, 4):
+                at = sold_at + timedelta(minutes=minute)
+                top = D(high) if minute == bar_minutes_after_sale else D("11.00")
+                engine.strategy_state.add_bar("HOT", D("11.00"), at.isoformat(), 1000, top, D("10.95"))
+            engine.sync_loss_reentry_floors_from_closed_orders([filled("b1", "buy", "10.50", 60), sale])
+            return engine
+        self.assertEqual(engine_with(2, "11.11").reentry_new_highs, {"HOT": ("s1", D("11.12"))})   # not above it
+        released = engine_with(2, "11.13")
+        self.assertEqual(released.reentry_new_highs, {})
+        self.assertEqual(released.reentry_released_sells, {"s1"})
+        self.assertEqual(engine_with(-2, "11.50").reentry_new_highs, {"HOT": ("s1", D("11.12"))})  # the high before the sale
+        self.assertEqual(engine_with(0, "11.50").reentry_new_highs, {"HOT": ("s1", D("11.12"))})   # the sale's own minute
+
     def test_a_loss_and_a_sale_at_a_gain_add_up(self) -> None:
         engine = movers_engine(reentry_score_boost="20", profit_trail_drop_percent="1")
         price = engine.mover_readings("HOT", engine.snapshot("HOT")).price

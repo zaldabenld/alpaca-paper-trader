@@ -2157,6 +2157,8 @@ class TraderEngine:
         self.day_fills_date: Any = None
         self.day_fills_loaded = False
         self.day_fills_retry_at = 0.0
+        self.day_fills_warned = False
+        self.open_order_ids: set[str] = set()  # open at the last refresh
         self.entry_lock_dates: dict[str, str] = {}
         self.entry_times: dict[str, datetime] = {}
         self.exit_lock_dates: dict[str, str] = {}
@@ -2500,6 +2502,8 @@ class TraderEngine:
             self.day_fills_date = None
             self.day_fills_loaded = False
             self.day_fills_retry_at = 0.0
+            self.day_fills_warned = False
+            self.open_order_ids = set()
             self.entries_today_by_symbol = {}
             self.entries_today_date = None
 
@@ -2848,7 +2852,7 @@ class TraderEngine:
             session_date = str(market_clock.get("session_date") or datetime.now().astimezone().date().isoformat())
             # The newest 100 closed orders plus every fill seen earlier in the session: the day's
             # counts and the trade table are worked out from all of it, not the last two hours.
-            history_orders = self.with_todays_fills(client, closed_order_dicts, session_date)
+            history_orders = self.with_todays_fills(client, closed_order_dicts, session_date, order_dicts)
             self.sync_loss_reentry_floors_from_closed_orders(history_orders)
             self.sync_entries_today_from_orders(history_orders + order_dicts)
             # Hold mode trades its own target portfolio: no stops, no flatten, no loss stop, and the
@@ -7310,7 +7314,7 @@ class TraderEngine:
         today = datetime.now(MARKET_TIMEZONE).date()
         opening_buy: dict[str, str] = {}
         losing_trips: dict[str, set[str]] = {}
-        last_sale: dict[str, tuple[str, Decimal, bool]] = {}  # symbol -> (sell id, price, sold at a gain)
+        last_sale: dict[str, tuple[str, Decimal, bool, datetime]] = {}  # symbol -> (sell id, price, won, when)
         # The old score floor belongs to the modes that score a re-entry on the momentum scale. Hold
         # and day-trade accounts never read it, and their order lists reach back days.
         uses_score_floor = self.config.entry_mode in {"momentum", "orb"}
@@ -7381,8 +7385,8 @@ class TraderEngine:
                 sold_today = filled_at is not None and filled_at.astimezone(MARKET_TIMEZONE).date() == today
                 if trip and lost and sold_today:
                     losing_trips.setdefault(symbol, set()).add(trip)
-                if sold_today and avg_price > 0:
-                    last_sale[symbol] = (self.closed_order_identity(item), avg_price, bool(trip and won))
+                if sold_today and avg_price > 0 and filled_at is not None:
+                    last_sale[symbol] = (self.closed_order_identity(item), avg_price, bool(trip and won), filled_at)
                 continue
 
             if not uses_score_floor:
@@ -7408,20 +7412,36 @@ class TraderEngine:
             self.record_movers_losing_trips(losing_trips, rebuilt)
             self.record_movers_winning_sales(last_sale)
 
-    def record_movers_winning_sales(self, last_sale: dict[str, tuple[str, Decimal, bool]]) -> None:
+    def traded_above_since(self, symbol: str, target: Decimal, since: datetime) -> bool:
+        """True when a price bar that began after `since`, or the latest trade, is above target."""
+        for point in reversed(_latest_session_points(self.strategy_state.histories.get(symbol, []))):
+            began = _bar_local_time(point.timestamp)
+            if began is None or began <= since:
+                break
+            if point.high > target:
+                return True
+        trade = self.latest_stream_trade(symbol)
+        return bool(trade and trade[1] > since and trade[0] > target)
+
+    def record_movers_winning_sales(self, last_sale: dict[str, tuple[str, Decimal, bool, datetime]]) -> None:
         """Each symbol's newest sale today, when it was at a gain and nothing was bought since, sets
         the price the stock has to beat (movers_unbeaten_high). That price is where the trailing
-        stop was hanging from: the sale price plus the trail drop."""
+        stop was hanging from: the sale price plus the trail drop. It is checked here on every
+        refresh against the bars since the sale, whatever the stock scores at the time, so a new
+        high made between scans, while the score was low, or before a restart still releases it."""
         drop = min(max(self.config.profit_trail_drop_percent, Decimal("0")), Decimal("50"))
         announce: list[str] = []
         with self.lock:
             pending: dict[str, tuple[str, Decimal]] = {}
-            for symbol, (sell_id, price, won) in last_sale.items():
+            for symbol, (sell_id, price, won, sold_at) in last_sale.items():
                 if not won or sell_id in self.reentry_released_sells:
                     continue
                 if self.inverse_trend_active(symbol, self.config):
                     continue  # trend-hold funds are bought by their own rules, not by the score
                 target = self.round_exit_price(price / (Decimal("1") - drop / Decimal("100")), ROUND_UP)
+                if self.traded_above_since(symbol, target, sold_at):
+                    self.reentry_released_sells.add(sell_id)
+                    continue
                 known = self.reentry_new_highs.get(symbol)
                 if known is None or known[0] != sell_id:
                     announce.append(f"{symbol} above ${target}")
@@ -7456,48 +7476,62 @@ class TraderEngine:
         self.log("warn", f"Re-entry score {'rebuilt from' if rebuilt else 'raised by'} today's fills: {bars}.")
 
     def with_todays_fills(
-        self, client: Any, closed_orders: list[dict[str, Any]], session_date: str = ""
+        self,
+        client: Any,
+        closed_orders: list[dict[str, Any]],
+        session_date: str = "",
+        open_orders: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """closed_orders (the newest 100) plus the session's filled orders that have scrolled out of it.
+        """closed_orders (the newest 100) plus the session's filled orders that are not in it.
 
-        Every fill seen during the session is kept, and the whole session is read once a day and
+        Every fill seen during the session is kept, and the whole session is read at its start and
         after a restart, so the buy counts, the losing-exit counts and the trade table cover all of
-        it. The session is the market clock's (the last one while the market is closed), so Friday's
-        table still adds up on Saturday. If the whole-session read fails it is tried again a minute
-        later; until it succeeds the result is only what has been seen since the app started."""
+        it. Alpaca lists closed orders by when they were submitted, so a stop placed hours ago can
+        fill without ever showing among the newest 100: whenever an order that was open at the last
+        refresh is gone and is not in that list, the session is read again. The session is the
+        market clock's (the last one while the market is closed), so Friday's table still adds up
+        on Saturday. A failed read is tried again a minute later; until it succeeds the result is
+        only what has been seen so far."""
         try:
             today = date.fromisoformat(session_date)
         except ValueError:
             today = datetime.now(MARKET_TIMEZONE).date()
+        open_ids = {str(item.get("id") or "") for item in self.flatten_orders(open_orders or [])} - {""}
+        listed = {str(item.get("id") or "") for item in self.flatten_orders(closed_orders)}
         with self.lock:
             if self.day_fills_date != today:
                 self.day_fills = {}
                 self.day_fills_date = today
                 self.day_fills_loaded = False
                 self.day_fills_retry_at = 0.0
+                self.day_fills_warned = False
+            if self.open_order_ids - open_ids - listed - set(self.day_fills):
+                self.day_fills_loaded = False  # an order closed out of sight of the regular read
+            self.open_order_ids = open_ids
             need_read = not self.day_fills_loaded and time.monotonic() >= self.day_fills_retry_at
-            first_try = self.day_fills_retry_at == 0.0
         earlier: list[dict[str, Any]] | None = None
         if need_read:
             try:
                 earlier = self.read_todays_closed_orders(client, today)
             except Exception as exc:
-                if first_try:
+                with self.lock:
+                    warned, self.day_fills_warned = self.day_fills_warned, True
+                if not warned:
                     self.log(
                         "warn",
-                        "Could not read today's earlier orders; the day's counts and trade table cover only"
-                        f" what the app has seen since it started until this succeeds: {exc}",
+                        "Could not read the session's earlier orders; the day's counts and trade table cover"
+                        f" only what the app has seen until this succeeds (retried each minute): {exc}",
                     )
         with self.lock:
             if need_read:
                 self.day_fills_loaded = earlier is not None
-                self.day_fills_retry_at = time.monotonic() + DAY_FILLS_RETRY_SECONDS
+                self.day_fills_retry_at = 0.0 if earlier is not None else time.monotonic() + DAY_FILLS_RETRY_SECONDS
             for order in (earlier or []) + closed_orders:  # the regular read last: its copy is the newest
                 order_id = str(order.get("id") or "")
                 if order_id and self.order_filled_on(order, today):
                     self.day_fills[order_id] = order
-            listed = {str(order.get("id") or "") for order in closed_orders}
-            scrolled_out = [order for order_id, order in self.day_fills.items() if order_id not in listed]
+            top_level = {str(order.get("id") or "") for order in closed_orders}
+            scrolled_out = [order for order_id, order in self.day_fills.items() if order_id not in top_level]
         return closed_orders + scrolled_out
 
     def order_filled_on(self, order: dict[str, Any], day: date) -> bool:
@@ -7537,8 +7571,15 @@ class TraderEngine:
             submitted = [self.parse_order_datetime(order.get("submitted_at")) for order in page]
             oldest = min((value for value in submitted if value is not None), default=None)
             if len(page) < DAY_FILLS_PAGE_SIZE or not fresh or oldest is None:
-                break
-            until = oldest
+                return orders
+            # Just past the oldest one, so orders sharing its timestamp are asked for again
+            # (repeats are dropped above) instead of being skipped.
+            until = oldest + timedelta(microseconds=1)
+        self.log(
+            "warn",
+            f"The session has more than {DAY_FILLS_PAGE_SIZE * DAY_FILLS_MAX_PAGES} closed orders;"
+            " the day's counts and trade table leave out the earliest ones.",
+        )
         return orders
 
     def closed_sell_needs_reentry_floor(

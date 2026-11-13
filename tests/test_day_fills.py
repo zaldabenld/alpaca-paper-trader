@@ -42,7 +42,8 @@ class WindowBroker(ClosedOrdersBroker):
         if "closed" not in str(getattr(request, "status", "")).lower():
             return []
         self.closed_requests.append(request)
-        newest_first = sorted(self.closed, key=lambda order: order["filled_at"], reverse=True)
+        # Alpaca orders the list by when each order was submitted, not by when it filled.
+        newest_first = sorted(self.closed, key=lambda order: order.get("submitted_at") or order["filled_at"], reverse=True)
         if getattr(request, "after", None) is None:
             return newest_first[: self.window]
         until = getattr(request, "until", None)
@@ -156,11 +157,44 @@ class BuyCountTests(unittest.TestCase):
             engine.day_fills_retry_at = clock_module.monotonic() - 1
             engine.with_todays_fills(broker, orders[2:])
             self.assertEqual(read.call_count, 2)
-        self.assertEqual(sum("Could not read today's earlier orders" in entry["message"] for entry in engine.logs), 1)
+        self.assertEqual(sum("Could not read the session's earlier orders" in entry["message"] for entry in engine.logs), 1)
         engine.day_fills_retry_at = clock_module.monotonic() - 1
         merged = engine.with_todays_fills(broker, orders[2:])
         self.assertEqual(len(merged), 4)
         self.assertTrue(engine.day_fills_loaded)
+
+    def test_a_stop_placed_long_ago_that_fills_out_of_sight_is_picked_up(self) -> None:
+        # Closed orders are listed by submission time. A stop placed in the morning that fills in
+        # the afternoon, after 100 newer orders, never appears in the regular read.
+        buy, stop_fill = filled("hot-buy", "buy", "11.40", 240), filled("hot-stop", "sell", "11.20", 5)
+        buy["submitted_at"] = stop_fill["submitted_at"] = buy["filled_at"]            # both sent in the morning
+        newer = round_trips(3, symbol="OTHER")
+        broker = WindowBroker([buy] + newer, window=4)
+        engine = movers_engine(broker, reentry_score_boost="20")
+        resting = {"id": "hot-stop", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "10"}
+        window = broker.get_orders(SimpleNamespace(status="closed"))
+        engine.with_todays_fills(broker, window, "", [resting])
+        reads = len(broker.closed_requests)
+        engine.with_todays_fills(broker, window, "", [resting])
+        self.assertEqual(len(broker.closed_requests), reads)                           # nothing changed: no extra read
+        broker.closed.append(stop_fill)                                                # it fills
+        merged = engine.with_todays_fills(broker, broker.get_orders(SimpleNamespace(status="closed")), "", [])
+        self.assertIn("hot-stop", {order["id"] for order in merged})
+        engine.sync_loss_reentry_floors_from_closed_orders(merged)
+        self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("80"), 1))
+        reads = len(broker.closed_requests)
+        engine.with_todays_fills(broker, window, "", [])
+        self.assertEqual(len(broker.closed_requests), reads)                           # read once, not every pass
+
+    def test_a_cancelled_order_that_drops_out_of_sight_costs_one_read(self) -> None:
+        broker = WindowBroker(round_trips(3), window=2)
+        engine = movers_engine(broker)
+        window = broker.get_orders(SimpleNamespace(status="closed"))
+        engine.with_todays_fills(broker, window, "", [{"id": "gone", "symbol": "HOT", "side": "sell", "type": "stop"}])
+        before = len(broker.closed_requests)
+        engine.with_todays_fills(broker, window, "", [])
+        engine.with_todays_fills(broker, window, "", [])
+        self.assertEqual(len(broker.closed_requests), before + 1)
 
     def test_the_last_session_is_kept_while_the_market_is_closed(self) -> None:
         orders = self.sqqq()
