@@ -192,8 +192,8 @@ class StopProtectionTests(unittest.TestCase):
                     attempts.append(order)
                     if order.type.value == "stop":
                         raise APIError(
-                            '{"code":42210000,"market_price":"1.35",'
-                            '"message":"stop price must be less than current price","stop_price":"1.35"}'
+                            '{"code":42210000,"market_price":"1.34",'
+                            '"message":"stop price must be less than current price","stop_price":"1.34"}'
                         )
                     return original_submit(order)
 
@@ -201,7 +201,7 @@ class StopProtectionTests(unittest.TestCase):
                 client.get_open_position = lambda symbol: client.get_all_positions()[0] | {"qty_available": remaining}
                 run_refresh(engine)
 
-                self.assertEqual(attempts[0].stop_price, 1.35)
+                self.assertEqual(attempts[0].stop_price, 1.34)
                 self.assertEqual(kinds(client), [("sell", "market")] if remaining != "0" else [])
                 if remaining != "0":
                     self.assertEqual(client.submitted[0].qty, 0.14)
@@ -217,8 +217,8 @@ class StopProtectionTests(unittest.TestCase):
             attempts.append(order.type.value)
             client.open_orders.append({"symbol": "AAA", "type": "market", "side": "sell"})
             raise APIError(
-                '{"code":42210000,"market_price":"1.35",'
-                '"message":"stop price must be less than current price","stop_price":"1.35"}'
+                '{"code":42210000,"market_price":"1.34",'
+                '"message":"stop price must be less than current price","stop_price":"1.34"}'
             )
 
         client.submit_order = reject
@@ -227,8 +227,8 @@ class StopProtectionTests(unittest.TestCase):
 
     def test_offhours_or_other_stop_rejections_keep_their_retry_hold(self) -> None:
         for is_open, error in (
-            (False, '{"code":42210000,"market_price":"1.35",'
-                    '"message":"stop price must be less than current price","stop_price":"1.35"}'),
+            (False, '{"code":42210000,"market_price":"1.34",'
+                    '"message":"stop price must be less than current price","stop_price":"1.34"}'),
             (True, '{"code":42210000,"message":"insufficient qty available"}'),
         ):
             with self.subTest(is_open=is_open):

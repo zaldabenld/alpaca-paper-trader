@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone, tzinfo
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -5954,11 +5954,17 @@ class TraderEngine:
         return take_profit, stop_loss
 
     def percent_stop_price(self, entry_price: Decimal, percent: Decimal) -> Decimal:
-        """Round a long position's initial sell stop up to avoid widening its configured loss."""
+        """A long position's initial sell stop: the valid price nearest the configured percent under
+        entry, and never the tick right under the fill. On a penny-spread stock that tick is the
+        bid: Alpaca rejects a stop there ("stop price must be less than current price") and the
+        position reads as stopped out the moment it is bought. A $1.19 fill at 1.25% gets $1.17."""
         stop = entry_price * (Decimal("1") - percent / Decimal("100"))
         if stop <= 0:
             return Decimal("0")
-        return self.round_exit_price(stop, ROUND_UP)
+        increment = self.price_increment_for(stop)
+        nearest = stop.quantize(increment, rounding=ROUND_HALF_UP)
+        under_the_bid = self.round_exit_price(entry_price, ROUND_UP) - 2 * increment
+        return max(Decimal("0"), min(nearest, under_the_bid))
 
     def ensure_position_exit_orders(
         self,
