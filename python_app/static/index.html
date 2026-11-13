@@ -793,7 +793,7 @@
                     Buy Flow Ratio
                     <input id="minBuyVolumeRatio" type="number" min="0" max="1" step="0.01" value="0.5" />
                   </label>
-                  <label data-modes="momentum" title="After a losing exit, a re-buy needs this many extra score points.">
+                  <label data-modes="momentum movers" title="After a losing exit, a re-buy needs this many extra score points. Movers: each losing exit that day adds this many to Min Score (Min Score 60 and a boost of 20 means 80 after one loss, 100 after two, then no more buys of that stock that day). 0 turns it off.">
                     Re-entry Boost
                     <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="12" />
                   </label>

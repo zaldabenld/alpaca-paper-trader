@@ -263,8 +263,8 @@ class StopProtectionTests(unittest.TestCase):
         run_refresh(engine)
 
         self.assertEqual(kinds(client), [("sell", "stop")])
-        self.assertEqual(client.submitted[0].stop_price, 1.37)
-        self.assertEqual(engine.position_stop_price("AAA", Decimal("1.35"), Decimal("1.36"), engine.config), Decimal("1.37"))
+        self.assertEqual(client.submitted[0].stop_price, 1.36)  # 1% under $1.3799, rounded down
+        self.assertEqual(engine.position_stop_price("AAA", Decimal("1.35"), Decimal("1.36"), engine.config), Decimal("1.36"))
 
     def test_dry_run_account_that_is_stopped_sends_nothing(self) -> None:
         client = FakeTradingClient(is_open=True)
