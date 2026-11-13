@@ -2135,6 +2135,7 @@ class TraderEngine:
         # Movers mode: today's losing round trips per symbol, keyed by the buy that opened each.
         self.reentry_losses_today: dict[str, set[str]] = {}
         self.reentry_losses_date: Any = None
+        self.reentry_open_buys: dict[str, tuple[str, Decimal]] = {}  # symbol -> (buy id, fill price)
         self.entry_lock_dates: dict[str, str] = {}
         self.entry_times: dict[str, datetime] = {}
         self.exit_lock_dates: dict[str, str] = {}
@@ -2469,6 +2470,7 @@ class TraderEngine:
             self.reentry_reset_at = None
             self.reentry_losses_today = {}
             self.reentry_losses_date = None
+            self.reentry_open_buys = {}
 
         account = self.trading_client.get_account()
         with self.lock:
@@ -2643,6 +2645,7 @@ class TraderEngine:
             self.reentry_reset_at = datetime.now(timezone.utc)
             self.reentry_losses_today = {}
             self.reentry_losses_date = None
+            self.reentry_open_buys = {}
             self.last_scan_log_at = 0.0
             self.last_entry_submitted_at = 0.0
 
@@ -7209,6 +7212,14 @@ class TraderEngine:
         today = datetime.now(MARKET_TIMEZONE).date()
         opening_buy: dict[str, str] = {}
         losing_trips: dict[str, set[str]] = {}
+        rebuilt = False
+        if movers:
+            with self.lock:
+                rebuilt = self.reentry_losses_date != today
+                if rebuilt:
+                    self.reentry_losses_today = {}
+                    self.reentry_open_buys = {}
+                    self.reentry_losses_date = today
 
         for item in sorted(filled_orders, key=self.trade_history_sort_value):
             symbol = str(item.get("symbol") or "").upper()
@@ -7234,6 +7245,8 @@ class TraderEngine:
                 opening_buy[symbol] = self.closed_order_identity(item)
                 with self.lock:
                     self.reentry_score_floors.pop(symbol, None)
+                    if movers:
+                        self.reentry_open_buys[symbol] = (opening_buy[symbol], avg_price)
                 continue
 
             if side != "sell":
@@ -7246,16 +7259,19 @@ class TraderEngine:
 
             if movers:
                 # Movers mode counts losing round trips instead (movers_reentry_bar). A trip is keyed
-                # by its buy, so a stop that fills in two pieces is one loss; a sell whose buy is
-                # not in the list has no known result and is not counted.
+                # by its buy, so a stop that fills in two pieces is one loss. The list is only the
+                # newest orders: on a busy day a position's buy has scrolled out by the time it is
+                # sold, so the buy is remembered from the pass that saw it. A sell with no known buy
+                # has no known result and is not counted.
                 trip = opening_buy.get(symbol)
-                if (
-                    trip
-                    and realized_pl is not None
-                    and realized_pl < 0
-                    and filled_at is not None
-                    and filled_at.astimezone(MARKET_TIMEZONE).date() == today
-                ):
+                lost = realized_pl is not None and realized_pl < 0
+                if trip is None:
+                    with self.lock:
+                        remembered = self.reentry_open_buys.get(symbol)
+                    if remembered is not None:
+                        trip, bought_at = remembered
+                        lost = Decimal("0") < avg_price < bought_at
+                if trip and lost and filled_at is not None and filled_at.astimezone(MARKET_TIMEZONE).date() == today:
                     losing_trips.setdefault(symbol, set()).add(trip)
                 continue
 
@@ -7277,17 +7293,13 @@ class TraderEngine:
             self.log("warn", f"{symbol} exit filled; requiring stronger score before re-entry.")
 
         if movers:
-            self.record_movers_losing_trips(today, losing_trips)
+            self.record_movers_losing_trips(losing_trips, rebuilt)
 
-    def record_movers_losing_trips(self, today: Any, losing_trips: dict[str, set[str]]) -> None:
+    def record_movers_losing_trips(self, losing_trips: dict[str, set[str]], rebuilt: bool) -> None:
         """Add today's losing round trips to the day's count. The count only grows during a day:
         the order list is a window, and a morning loss that scrolled out of it still counts."""
         raised: list[tuple[str, int]] = []
         with self.lock:
-            rebuilt = self.reentry_losses_date != today
-            if rebuilt:
-                self.reentry_losses_today = {}
-                self.reentry_losses_date = today
             for symbol, trips in losing_trips.items():
                 known = self.reentry_losses_today.setdefault(symbol, set())
                 if not trips <= known:

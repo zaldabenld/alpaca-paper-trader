@@ -276,7 +276,9 @@ class StopTests(unittest.TestCase):
 
 
 def filled(order_id: str, side: str, price: str, minutes_ago: int, qty: str = "10", symbol: str = "HOT") -> dict[str, Any]:
-    at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    # Counted back from noon ET today, so the fixture's "today" does not depend on when the test runs.
+    noon = datetime.combine(datetime.now(M_TZ).date(), datetime.min.time(), tzinfo=M_TZ) + timedelta(hours=12)
+    at = (noon - timedelta(minutes=minutes_ago)).astimezone(timezone.utc)
     return {"id": order_id, "symbol": symbol, "side": side, "status": "filled", "filled_qty": qty,
             "filled_avg_price": price, "filled_at": at.isoformat().replace("+00:00", "Z")}
 
@@ -345,6 +347,18 @@ class ReentryBarTests(unittest.TestCase):
         engine.sync_loss_reentry_floors_from_closed_orders([filled("b2", "buy", "1.25", 9), filled("s2", "sell", "1.23", 5)])
         engine.sync_loss_reentry_floors_from_closed_orders([])
         self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("100"), 2))
+
+    def test_a_loss_counts_when_its_buy_has_scrolled_out_of_the_order_list(self) -> None:
+        # A busy account closes 100 orders in minutes (every trail step is a cancel and a new stop).
+        engine = movers_engine(reentry_score_boost="20")
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("b1", "buy", "1.31", 120)])  # the pass that saw the buy
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("s1a", "sell", "1.29", 5, qty="4")])
+        engine.sync_loss_reentry_floors_from_closed_orders([filled("s1a", "sell", "1.29", 5, qty="4"), filled("s1b", "sell", "1.29", 4, qty="6")])
+        self.assertEqual(engine.movers_reentry_bar("HOT", engine.config), (D("80"), 1))
+        winner = movers_engine(reentry_score_boost="20")
+        winner.sync_loss_reentry_floors_from_closed_orders([filled("b1", "buy", "1.31", 120)])
+        winner.sync_loss_reentry_floors_from_closed_orders([filled("s1", "sell", "1.33", 5)])
+        self.assertEqual(winner.movers_reentry_bar("HOT", winner.config), (D("60"), 0))
 
     def test_other_modes_keep_their_own_re_entry_floor(self) -> None:
         self.assertEqual(self.losses([filled("b1", "buy", "1.31", 9), filled("s1", "sell", "1.29", 5)], entry_mode="momentum"), {})
