@@ -1,4 +1,4 @@
-"""Market movers (entry_mode "movers"): a weighted buy score.
+"""The mover readings and their weighted buy score, used by scored and weighted accounts.
 
 The idea: a stock that is going up on unusually heavy volume tends to keep going. No single reading
 vetoes a buy. Each reading earns points and the buy happens when the total clears the account's
@@ -66,6 +66,7 @@ class Weights:
     volume_full_at: Decimal = Decimal("5")  # times the usual volume that earns the full volume points
     spread: Decimal = Decimal("0")          # points taken off when the spread is the whole stop distance
     volume_current: bool = False            # volume points use the lower of the day and the last half hour
+    two_sided: bool = False                 # weighted style: the four direction readings also take points away
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,10 @@ class Score:
     total: Decimal
     parts: tuple[tuple[str, Decimal], ...]
 
+    def plus(self, label: str, points: Decimal) -> "Score":
+        """This score with one more part added."""
+        return Score(total=(self.total + points).quantize(Decimal("0.1")), parts=self.parts + ((label, points),))
+
     def describe(self) -> str:
         """The points each reading earned. Volume is always shown, even at zero, since it carries the most."""
         return ", ".join(
@@ -101,6 +106,13 @@ def _fraction(value: Decimal | None, low: Decimal, high: Decimal) -> Decimal:
     if value is None or high <= low:
         return Decimal("0")
     return min(Decimal("1"), max(Decimal("0"), (value - low) / (high - low)))
+
+
+def _signed_fraction(value: Decimal | None, full: Decimal) -> Decimal:
+    """-1 to 1: the same scale as _fraction from zero to full, mirrored below zero."""
+    if value is None or full <= 0:
+        return Decimal("0")
+    return min(Decimal("1"), max(Decimal("-1"), value / full))
 
 
 def volume_fraction(relative_volume: Decimal | None, full_at: Decimal) -> Decimal:
@@ -128,13 +140,20 @@ def score(readings: Readings, weights: Weights) -> Score:
         volume_label = f"volume {recent:.1f}x in the last half hour ({volume:.1f}x on the day)"
         volume = recent
     spread_label = f"spread {readings.spread_percent:.2f}%" if readings.spread_percent is not None else "spread"
+
+    def direction(value: Decimal | None, full: Decimal) -> Decimal:
+        # Scored style: a reading below zero earns nothing (the direction checks decide whether it is
+        # a flat no). Weighted style: there are no checks, so it takes points away on the same scale.
+        return _signed_fraction(value, full) if weights.two_sided else _fraction(value, zero, full)
+
+    vwap_label = "above VWAP" if readings.vwap_distance is None or readings.vwap_distance >= 0 or not weights.two_sided else "under VWAP"
     parts = (
         (volume_label, weights.volume * volume_fraction(volume, weights.volume_full_at)),
-        ("30-min move", weights.half_hour_move * _fraction(readings.half_hour_move, zero, FULL_HALF_HOUR_MOVE)),
-        ("above VWAP", weights.vwap * _fraction(readings.vwap_distance, zero, FULL_VWAP_DISTANCE)),
-        ("5-min move", weights.five_min_move * _fraction(readings.five_min_move, zero, FULL_FIVE_MIN_MOVE)),
+        ("30-min move", weights.half_hour_move * direction(readings.half_hour_move, FULL_HALF_HOUR_MOVE)),
+        (vwap_label, weights.vwap * direction(readings.vwap_distance, FULL_VWAP_DISTANCE)),
+        ("5-min move", weights.five_min_move * direction(readings.five_min_move, FULL_FIVE_MIN_MOVE)),
         ("daily range", weights.daily_range * _fraction(readings.daily_range, RANGE_FLOOR, RANGE_FULL)),
-        ("session", weights.session * _fraction(readings.session_change, zero, FULL_SESSION_MOVE)),
+        ("session", weights.session * direction(readings.session_change, FULL_SESSION_MOVE)),
         ("RSI", weights.rsi * _fraction(readings.rsi, RSI_FLOOR, RSI_FULL)),
         (spread_label, -weights.spread * spread_cost_fraction(readings.spread_percent, readings.stop_percent)),
     )
@@ -142,15 +161,22 @@ def score(readings: Readings, weights: Weights) -> Score:
     return Score(total=total.quantize(Decimal("0.1")), parts=tuple((label, points) for label, points in parts))
 
 
-def direction_hold_reason(readings: Readings) -> str:
-    """The three yes/no checks that define "going up"; empty when all pass."""
-    if readings.session_change is None or readings.vwap_distance is None or readings.five_min_move is None:
+def direction_hold_reason(
+    readings: Readings, up_on_session: bool = True, above_vwap: bool = True, not_falling: bool = True
+) -> str:
+    """The yes/no checks that define "going up", each one switched on or off by the account; empty
+    when every check that is on passes. A check that is on needs its reading first."""
+    if (
+        (up_on_session and readings.session_change is None)
+        or (above_vwap and readings.vwap_distance is None)
+        or (not_falling and readings.five_min_move is None)
+    ):
         return "Hold (movers: price history warming up)"
-    if readings.session_change <= 0:
+    if up_on_session and readings.session_change <= 0:
         return f"Hold (movers: down {abs(readings.session_change):.2f}% on the session)"
-    if readings.vwap_distance <= 0:
+    if above_vwap and readings.vwap_distance <= 0:
         return f"Hold (movers: {abs(readings.vwap_distance):.2f}% under VWAP)"
-    if readings.five_min_move < 0:
+    if not_falling and readings.five_min_move < 0:
         return f"Hold (movers: fell {abs(readings.five_min_move):.2f}% in the last 5 minutes)"
     return ""
 

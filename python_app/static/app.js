@@ -45,6 +45,14 @@ const fields = {
   minSessionPullbackPercent: document.querySelector("#minSessionPullbackPercent"),
   maxEntryRsi: document.querySelector("#maxEntryRsi"),
   entryMode: document.querySelector("#entryMode"),
+  useTrendChecks: document.querySelector("#useTrendChecks"),
+  requireUpOnSession: document.querySelector("#requireUpOnSession"),
+  requireAboveVwap: document.querySelector("#requireAboveVwap"),
+  requireNotFalling: document.querySelector("#requireNotFalling"),
+  reentryRule: document.querySelector("#reentryRule"),
+  showUnusedSettings: document.querySelector("#showUnusedSettings"),
+  accountTabs: document.querySelector("#accountTabs"),
+  accountMenuTitle: document.querySelector("#accountMenuTitle"),
   orbMinutes: document.querySelector("#orbMinutes"),
   orbMaxBreakoutPercent: document.querySelector("#orbMaxBreakoutPercent"),
   allocationRiskOnSymbols: document.querySelector("#allocationRiskOnSymbols"),
@@ -317,6 +325,11 @@ const configKeys = [
   "inverse_trend_max_entries",
   "universe_mode",
   "entry_mode",
+  "use_trend_checks",
+  "require_up_on_session",
+  "require_above_vwap",
+  "require_not_falling",
+  "reentry_rule",
   "orb_minutes",
   "orb_max_breakout_percent",
   "allocation_signal_symbol",
@@ -416,6 +429,11 @@ const strategyProfileKeys = new Set([
   "inverse_trend_max_entries",
   "universe_mode",
   "entry_mode",
+  "use_trend_checks",
+  "require_up_on_session",
+  "require_above_vwap",
+  "require_not_falling",
+  "reentry_rule",
   "orb_minutes",
   "orb_max_breakout_percent",
   "allocation_risk_on_symbols",
@@ -842,6 +860,11 @@ els.scannerAllColumnsToggle?.addEventListener("change", () => {
 
 fields.dryRun.addEventListener("change", () => renderTradingToggle());
 fields.entryMode.addEventListener("change", syncEntryModeFields);
+// Switching a group of settings on or off changes which fields this account's menu shows.
+[fields.useTrendChecks, fields.requireUpOnSession, fields.requireAboveVwap, fields.requireNotFalling, fields.showUnusedSettings]
+  .forEach((field) => field.addEventListener("change", syncEntryModeFields));
+document.querySelectorAll('#advancedSettings [data-group="oldscore"] input, #advancedSettings [data-group="mover"] input')
+  .forEach((input) => input.addEventListener("change", syncEntryModeFields));
 syncEntryModeFields();
 
 fields.accountSelect.addEventListener("change", async () => {
@@ -1190,6 +1213,11 @@ function readConfig() {
     inverse_trend_max_entries: readInt("inverseTrendMaxEntries", 2),
     universe_mode: fields.universeMode.value,
     entry_mode: fields.entryMode.value,
+    use_trend_checks: fields.useTrendChecks.checked,
+    require_up_on_session: fields.requireUpOnSession.checked,
+    require_above_vwap: fields.requireAboveVwap.checked,
+    require_not_falling: fields.requireNotFalling.checked,
+    reentry_rule: fields.reentryRule.value,
     orb_minutes: readInt("orbMinutes", 15),
     orb_max_breakout_percent: readNumber("orbMaxBreakoutPercent", 1),
     allocation_risk_on_symbols: fields.allocationRiskOnSymbols.value
@@ -1213,15 +1241,15 @@ function readConfig() {
     inplay_max_picks: readInt("inplayMaxPicks", 10),
     inplay_max_chase_percent: readNumber("inplayMaxChasePercent", 1),
     inplay_stop: fields.inplayStop.value || "range_mid",
-    mover_weight_volume: readNumber("moverWeightVolume", 45),
-    mover_weight_half_hour_move: readNumber("moverWeightHalfHourMove", 15),
-    mover_weight_vwap: readNumber("moverWeightVwap", 15),
-    mover_weight_five_min_move: readNumber("moverWeightFiveMinMove", 10),
-    mover_weight_range: readNumber("moverWeightRange", 10),
-    mover_weight_session: readNumber("moverWeightSession", 5),
+    mover_weight_volume: readNumber("moverWeightVolume", 0),
+    mover_weight_half_hour_move: readNumber("moverWeightHalfHourMove", 0),
+    mover_weight_vwap: readNumber("moverWeightVwap", 0),
+    mover_weight_five_min_move: readNumber("moverWeightFiveMinMove", 0),
+    mover_weight_range: readNumber("moverWeightRange", 0),
+    mover_weight_session: readNumber("moverWeightSession", 0),
     mover_weight_rsi: readNumber("moverWeightRsi", 0),
     mover_volume_full_at: readNumber("moverVolumeFullAt", 5),
-    mover_weight_spread: readNumber("moverWeightSpread", 40),
+    mover_weight_spread: readNumber("moverWeightSpread", 0),
     mover_volume_current: fields.moverVolumeCurrent.checked,
     sell_rsi: readNumber("sellRsi", 72),
     volume_period: readInt("volumePeriod", 20),
@@ -1269,6 +1297,7 @@ function readConfig() {
 
 function applyAccount(account) {
   selectedAccountId = account.account_id || "";
+  renderAccountTabs();
   isDraftAccount = !selectedAccountId;
   clearPendingEdits();
   mirroredAccount = null;
@@ -1396,11 +1425,51 @@ function applyConfig(config, onlyKeys = null) {
 
 // Show only the settings the selected entry mode uses; a field another mode owns is hidden so the
 // page never shows a number that does nothing for this account.
+// Which groups of scored-style settings this profile actually uses. A group that is switched off is
+// tucked away until "Show settings this profile does not use" is ticked, so each account's menu
+// shows what that account runs on.
+function scoredGroupsInUse() {
+  const anyAboveZero = (selector) =>
+    [...document.querySelectorAll(selector)].some((input) => Number(input.value) !== 0 && input.value !== "");
+  const oldscore = anyAboveZero('#advancedSettings [data-group="oldscore"] input[type="number"]');
+  const moverWeights = [...document.querySelectorAll('#advancedSettings [data-group="mover"] input[type="number"]')]
+    .filter((input) => input.id !== "moverVolumeFullAt")
+    .some((input) => Number(input.value) > 0);
+  const direction = fields.requireUpOnSession.checked || fields.requireAboveVwap.checked || fields.requireNotFalling.checked;
+  return {
+    oldscore,
+    trend: fields.useTrendChecks.checked || oldscore,
+    mover: moverWeights || direction,
+  };
+}
+
 function syncEntryModeFields() {
-  const mode = fields.entryMode.value || "momentum";
+  const mode = fields.entryMode.value || "scored";
+  const inUse = mode === "scored" ? scoredGroupsInUse() : null;
+  const showUnused = fields.showUnusedSettings.checked;
   document.querySelectorAll("#advancedSettings [data-modes]").forEach((el) => {
-    el.hidden = !el.dataset.modes.split(" ").includes(mode);
+    const forMode = el.dataset.modes.split(" ").includes(mode);
+    const group = el.dataset.group;
+    const unused = Boolean(inUse && group && mode === "scored" && !inUse[group] && !showUnused);
+    el.hidden = !forMode || unused;
   });
+  renderAccountMenuTitle();
+}
+
+function renderAccountMenuTitle() {
+  if (!fields.accountMenuTitle) return;
+  // Declared in here: this runs while the script is still loading, before later top-level constants exist.
+  const ENTRY_STYLE_NAMES = {
+    scored: "Scored engine",
+    weighted: "Weighted-only engine",
+    orb: "Opening-range breakout",
+    allocation: "Index hold",
+    inplay: "Day-trade picks",
+  };
+  const name = fields.accountName.value || "New account";
+  const style = ENTRY_STYLE_NAMES[fields.entryMode.value] || fields.entryMode.value;
+  const profile = fields.profile && fields.profile.selectedOptions[0] ? fields.profile.selectedOptions[0].textContent : "";
+  fields.accountMenuTitle.textContent = `${name}: ${style}${profile ? `, profile ${profile}` : ""}. This menu shows only what this account uses.`;
 }
 
 function sameSettingValue(a, b) {
@@ -1740,7 +1809,12 @@ function presetConfig(profile) {
     inverse_trend_trail_percent: 2,
     inverse_trend_max_entries: 2,
     universe_mode: "most_active",
-    entry_mode: "momentum",
+    entry_mode: "scored",
+    use_trend_checks: true,
+    require_up_on_session: false,
+    require_above_vwap: false,
+    require_not_falling: false,
+    reentry_rule: "floor",
     orb_minutes: 15,
     orb_max_breakout_percent: 1,
     allocation_risk_on_symbols: ["QQQ", "SPY"],
@@ -1758,15 +1832,15 @@ function presetConfig(profile) {
     inplay_max_picks: 10,
     inplay_max_chase_percent: 1,
     inplay_stop: "range_mid",
-    mover_weight_volume: 45,
-    mover_weight_half_hour_move: 15,
-    mover_weight_vwap: 15,
-    mover_weight_five_min_move: 10,
-    mover_weight_range: 10,
-    mover_weight_session: 5,
+    mover_weight_volume: 0,
+    mover_weight_half_hour_move: 0,
+    mover_weight_vwap: 0,
+    mover_weight_five_min_move: 0,
+    mover_weight_range: 0,
+    mover_weight_session: 0,
     mover_weight_rsi: 0,
     mover_volume_full_at: 5,
-    mover_weight_spread: 40,
+    mover_weight_spread: 0,
     mover_volume_current: true,
     sell_rsi: 72,
     volume_period: 20,
@@ -2122,7 +2196,27 @@ async function loadSettings(options = {}) {
   if (applySelected && account) applyAccount(account);
 }
 
+// One tab per account: each opens that account's own settings menu.
+function renderAccountTabs() {
+  if (!fields.accountTabs) return;
+  fields.accountTabs.innerHTML = "";
+  savedAccounts.forEach((account) => {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.role = "tab";
+    tab.textContent = account.name || "Paper Account";
+    tab.setAttribute("aria-selected", String(account.account_id === selectedAccountId));
+    tab.addEventListener("click", async () => {
+      if (account.account_id === selectedAccountId) return;
+      fields.accountSelect.value = account.account_id;
+      await switchToAccount(account.account_id);
+    });
+    fields.accountTabs.appendChild(tab);
+  });
+}
+
 function renderAccountSelect() {
+  renderAccountTabs();
   fields.accountSelect.innerHTML = "";
   savedAccounts.forEach((account) => {
     const option = document.createElement("option");

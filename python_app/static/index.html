@@ -341,6 +341,8 @@
           </div>
           <section class="panel">
             <h2>Account & Keys</h2>
+            <div id="accountTabs" class="account-tabs" role="tablist" aria-label="Accounts"></div>
+            <p id="accountMenuTitle" class="helper-text account-menu-title"></p>
             <label>
               Active account
               <select id="accountSelect"></select>
@@ -527,8 +529,9 @@
 
               <div class="compact-section">
                 <h3>Buy Rules</h3>
-                <small class="helper-text" data-modes="movers">Every stock on the list gets a score: each reading earns up to its weight in points. A stock is bought when its score reaches Min Score, as long as it is up on the day, above VWAP and not falling.</small>
-                <small class="helper-text" data-modes="momentum">Each signal adds up to its weight to the entry score; penalties subtract. A stock is bought when its score reaches Min Score and it passes the rules below.</small>
+                <small class="helper-text" data-modes="scored">One buy path. A stock is bought when its score reaches Min Score and it passes every yes/no check that is switched on below. The score is the mover readings by their weights plus the old-style score by its weights; a weight of 0 leaves a reading out. Settings this profile has switched off are tucked away until you tick "Show settings this profile does not use".</small>
+                <small class="helper-text" data-modes="weighted">Weighted only. Every stock on the list gets a score from the mover readings and is bought when it reaches Min Score. Nothing is a flat no: a stock that is down on the day, under VWAP or falling loses points on the same scale it would have earned them, and enough volume can still outweigh that. The spread still takes points off and the re-entry score still climbs after losing exits.</small>
+                
                 <input id="shortPeriod" type="hidden" value="9" />
                 <input id="longPeriod" type="hidden" value="21" />
                 <input id="sellRsi" type="hidden" value="72" />
@@ -537,173 +540,200 @@
                 <input id="scoreWeightPullbackPenalty" type="hidden" value="0" />
                 <input id="scoreWeightOverboughtPenalty" type="hidden" value="0" />
                 <div class="strategy-grid">
-                  <label title="Momentum: trend/RSI/VWAP checks and score. Opening-range breakout: buy once per stock per day when it clears the high of its first minutes while above VWAP; the momentum checks are skipped.">
+                  <label title="Scored: one buy path for every scored profile. Its switches and weights decide what it does: the old-style yes/no checks, the three going-up checks, the old-style score weights and the mover weights. A movers profile and the conservative, neutral and aggressive profiles are all settings of it. Weighted only: the mover readings, where a reading below zero takes points away and nothing is a flat no. Opening-range breakout, index hold and day-trade picks work differently and stay their own styles.">
                     Entry style
                     <select id="entryMode">
-                      <option value="momentum" selected>Momentum (trend, RSI, VWAP, score)</option>
+                      <option value="scored" selected>Scored: one engine, the profile's settings decide the checks and the score</option>
+                      <option value="weighted">Weighted only: the mover readings count for and against, no yes/no checks</option>
                       <option value="orb">Opening-range breakout</option>
                       <option value="allocation">Buy and hold: index with trend switch</option>
                       <option value="inplay">Day trade: stocks-in-play breakout</option>
-                      <option value="movers">Market movers: weighted score (no RSI or extension vetoes)</option>
                     </select>
                   </label>
-                  <label data-modes="momentum orb movers" title="Lowest 0-100 entry score that can trigger a buy.">
+                  <label data-modes="scored weighted orb" title="Lowest 0-100 entry score that can trigger a buy.">
                     Min Score
                     <input id="minEntryScore" type="number" min="0" max="100" step="0.5" value="44" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: points for today's volume against the stock's usual volume by this time of day.">
+                  <label data-modes="scored" class="check-row" title="Scored style: before scoring, run the old-style yes/no checks (RSI range, trend, momentum floors, session and VWAP bands, pullback limits, rising price, SMI, volume and order flow). On for the conservative, neutral and aggressive profiles; off for a movers profile. Their thresholds appear below when this is on.">
+                    <input id="useTrendChecks" type="checkbox" checked />
+                    <span>Run the old-style yes/no checks</span>
+                  </label>
+                  <label data-modes="scored" class="check-row" title="Scored style, going-up check 1: a stock that is not up on the session is a flat no. Off: the reading only earns or fails to earn its points.">
+                    <input id="requireUpOnSession" type="checkbox" />
+                    <span>Must be up on the session</span>
+                  </label>
+                  <label data-modes="scored" class="check-row" title="Scored style, going-up check 2: a stock at or under its VWAP is a flat no.">
+                    <input id="requireAboveVwap" type="checkbox" />
+                    <span>Must be above VWAP</span>
+                  </label>
+                  <label data-modes="scored" class="check-row" title="Scored style, going-up check 3: a stock lower than it was five minutes ago is a flat no.">
+                    <input id="requireNotFalling" type="checkbox" />
+                    <span>Must not be lower than 5 minutes ago</span>
+                  </label>
+                  <label data-modes="scored" title="What a losing exit does to the next buy of that stock. Floor: the next buy needs the score it had at the exit plus Re-entry Boost, once. Climb: every losing exit that day adds Re-entry Boost to Min Score, and a sale at a gain adds it once until the stock trades above the high it was sold from. The weighted style always climbs.">
+                    After a losing exit
+                    <select id="reentryRule">
+                      <option value="floor" selected>Floor: exit score + boost, once</option>
+                      <option value="climb">Climb: + boost for every losing exit that day</option>
+                    </select>
+                  </label>
+                  <label data-modes="scored" class="check-row" title="Shows the groups of settings this profile has switched off (old-style check thresholds with the checks off, score weights that are all 0). Only changes what this page shows.">
+                    <input id="showUnusedSettings" type="checkbox" />
+                    <span>Show settings this profile does not use</span>
+                  </label>
+                  <label data-modes="scored weighted" data-group="mover" title="points for today's volume against the stock's usual volume by this time of day.">
                     Volume Weight
-                    <input id="moverWeightVolume" type="number" min="0" max="100" step="1" value="45" />
+                    <input id="moverWeightVolume" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: points for the price move over the last 30 minutes.">
+                  <label data-modes="scored weighted" data-group="mover" title="points for the price move over the last 30 minutes.">
                     30-Minute Move Weight
-                    <input id="moverWeightHalfHourMove" type="number" min="0" max="100" step="1" value="15" />
+                    <input id="moverWeightHalfHourMove" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: points for how far the price is above VWAP.">
+                  <label data-modes="scored weighted" data-group="mover" title="points for how far the price is above VWAP.">
                     Above VWAP Weight
-                    <input id="moverWeightVwap" type="number" min="0" max="100" step="1" value="15" />
+                    <input id="moverWeightVwap" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: points for the price move over the last 5 minutes.">
+                  <label data-modes="scored weighted" data-group="mover" title="points for the price move over the last 5 minutes.">
                     5-Minute Move Weight
-                    <input id="moverWeightFiveMinMove" type="number" min="0" max="100" step="1" value="10" />
+                    <input id="moverWeightFiveMinMove" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: points for stocks with a wide average daily range.">
+                  <label data-modes="scored weighted" data-group="mover" title="points for stocks with a wide average daily range.">
                     Daily Range Weight
-                    <input id="moverWeightRange" type="number" min="0" max="100" step="1" value="10" />
+                    <input id="moverWeightRange" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: points for the move since the open.">
+                  <label data-modes="scored weighted" data-group="mover" title="points for the move since the open.">
                     Session Move Weight
-                    <input id="moverWeightSession" type="number" min="0" max="100" step="1" value="5" />
+                    <input id="moverWeightSession" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: points for a high RSI. RSI is only ever a weight here, never a ceiling.">
+                  <label data-modes="scored weighted" data-group="mover" title="points for a high RSI. RSI is only ever a weight here, never a ceiling.">
                     RSI Weight
                     <input id="moverWeightRsi" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="movers" title="Movers mode: volume this many times the usual earns the full volume points.">
+                  <label data-modes="scored weighted" data-group="mover" title="volume this many times the usual earns the full volume points.">
                     Full Volume Points At (x usual)
                     <input id="moverVolumeFullAt" type="number" min="1.5" max="50" step="0.5" value="5" />
                   </label>
-                  <label data-modes="movers" class="check-row" title="Movers mode: volume points use the lower of two readings, today's volume so far and the last half hour's, each against the stock's usual. One block print or a busy first hour then stops earning full volume points once the stock goes quiet. Off: only today's volume so far counts.">
+                  <label data-modes="scored weighted" data-group="mover" class="check-row" title="volume points use the lower of two readings, today's volume so far and the last half hour's, each against the stock's usual. One block print or a busy first hour then stops earning full volume points once the stock goes quiet. Off: only today's volume so far counts.">
                     <input id="moverVolumeCurrent" type="checkbox" checked />
                     <span>Volume must be current (last half hour)</span>
                   </label>
-                  <label data-modes="movers" title="Movers mode: points taken OFF the score for the bid/ask spread. All of them come off when the spread is as wide as the stop loss, and in proportion below that (a 0.8% spread against a 1.25% stop takes off 64% of this number). Every round trip pays the spread, so it is measured against the stop. A weight, not a cut-off. 0 turns it off.">
+                  <label data-modes="scored weighted" data-group="mover" title="points taken OFF the score for the bid/ask spread. All of them come off when the spread is as wide as the stop loss, and in proportion below that (a 0.8% spread against a 1.25% stop takes off 64% of this number). Every round trip pays the spread, so it is measured against the stop. A weight, not a cut-off. 0 turns it off.">
                     Spread Cost Weight (points off)
-                    <input id="moverWeightSpread" type="number" min="0" max="100" step="1" value="40" />
+                    <input id="moverWeightSpread" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="momentum movers" title="Number of bars used to calculate RSI (a 0-100 overbought/oversold gauge).">
+                  <label data-modes="scored weighted" title="Number of bars used to calculate RSI (a 0-100 overbought/oversold gauge).">
                     RSI Period
                     <input id="rsiPeriod" type="number" min="1" step="1" value="14" />
                   </label>
-                  <label data-modes="momentum" title="Score points added when RSI is in the buy range.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added when RSI is in the buy range.">
                     RSI
                     <input id="scoreWeightRsi" type="number" min="0" max="100" step="0.5" value="5" />
                   </label>
-                  <label data-modes="momentum" title="Score points added for today's volume versus its recent average.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added for today's volume versus its recent average.">
                     Relative volume
                     <input id="scoreWeightRelativeVolume" type="number" min="0" max="100" step="0.5" value="13" />
                   </label>
-                  <label data-modes="momentum" title="Score points added for the short-term momentum check.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added for the short-term momentum check.">
                     Momentum
                     <input id="scoreWeightMomentum" type="number" min="0" max="100" step="0.5" value="14" />
                   </label>
-                  <label data-modes="momentum" title="Score points added for momentum over the last few bars.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added for momentum over the last few bars.">
                     Recent momentum
                     <input id="scoreWeightRecentMomentum" type="number" min="0" max="100" step="0.5" value="8" />
                   </label>
-                  <label data-modes="momentum" title="Score points added for momentum over the longer lookback.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added for momentum over the longer lookback.">
                     Long momentum
                     <input id="scoreWeightLongMomentum" type="number" min="0" max="100" step="0.5" value="14" />
                   </label>
-                  <label data-modes="momentum" title="Score points added for the gain since today's open.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added for the gain since today's open.">
                     Session change
                     <input id="scoreWeightSessionChange" type="number" min="0" max="100" step="0.5" value="16" />
                   </label>
-                  <label data-modes="momentum" title="Score points added for trading above VWAP.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added for trading above VWAP.">
                     VWAP
                     <input id="scoreWeightVwap" type="number" min="0" max="100" step="0.5" value="14" />
                   </label>
-                  <label data-modes="momentum" title="Score points added for the SMI momentum reading.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added for the SMI momentum reading.">
                     SMI
                     <input id="scoreWeightSmi" type="number" min="0" max="100" step="0.5" value="7" />
                   </label>
-                  <label data-modes="momentum" title="Score points added as the 1-minute ATR rises toward 2% of price.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added as the 1-minute ATR rises toward 2% of price.">
                     Volatility
                     <input id="scoreWeightVolatility" type="number" min="0" max="100" step="0.5" value="0" />
                   </label>
-                  <label data-modes="momentum" title="Flat points added in place of buy/sell flow when there is no flow reading yet.">
+                  <label data-modes="scored" data-group="oldscore" title="Flat points added in place of buy/sell flow when there is no flow reading yet.">
                     Liquidity bonus
                     <input id="scoreWeightLiquidityBonus" type="number" min="0" max="100" step="0.5" value="1.5" />
                   </label>
-                  <label data-modes="momentum" title="Score points added when more of the volume was buying than selling.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points added when more of the volume was buying than selling.">
                     Buy/sell flow
                     <input id="scoreWeightFlow" type="number" min="0" max="100" step="0.5" value="3" />
                   </label>
-                  <label data-modes="momentum" title="Score points subtracted as the 1-minute ATR rises toward 2% of price.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points subtracted as the 1-minute ATR rises toward 2% of price.">
                     Volatility penalty
                     <input id="scoreWeightVolatilityPenalty" type="number" min="0" max="100" step="0.5" value="4" />
                   </label>
-                  <label data-modes="momentum" title="Score points subtracted for being stretched from today's open.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points subtracted for being stretched from today's open.">
                     Session extension penalty
                     <input id="scoreWeightSessionExtensionPenalty" type="number" min="0" max="100" step="0.5" value="4" />
                   </label>
-                  <label data-modes="momentum" title="Score points subtracted for being stretched far above VWAP.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points subtracted for being stretched far above VWAP.">
                     VWAP extension penalty
                     <input id="scoreWeightVwapExtensionPenalty" type="number" min="0" max="100" step="0.5" value="10" />
                   </label>
-                  <label data-modes="momentum" title="Score points subtracted for a drop from the day's high.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points subtracted for a drop from the day's high.">
                     Session pullback penalty
                     <input id="scoreWeightSessionPullbackPenalty" type="number" min="0" max="100" step="0.5" value="9" />
                   </label>
-                  <label data-modes="momentum" title="Score points subtracted for a drop over the last few bars.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points subtracted for a drop over the last few bars.">
                     Recent pullback penalty
                     <input id="scoreWeightRecentPullbackPenalty" type="number" min="0" max="100" step="0.5" value="6" />
                   </label>
-                  <label data-modes="momentum" title="Score points subtracted when SMI runs hot.">
+                  <label data-modes="scored" data-group="oldscore" title="Score points subtracted when SMI runs hot.">
                     SMI overheat penalty
                     <input id="scoreWeightSmiOverheatPenalty" type="number" min="0" max="100" step="0.5" value="4" />
                   </label>
-                  <label data-modes="momentum" title="Only buy when RSI is at least this high.">
+                  <label data-modes="scored" data-group="trend" title="Only buy when RSI is at least this high.">
                     Buy RSI Min
                     <input id="buyRsiMin" type="number" min="0" max="100" step="0.5" value="42" />
                   </label>
-                  <label data-modes="momentum" title="RSI above this lowers the entry score (it does not block the buy; use Max Entry RSI for that).">
+                  <label data-modes="scored" data-group="trend" title="RSI above this lowers the entry score (it does not block the buy; use Max Entry RSI for that).">
                     Buy RSI Max
                     <input id="buyRsiMax" type="number" min="0" max="100" step="0.5" value="68" />
                   </label>
-                  <label data-modes="momentum" title="Minimum short-term price rise over the momentum bars.">
+                  <label data-modes="scored" data-group="trend" title="Minimum short-term price rise over the momentum bars.">
                     Min Momentum %
                     <input id="minMomentumPercent" type="number" step="0.01" value="0.08" />
                   </label>
-                  <label data-modes="momentum" title="Minimum rise over the last few bars.">
+                  <label data-modes="scored" data-group="trend" title="Minimum rise over the last few bars.">
                     Min Recent Momentum %
                     <input id="minRecentMomentumPercent" type="number" step="0.01" value="0.05" />
                   </label>
-                  <label data-modes="momentum" title="Minimum rise over the longer lookback.">
+                  <label data-modes="scored" data-group="trend" title="Minimum rise over the longer lookback.">
                     Min Long Momentum %
                     <input id="minLongMomentumPercent" type="number" step="0.01" value="0.05" />
                   </label>
-                  <label data-modes="momentum" title="Minimum gain since today's open.">
+                  <label data-modes="scored" data-group="trend" title="Minimum gain since today's open.">
                     Min Session Change %
                     <input id="minSessionChangePercent" type="number" step="0.01" value="1.35" />
                   </label>
-                  <label data-modes="momentum" title="Price must be at least this far above VWAP (the day's volume-weighted average price).">
+                  <label data-modes="scored" data-group="trend" title="Price must be at least this far above VWAP (the day's volume-weighted average price).">
                     Min VWAP Distance %
                     <input id="minVwapDistancePercent" type="number" step="0.01" value="0.05" />
                   </label>
-                  <label data-modes="momentum" title="Skip stocks already this far above VWAP (avoids chasing).">
+                  <label data-modes="scored" data-group="trend" title="Skip stocks already this far above VWAP (avoids chasing).">
                     Max VWAP Distance %
                     <input id="maxVwapDistancePercent" type="number" min="0" step="0.05" value="2.25" />
                   </label>
-                  <label data-modes="momentum" title="Larger drops from the day's high lower the score.">
+                  <label data-modes="scored" data-group="trend" title="Larger drops from the day's high lower the score.">
                     Max Session Pullback %
                     <input id="maxSessionPullbackPercent" type="number" min="0" step="0.05" value="0.9" />
                   </label>
-                  <label data-modes="momentum" title="Larger drops over the last few bars lower the score.">
+                  <label data-modes="scored" data-group="trend" title="Larger drops over the last few bars lower the score.">
                     Max Recent Pullback %
                     <input id="maxRecentPullbackPercent" type="number" min="0" step="0.05" value="0.55" />
                   </label>
-                  <label data-modes="momentum" title="Wait until price has dipped at least this much from the day's high before buying.">
+                  <label data-modes="scored" data-group="trend" title="Wait until price has dipped at least this much from the day's high before buying.">
                     Min Session Pullback % (0 = off)
                     <input id="minSessionPullbackPercent" type="number" min="0" step="0.05" value="0" />
                   </label>
@@ -781,55 +811,55 @@
                       <option value="range_low">Range low</option>
                     </select>
                   </label>
-                  <label data-modes="momentum" title="Never buy when RSI is above this.">
+                  <label data-modes="scored" data-group="trend" title="Never buy when RSI is above this.">
                     Max Entry RSI (0 = off)
                     <input id="maxEntryRsi" type="number" min="0" max="100" step="1" value="0" />
                   </label>
-                  <label data-modes="momentum" class="check-row" title="Buy only while the price is still rising: the last 1-minute bar closed at or above the one before it, and the latest trade is not below that earlier close.">
+                  <label data-modes="scored" data-group="trend" class="check-row" title="Buy only while the price is still rising: the last 1-minute bar closed at or above the one before it, and the latest trade is not below that earlier close.">
                     <input id="requireRisingPrice" type="checkbox" checked />
                     <span>Require rising price</span>
                   </label>
-                  <label data-modes="momentum" title="When RSI or SMI is near its top, require at least this much momentum.">
+                  <label data-modes="scored" data-group="trend" title="When RSI or SMI is near its top, require at least this much momentum.">
                     Late Momentum Floor %
                     <input id="lateMomentumFloorPercent" type="number" min="0" step="0.05" value="0.5" />
                   </label>
-                  <label data-modes="momentum" title="Minimum SMI (stochastic momentum) reading.">
+                  <label data-modes="scored" data-group="trend" title="Minimum SMI (stochastic momentum) reading.">
                     Min SMI
                     <input id="minSmi" type="number" min="-100" max="100" step="0.5" value="40" />
                   </label>
-                  <label data-modes="momentum orb" title="Minimum share of recent volume that was buying (0-1).">
+                  <label data-modes="scored orb" data-group="trend" title="Minimum share of recent volume that was buying (0-1).">
                     Buy Flow Ratio
                     <input id="minBuyVolumeRatio" type="number" min="0" max="1" step="0.01" value="0.5" />
                   </label>
-                  <label data-modes="momentum movers" title="After a losing exit, a re-buy needs this many extra score points. Movers: each losing exit that day adds this many to Min Score (Min Score 60 and a boost of 20 means 80 after one loss, 100 after two, then no more buys of that stock that day). A sale at a gain adds the same amount once, only until the stock trades above the high it was sold from. 0 turns both off.">
+                  <label data-modes="scored weighted" title="After a losing exit, a re-buy needs this many extra score points. Movers: each losing exit that day adds this many to Min Score (Min Score 60 and a boost of 20 means 80 after one loss, 100 after two, then no more buys of that stock that day). A sale at a gain adds the same amount once, only until the stock trades above the high it was sold from. 0 turns both off.">
                     Re-entry Boost
                     <input id="reentryScoreBoost" type="number" min="0" max="100" step="0.5" value="12" />
                   </label>
-                  <label data-modes="momentum" title="Current volume must be this many times the average.">
+                  <label data-modes="scored" data-group="trend" title="Current volume must be this many times the average.">
                     Vol Mult
                     <input id="volumeMultiplier" type="number" min="0" step="0.05" value="1.5" />
                   </label>
-                  <label data-modes="momentum" title="Skip stocks with lower average volume than this (0 = off).">
+                  <label data-modes="scored" data-group="trend" title="Skip stocks with lower average volume than this (0 = off).">
                     Min Avg Vol
                     <input id="minAvgVolume" type="number" min="0" step="1000" value="0" />
                   </label>
-                  <label data-modes="momentum" title="A stock with this 1-minute ATR% gets the flat VWAP and session caps; one twice as volatile gets twice the room (0 = off).">
+                  <label data-modes="scored" data-group="trend" title="A stock with this 1-minute ATR% gets the flat VWAP and session caps; one twice as volatile gets twice the room (0 = off).">
                     ATR Extension Reference % (0 = off)
                     <input id="extensionAtrReferencePercent" type="number" min="0" max="5" step="0.05" value="0" />
                   </label>
-                  <label data-modes="momentum" title="Bars used for the short momentum check.">
+                  <label data-modes="scored" data-group="trend" title="Bars used for the short momentum check.">
                     Momentum Bars
                     <input id="momentumPeriod" type="number" min="1" step="1" value="6" />
                   </label>
-                  <label data-modes="momentum" title="Bars used for the SMI momentum indicator.">
+                  <label data-modes="scored" data-group="trend" title="Bars used for the SMI momentum indicator.">
                     SMI Bars
                     <input id="smiPeriod" type="number" min="1" step="1" value="10" />
                   </label>
-                  <label data-modes="momentum" title="Bars used for ATR (average true range, a volatility measure).">
+                  <label data-modes="scored" data-group="trend" title="Bars used for ATR (average true range, a volatility measure).">
                     ATR Bars
                     <input id="atrPeriod" type="number" min="1" step="1" value="14" />
                   </label>
-                  <label data-modes="momentum" title="Bars used for the average-volume baseline.">
+                  <label data-modes="scored" data-group="trend" title="Bars used for the average-volume baseline.">
                     Vol Period
                     <input id="volumePeriod" type="number" min="1" step="1" value="20" />
                   </label>
