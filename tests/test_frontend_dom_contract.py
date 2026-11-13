@@ -96,6 +96,8 @@ class FrontendDomContractTests(unittest.TestCase):
             "moverWeightSession",
             "moverWeightRsi",
             "moverVolumeFullAt",
+            "moverWeightSpread",
+            "moverVolumeCurrent",
         )
         keys = (
             "mover_weight_volume",
@@ -106,6 +108,8 @@ class FrontendDomContractTests(unittest.TestCase):
             "mover_weight_session",
             "mover_weight_rsi",
             "mover_volume_full_at",
+            "mover_weight_spread",
+            "mover_volume_current",
         )
         for element_id in ids:
             self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
@@ -126,7 +130,7 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertNotIn("Movers Score Weights", self.index_html)
         self.assertNotIn("Score Weights (momentum)", self.index_html)
         self.assertEqual(self.index_html.count("<h3>Score Weights</h3>"), 1)  # the backtest panel's own
-        for element_id in ("moverWeightVolume", "moverVolumeFullAt"):
+        for element_id in ("moverWeightVolume", "moverVolumeFullAt", "moverWeightSpread", "moverVolumeCurrent"):
             self.assertRegex(rules, rf'(?s)<label data-modes="movers"[^>]*>(?:(?!</label>).)*id="{element_id}"')
         for element_id in ("scoreWeightRsi", "buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice",
                            "momentumPeriod", "smiPeriod", "atrPeriod", "volumePeriod"):

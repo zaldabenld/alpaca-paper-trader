@@ -141,6 +141,10 @@ INPLAY_DEFAULT_FLATTEN_MINUTES = 10
 INPLAY_FALLBACK_STOP_PERCENT = Decimal("5")
 TRADE_SIZE_MODES = {"percent", "notional", "exposure_slot"}
 MAX_ENTRY_REFERENCE_PREMIUM_PERCENT = Decimal("2.0")
+TRADE_HISTORY_DISPLAY_ROWS = 100
+DAY_FILLS_PAGE_SIZE = 500
+DAY_FILLS_MAX_PAGES = 10
+DAY_FILLS_RETRY_SECONDS = 60
 ASSET_CHECK_CACHE_SECONDS = 6 * 60 * 60
 ORDER_FLOW_MIN_CLASSIFIED_VOLUME = Decimal("1000")
 ORDER_SUBMIT_HOLD_SECONDS = 2 * 60
@@ -577,6 +581,8 @@ PROFILE_STRATEGY_KEYS = {
     "mover_weight_session",
     "mover_weight_rsi",
     "mover_volume_full_at",
+    "mover_weight_spread",
+    "mover_volume_current",
     "volume_period",
     "volume_multiplier",
     "min_avg_volume",
@@ -712,6 +718,12 @@ class AppConfig(BaseModel):
     mover_weight_session: Decimal = Decimal("5")
     mover_weight_rsi: Decimal = Decimal("0")
     mover_volume_full_at: Decimal = Decimal("5")
+    # Points taken off the movers score for the bid/ask spread: all of them when the spread is as
+    # wide as the stop distance, in proportion below that (0 = off). Every round trip pays the spread.
+    mover_weight_spread: Decimal = Decimal("40")
+    # Volume points use the lower of today's volume so far and the last half hour's, each against
+    # the stock's usual, so one block print does not hold full volume points all day.
+    mover_volume_current: bool = True
     max_entries_per_symbol_per_day: int = 0
     # Buy only while the price is still rising: the last completed 1-min bar closed at or above the
     # bar before it, and the latest streamed trade (when fresh) is not below that earlier close.
@@ -1049,7 +1061,7 @@ class AppConfig(BaseModel):
         self.inplay_range_minutes = min(max(int(self.inplay_range_minutes) // 5 * 5, 5), 30)
         for name in (
             "mover_weight_volume", "mover_weight_half_hour_move", "mover_weight_vwap", "mover_weight_five_min_move",
-            "mover_weight_range", "mover_weight_session", "mover_weight_rsi",
+            "mover_weight_range", "mover_weight_session", "mover_weight_rsi", "mover_weight_spread",
         ):
             setattr(self, name, min(max(getattr(self, name), Decimal("0")), Decimal("100")))
         self.mover_volume_full_at = min(max(self.mover_volume_full_at, Decimal("1.5")), Decimal("50"))
@@ -2136,6 +2148,15 @@ class TraderEngine:
         self.reentry_losses_today: dict[str, set[str]] = {}
         self.reentry_losses_date: Any = None
         self.reentry_open_buys: dict[str, tuple[str, Decimal]] = {}  # symbol -> (buy id, fill price)
+        # Movers mode: a stock sold at a gain needs a higher score until it trades above this price.
+        self.reentry_new_highs: dict[str, tuple[str, Decimal]] = {}  # symbol -> (sell id, price to beat)
+        self.reentry_released_sells: set[str] = set()
+        # Today's filled orders by id, kept all day. The regular read is only the newest 100 closed
+        # orders, which is about two hours of a busy day.
+        self.day_fills: dict[str, dict[str, Any]] = {}
+        self.day_fills_date: Any = None
+        self.day_fills_loaded = False
+        self.day_fills_retry_at = 0.0
         self.entry_lock_dates: dict[str, str] = {}
         self.entry_times: dict[str, datetime] = {}
         self.exit_lock_dates: dict[str, str] = {}
@@ -2175,6 +2196,8 @@ class TraderEngine:
         self.mover_profiles: dict[str, list[float] | None] = {}
         self.mover_stats: dict[str, inplay_logic.DailyStats] = {}
         self.mover_volume: dict[str, Decimal] = {}
+        self.mover_volume_recent: dict[str, Decimal] = {}  # the last half hour against its usual
+        self.mover_quotes: dict[str, tuple[Decimal, Decimal, float]] = {}  # symbol -> (bid, ask, read at)
         self.mover_volume_slot: int | None = None
         self.mover_volume_at = 0.0
         self.mover_scores: dict[str, movers_logic.Score] = {}
@@ -2471,6 +2494,14 @@ class TraderEngine:
             self.reentry_losses_today = {}
             self.reentry_losses_date = None
             self.reentry_open_buys = {}
+            self.reentry_new_highs = {}
+            self.reentry_released_sells = set()
+            self.day_fills = {}
+            self.day_fills_date = None
+            self.day_fills_loaded = False
+            self.day_fills_retry_at = 0.0
+            self.entries_today_by_symbol = {}
+            self.entries_today_date = None
 
         account = self.trading_client.get_account()
         with self.lock:
@@ -2646,6 +2677,8 @@ class TraderEngine:
             self.reentry_losses_today = {}
             self.reentry_losses_date = None
             self.reentry_open_buys = {}
+            self.reentry_new_highs = {}
+            self.reentry_released_sells = set()
             self.last_scan_log_at = 0.0
             self.last_entry_submitted_at = 0.0
 
@@ -2810,14 +2843,14 @@ class TraderEngine:
                     )
             entry_symbols = self.mode_entry_symbols()
 
-            self.sync_loss_reentry_floors_from_closed_orders(
-                self.todays_closed_orders_for_reentry(client) or closed_order_dicts
-            )
-            self.sync_entries_today_from_orders(closed_order_dicts + order_dicts)
-
             market_clock = self.format_market_clock(clock)
             market_open = bool(market_clock["is_open"])
             session_date = str(market_clock.get("session_date") or datetime.now().astimezone().date().isoformat())
+            # The newest 100 closed orders plus every fill seen earlier in the session: the day's
+            # counts and the trade table are worked out from all of it, not the last two hours.
+            history_orders = self.with_todays_fills(client, closed_order_dicts, session_date)
+            self.sync_loss_reentry_floors_from_closed_orders(history_orders)
+            self.sync_entries_today_from_orders(history_orders + order_dicts)
             # Hold mode trades its own target portfolio: no stops, no flatten, no loss stop, and the
             # momentum/ORB entry loop does not run (see run_allocation_pass).
             allocation_mode = config.entry_mode == "allocation"
@@ -3010,12 +3043,14 @@ class TraderEngine:
             equity = decimal_value(account_dict.get("equity"))
             last_equity = decimal_value(account_dict.get("last_equity"))
             daily_pl_payload = self.portfolio_history_daily_pl_payload(client, session_date)
-            trade_history_rows = self.trade_history_rows(closed_order_dicts)
+            all_trade_rows = self.trade_history_rows(history_orders, limit=None)
+            trade_history_rows = all_trade_rows[:TRADE_HISTORY_DISPLAY_ROWS]
             self.alert_new_fills(closed_order_dicts)
             realized_account_basis = decimal_value(daily_pl_payload.get("daily_pl_account_basis_raw"))
             if realized_account_basis <= 0:
                 realized_account_basis = last_equity if last_equity > 0 else equity
-            realized_pl = self.daily_realized_pl_summary(trade_history_rows, realized_account_basis, session_date)
+            # Summed over every fill of the day, not only the rows the table shows.
+            realized_pl = self.daily_realized_pl_summary(all_trade_rows, realized_account_basis, session_date)
 
             with self.lock:
                 self.account = account_dict | daily_pl_payload | {
@@ -4177,6 +4212,8 @@ class TraderEngine:
             session=config.mover_weight_session,
             rsi=config.mover_weight_rsi,
             volume_full_at=config.mover_volume_full_at,
+            spread=config.mover_weight_spread,
+            volume_current=bool(config.mover_volume_current),
         )
 
     def mover_price_change(
@@ -4207,11 +4244,12 @@ class TraderEngine:
         clean = symbol.strip().upper()
         with self.lock:
             relative = self.mover_volume.get(clean)
+            recent = self.mover_volume_recent.get(clean)
             stat = self.mover_stats.get(clean)
             volume_age = time.monotonic() - self.mover_volume_at
         if volume_age > self.MOVERS_STALE_SECONDS:
             # The volume worker has not succeeded for a while: an old reading earns no points.
-            relative = None
+            relative = recent = None
         session = _latest_session_points(self.strategy_state.histories.get(clean, []))
         bar_at = _bar_local_time(session[-1].timestamp) if session else None
         price, price_at = snapshot.price, bar_at
@@ -4228,7 +4266,28 @@ class TraderEngine:
             session_change=percent_change(price, opening_close) if price and opening_close else None,
             daily_range=stat.atr_percent if stat is not None else None,
             rsi=snapshot.rsi,
+            recent_relative_volume=recent,
+            spread_percent=self.mover_spread_percent(clean, price),
+            stop_percent=self.position_stop_percent(clean, self.config),
+            price=price,
         )
+
+    MOVERS_QUOTE_SECONDS = 10 * 60
+
+    def mover_spread_percent(self, symbol: str, price: Decimal | None) -> Decimal | None:
+        """The bid/ask spread as a percent of price. The quote is the one read just before an order
+        (kept for ten minutes); without one, and never below it, the spread is one price tick, the
+        narrowest the stock can be quoted."""
+        if price is None or price <= 0:
+            return None
+        spread = self.price_increment_for(price)
+        with self.lock:
+            quote = self.mover_quotes.get(symbol)
+        if quote is not None:
+            bid, ask, read_at = quote
+            if time.monotonic() - read_at <= self.MOVERS_QUOTE_SECONDS and bid > 0 and ask > bid:
+                spread = max(spread, ask - bid)
+        return spread / price * Decimal("100")
 
     def movers_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
         """Why this stock is not a buy right now; empty when its weighted score clears the bar.
@@ -4253,12 +4312,33 @@ class TraderEngine:
         if result.total < config.min_entry_score:
             return f"Hold (score {result.total:.0f} of {config.min_entry_score:.0f}: {result.describe() or 'no points yet'})"
         needed, losses = self.movers_reentry_bar(clean, config)
+        old_high = self.movers_unbeaten_high(clean, readings.price)
+        if old_high is not None:
+            needed += max(Decimal("0"), config.reentry_score_boost)
         if result.total < needed:
-            return (
-                f"Hold (re-entry needs {needed:.0f} after {losses} losing exit{'' if losses == 1 else 's'} today;"
-                f" score {result.total:.0f})"
-            )
+            why = []
+            if losses:
+                why.append(f"{losses} losing exit{'' if losses == 1 else 's'} today")
+            if old_high is not None:
+                why.append(f"a sale at a gain, until it trades above ${old_high}")
+            return f"Hold (re-entry needs {needed:.0f} after {' and '.join(why)}; score {result.total:.0f})"
         return self.asset_tradeability_hold_reason(symbol)
+
+    def movers_unbeaten_high(self, symbol: str, price: Decimal | None) -> Decimal | None:
+        """The price a stock sold at a gain today has to trade above before its re-entry score comes
+        back down; None when there is no such sale or the price is already above it. The sale was
+        the trailing stop reading the stock as falling from its high, so buying it straight back
+        needs a stronger score until it has gone on to a new high. Released by price, not by time."""
+        with self.lock:
+            pending = self.reentry_new_highs.get(symbol)
+            if pending is None:
+                return None
+            sell_id, target = pending
+            if price is not None and price > target:
+                self.reentry_new_highs.pop(symbol, None)
+                self.reentry_released_sells.add(sell_id)
+                return None
+            return target
 
     def movers_reentry_bar(self, symbol: str, config: AppConfig) -> tuple[Decimal, int]:
         """The score a mover needs to be bought, and its losing round trips today.
@@ -4292,6 +4372,8 @@ class TraderEngine:
                 self.mover_profiles = {}
                 self.mover_stats = {}
                 self.mover_volume = {}
+                self.mover_volume_recent = {}
+                self.mover_quotes = {}
                 self.mover_scores = {}
                 self.mover_volume_slot = None
                 self.mover_volume_at = 0.0
@@ -4407,6 +4489,7 @@ class TraderEngine:
             minutes = (datetime.now(MARKET_TIMEZONE) - open_et).total_seconds() / 60
             slot = movers_logic.last_complete_slot(minutes, self.INPLAY_SIP_DELAY_MINUTES)
             volumes: dict[str, Decimal] = {}
+            recent_volumes: dict[str, Decimal] = {}
             if slot is not None:
                 with self.lock:
                     profiles_now = {symbol: self.mover_profiles.get(symbol) for symbol in symbols}
@@ -4414,15 +4497,18 @@ class TraderEngine:
                 end = open_et + timedelta(minutes=movers_logic.SLOT_MINUTES * (slot + 1))
                 bars = self.mover_fetch_volume(data_client, wanted, today, end) if wanted else {}
                 for symbol in wanted:
-                    value = movers_logic.relative_volume(
-                        movers_logic.cumulative_volume(bars.get(symbol, [])), profiles_now[symbol], slot
-                    )
+                    today_volume = movers_logic.cumulative_volume(bars.get(symbol, []))
+                    value = movers_logic.relative_volume(today_volume, profiles_now[symbol], slot)
                     if value is not None:
                         volumes[symbol] = value
+                    recent = movers_logic.recent_relative_volume(today_volume, profiles_now[symbol], slot)
+                    if recent is not None:
+                        recent_volumes[symbol] = recent
             with self.lock:
                 if self.mover_session == today.isoformat():
                     if slot is not None:
                         self.mover_volume = volumes
+                        self.mover_volume_recent = recent_volumes
                         self.mover_volume_slot = slot
                     self.mover_volume_at = time.monotonic()
                     self.mover_failures = 0
@@ -6157,9 +6243,15 @@ class TraderEngine:
         if not self.is_app_protective_order(order):
             return False
         order_qty = decimal_value(order.get("qty"))
-        if order_qty > 0 and abs(order_qty - qty) > Decimal("0.0001"):
-            return self.cancel_open_order(order)
+        filled_qty = decimal_value(order.get("filled_qty"))
         kind = self.protective_exit_kind(order)
+        if kind == "stop_loss" and filled_qty > 0:
+            # The stop has triggered and is selling. Its size no longer matches the position (the
+            # filled part has already left it), and cancelling it mid-fill only to sell the rest by
+            # hand costs a rejected replacement stop and leaves the shares unprotected meanwhile.
+            return False
+        if order_qty > 0 and abs(order_qty - filled_qty - qty) > Decimal("0.0001"):
+            return self.cancel_open_order(order)
         if kind == "take_profit" and take_profit_price > 0:
             limit_price = decimal_value(order.get("limit_price"))
             if limit_price > 0 and abs(limit_price - take_profit_price) >= self.price_increment_for(take_profit_price):
@@ -6499,6 +6591,9 @@ class TraderEngine:
             raw_quote = model_dict(quote)
             bid = decimal_value(raw_quote.get("bid_price"))
             ask = decimal_value(raw_quote.get("ask_price"))
+            if self.config.entry_mode == "movers":
+                with self.lock:
+                    self.mover_quotes[symbol.strip().upper()] = (bid, ask, time.monotonic())
             if bid > 0:
                 candidates.append(bid)
             if ask > 0:
@@ -7083,7 +7178,9 @@ class TraderEngine:
             "client_order_id": item.get("client_order_id", ""),
         }
 
-    def trade_history_rows(self, orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def trade_history_rows(
+        self, orders: list[dict[str, Any]], limit: int | None = TRADE_HISTORY_DISPLAY_ROWS
+    ) -> list[dict[str, Any]]:
         filled_orders: list[dict[str, Any]] = []
         for item in self.flatten_orders(orders):
             filled_qty = decimal_value(item.get("filled_qty"))
@@ -7129,7 +7226,7 @@ class TraderEngine:
                 )
             )
         rows.sort(key=lambda row: row.get("sort_time", ""), reverse=True)
-        return rows[:100]
+        return rows if limit is None else rows[:limit]
 
     def daily_realized_pl_summary(
         self,
@@ -7169,7 +7266,8 @@ class TraderEngine:
         }
 
     def sync_entries_today_from_orders(self, orders: list[dict[str, Any]]) -> None:
-        # Counted from broker orders (not local memory) so the daily cap survives restarts.
+        # Counted from broker orders (not local memory) so the daily cap survives restarts. The
+        # orders are the newest 100 plus every fill seen earlier today (with_todays_fills).
         today = datetime.now(MARKET_TIMEZONE).date()
         counts: dict[str, int] = {}
         seen: set[str] = set()
@@ -7187,8 +7285,8 @@ class TraderEngine:
             if symbol:
                 counts[symbol] = counts.get(symbol, 0) + 1
         with self.lock:
-            # Only the 100 newest closed orders are read, and replaced stops fill that window on a
-            # busy day; a morning buy that scrolled out must not reopen a per-day cap.
+            # If the whole-day read has not succeeded yet the list can be short; a count already
+            # reached must not drop and reopen a per-day cap.
             if self.entries_today_date == today:
                 for symbol, earlier in self.entries_today_by_symbol.items():
                     counts[symbol] = max(counts.get(symbol, 0), earlier)
@@ -7212,6 +7310,10 @@ class TraderEngine:
         today = datetime.now(MARKET_TIMEZONE).date()
         opening_buy: dict[str, str] = {}
         losing_trips: dict[str, set[str]] = {}
+        last_sale: dict[str, tuple[str, Decimal, bool]] = {}  # symbol -> (sell id, price, sold at a gain)
+        # The old score floor belongs to the modes that score a re-entry on the momentum scale. Hold
+        # and day-trade accounts never read it, and their order lists reach back days.
+        uses_score_floor = self.config.entry_mode in {"momentum", "orb"}
         rebuilt = False
         if movers:
             with self.lock:
@@ -7219,6 +7321,8 @@ class TraderEngine:
                 if rebuilt:
                     self.reentry_losses_today = {}
                     self.reentry_open_buys = {}
+                    self.reentry_new_highs = {}
+                    self.reentry_released_sells = set()
                     self.reentry_losses_date = today
 
         for item in sorted(filled_orders, key=self.trade_history_sort_value):
@@ -7243,6 +7347,7 @@ class TraderEngine:
             if side == "buy" and avg_price > 0:
                 lots.setdefault(symbol, []).append({"qty": filled_qty, "price": avg_price})
                 opening_buy[symbol] = self.closed_order_identity(item)
+                last_sale.pop(symbol, None)
                 with self.lock:
                     self.reentry_score_floors.pop(symbol, None)
                     if movers:
@@ -7265,16 +7370,23 @@ class TraderEngine:
                 # has no known result and is not counted.
                 trip = opening_buy.get(symbol)
                 lost = realized_pl is not None and realized_pl < 0
+                won = realized_pl is not None and realized_pl > 0
                 if trip is None:
                     with self.lock:
                         remembered = self.reentry_open_buys.get(symbol)
                     if remembered is not None:
                         trip, bought_at = remembered
                         lost = Decimal("0") < avg_price < bought_at
-                if trip and lost and filled_at is not None and filled_at.astimezone(MARKET_TIMEZONE).date() == today:
+                        won = avg_price > bought_at
+                sold_today = filled_at is not None and filled_at.astimezone(MARKET_TIMEZONE).date() == today
+                if trip and lost and sold_today:
                     losing_trips.setdefault(symbol, set()).add(trip)
+                if sold_today and avg_price > 0:
+                    last_sale[symbol] = (self.closed_order_identity(item), avg_price, bool(trip and won))
                 continue
 
+            if not uses_score_floor:
+                continue
             intent = self.trade_intent_for_order(item, intent_lookup)
             reason = str(intent.get("reason") or "")
             if not self.closed_sell_needs_reentry_floor(item, reason, realized_pl):
@@ -7294,6 +7406,34 @@ class TraderEngine:
 
         if movers:
             self.record_movers_losing_trips(losing_trips, rebuilt)
+            self.record_movers_winning_sales(last_sale)
+
+    def record_movers_winning_sales(self, last_sale: dict[str, tuple[str, Decimal, bool]]) -> None:
+        """Each symbol's newest sale today, when it was at a gain and nothing was bought since, sets
+        the price the stock has to beat (movers_unbeaten_high). That price is where the trailing
+        stop was hanging from: the sale price plus the trail drop."""
+        drop = min(max(self.config.profit_trail_drop_percent, Decimal("0")), Decimal("50"))
+        announce: list[str] = []
+        with self.lock:
+            pending: dict[str, tuple[str, Decimal]] = {}
+            for symbol, (sell_id, price, won) in last_sale.items():
+                if not won or sell_id in self.reentry_released_sells:
+                    continue
+                if self.inverse_trend_active(symbol, self.config):
+                    continue  # trend-hold funds are bought by their own rules, not by the score
+                target = self.round_exit_price(price / (Decimal("1") - drop / Decimal("100")), ROUND_UP)
+                known = self.reentry_new_highs.get(symbol)
+                if known is None or known[0] != sell_id:
+                    announce.append(f"{symbol} above ${target}")
+                pending[symbol] = (sell_id, target) if known is None or known[0] != sell_id else known
+            self.reentry_new_highs = pending
+        boost = self.config.reentry_score_boost
+        if announce and boost > 0:
+            self.log(
+                "info",
+                f"Sold at a gain; re-buying needs {boost:.0f} more points until the stock trades at a new"
+                f" high: {', '.join(sorted(announce))}.",
+            )
 
     def record_movers_losing_trips(self, losing_trips: dict[str, set[str]], rebuilt: bool) -> None:
         """Add today's losing round trips to the day's count. The count only grows during a day:
@@ -7305,6 +7445,7 @@ class TraderEngine:
                 if not trips <= known:
                     known |= trips
                     raised.append((symbol, len(known)))
+        raised = [item for item in raised if not self.inverse_trend_active(item[0], self.config)]
         if not raised:
             return
         bars = ", ".join(
@@ -7314,25 +7455,91 @@ class TraderEngine:
         )
         self.log("warn", f"Re-entry score {'rebuilt from' if rebuilt else 'raised by'} today's fills: {bars}.")
 
-    def todays_closed_orders_for_reentry(self, client: Any) -> list[dict[str, Any]]:
-        """Today's closed orders, read once a day (and after a restart) in movers mode so the losing
-        round trips are counted from the whole session; every later pass adds from the usual list.
-        Empty when there is nothing to rebuild or the read fails."""
-        today = datetime.now(MARKET_TIMEZONE).date()
-        with self.lock:
-            if self.config.entry_mode != "movers" or self.reentry_losses_date == today:
-                return []
+    def with_todays_fills(
+        self, client: Any, closed_orders: list[dict[str, Any]], session_date: str = ""
+    ) -> list[dict[str, Any]]:
+        """closed_orders (the newest 100) plus the session's filled orders that have scrolled out of it.
+
+        Every fill seen during the session is kept, and the whole session is read once a day and
+        after a restart, so the buy counts, the losing-exit counts and the trade table cover all of
+        it. The session is the market clock's (the last one while the market is closed), so Friday's
+        table still adds up on Saturday. If the whole-session read fails it is tried again a minute
+        later; until it succeeds the result is only what has been seen since the app started."""
         try:
-            session_start = datetime.combine(today, datetime.min.time(), tzinfo=MARKET_TIMEZONE)
-            orders = client.get_orders(
-                GetOrdersRequest(
-                    status=QueryOrderStatus.CLOSED, limit=500, after=session_start, nested=True, direction=Sort.DESC
-                )
+            today = date.fromisoformat(session_date)
+        except ValueError:
+            today = datetime.now(MARKET_TIMEZONE).date()
+        with self.lock:
+            if self.day_fills_date != today:
+                self.day_fills = {}
+                self.day_fills_date = today
+                self.day_fills_loaded = False
+                self.day_fills_retry_at = 0.0
+            need_read = not self.day_fills_loaded and time.monotonic() >= self.day_fills_retry_at
+            first_try = self.day_fills_retry_at == 0.0
+        earlier: list[dict[str, Any]] | None = None
+        if need_read:
+            try:
+                earlier = self.read_todays_closed_orders(client, today)
+            except Exception as exc:
+                if first_try:
+                    self.log(
+                        "warn",
+                        "Could not read today's earlier orders; the day's counts and trade table cover only"
+                        f" what the app has seen since it started until this succeeds: {exc}",
+                    )
+        with self.lock:
+            if need_read:
+                self.day_fills_loaded = earlier is not None
+                self.day_fills_retry_at = time.monotonic() + DAY_FILLS_RETRY_SECONDS
+            for order in (earlier or []) + closed_orders:  # the regular read last: its copy is the newest
+                order_id = str(order.get("id") or "")
+                if order_id and self.order_filled_on(order, today):
+                    self.day_fills[order_id] = order
+            listed = {str(order.get("id") or "") for order in closed_orders}
+            scrolled_out = [order for order_id, order in self.day_fills.items() if order_id not in listed]
+        return closed_orders + scrolled_out
+
+    def order_filled_on(self, order: dict[str, Any], day: date) -> bool:
+        for item in self.flatten_orders([order]):
+            if decimal_value(item.get("filled_qty")) <= 0:
+                continue
+            filled_at = self.parse_order_datetime(
+                item.get("filled_at") or item.get("updated_at") or item.get("submitted_at")
             )
-            return [model_dict(item) for item in orders]
-        except Exception as exc:
-            self.log("warn", f"Could not read today's closed orders for the re-entry count: {exc}")
-            return []
+            if filled_at is not None and filled_at.astimezone(MARKET_TIMEZONE).date() == day:
+                return True
+        return False
+
+    def read_todays_closed_orders(self, client: Any, today: date) -> list[dict[str, Any]]:
+        """Every closed order submitted since midnight ET, newest first, read a page at a time."""
+        session_start = datetime.combine(today, datetime.min.time(), tzinfo=MARKET_TIMEZONE)
+        orders: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        until: datetime | None = None
+        for _ in range(DAY_FILLS_MAX_PAGES):
+            page = [
+                model_dict(item)
+                for item in client.get_orders(
+                    GetOrdersRequest(
+                        status=QueryOrderStatus.CLOSED,
+                        limit=DAY_FILLS_PAGE_SIZE,
+                        after=session_start,
+                        until=until,
+                        nested=True,
+                        direction=Sort.DESC,
+                    )
+                )
+            ]
+            fresh = [order for order in page if str(order.get("id") or "") not in seen]
+            orders.extend(fresh)
+            seen.update(str(order.get("id") or "") for order in fresh)
+            submitted = [self.parse_order_datetime(order.get("submitted_at")) for order in page]
+            oldest = min((value for value in submitted if value is not None), default=None)
+            if len(page) < DAY_FILLS_PAGE_SIZE or not fresh or oldest is None:
+                break
+            until = oldest
+        return orders
 
     def closed_sell_needs_reentry_floor(
         self,
