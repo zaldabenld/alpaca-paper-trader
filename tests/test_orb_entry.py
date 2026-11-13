@@ -98,11 +98,14 @@ class OrbEntryTests(unittest.TestCase):
         engine.entries_today_by_symbol = {"AAA": 1}
         self.assertEqual(self.hold(engine), "Hold (ORB: one entry per day)")
 
-    def test_orb_settings_are_profile_keys_and_presets_default_to_momentum(self) -> None:
+    def test_orb_settings_are_profile_keys_and_presets_default_to_the_scored_style_with_trend_checks(self) -> None:
         for key in ("entry_mode", "orb_minutes", "orb_max_breakout_percent"):
             self.assertIn(key, engine_module.PROFILE_STRATEGY_KEYS)
         for preset in engine_module.PROFILE_PRESETS.values():
-            self.assertEqual(preset.get("entry_mode"), "momentum")
+            self.assertEqual(preset.get("entry_mode"), "scored")
+            self.assertIs(preset.get("use_trend_checks"), True)
+            self.assertEqual(preset.get("reentry_rule"), "floor")
+            self.assertEqual(float(preset.get("mover_weight_volume")), 0.0)
 
     def test_momentum_mode_never_calls_the_orb_path(self) -> None:
         engine = self.engine_with_range(entry_mode="momentum")

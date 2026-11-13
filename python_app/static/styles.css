@@ -2585,3 +2585,32 @@ button.news-symbol:hover {
 #advancedSettings [data-modes][hidden] {
   display: none !important;
 }
+
+/* One settings menu per account: a tab for each, and a line saying which engine and profile it runs. */
+.account-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.account-tabs button {
+  flex: 1 1 auto;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #2c3440);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.account-tabs button[aria-selected="true"] {
+  background: var(--accent, #2f6fed);
+  border-color: var(--accent, #2f6fed);
+  color: #fff;
+}
+
+.account-menu-title {
+  margin: 0 0 10px;
+}

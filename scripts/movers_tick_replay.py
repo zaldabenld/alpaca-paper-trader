@@ -65,7 +65,13 @@ from alpaca.trading.client import TradingClient  # noqa: E402
 from alpaca_desktop import inplay as inplay_logic  # noqa: E402
 from alpaca_desktop import movers as movers_logic  # noqa: E402
 from alpaca_desktop import storage  # noqa: E402
-from alpaca_desktop.engine import MARKET_TIMEZONE, MAX_ENTRY_REFERENCE_PREMIUM_PERCENT, AppConfig, TraderEngine  # noqa: E402
+from alpaca_desktop.engine import (  # noqa: E402
+    MARKET_TIMEZONE,
+    MAX_ENTRY_REFERENCE_PREMIUM_PERCENT,
+    AppConfig,
+    TraderEngine,
+    direction_checks,
+)
 
 D = Decimal
 REPLAY_EQUITY = D("1000")
@@ -83,6 +89,7 @@ VARIANTS: list[tuple[str, dict[str, Any]]] = [
     ("E  + new-high rule after a winning sale (live now)", dict(boost="20", spread="40", volume_current=True, new_high=True)),
     ("F  live now, but spread cost 20", dict(boost="20", spread="20", volume_current=True, new_high=True)),
     ("G  live now, but spread cost 60", dict(boost="20", spread="60", volume_current=True, new_high=True)),
+    ("W  weighted only: the 3 going-up checks become points", dict(boost="20", spread="40", volume_current=True, new_high=True, style="weighted")),
 ]
 
 
@@ -365,6 +372,7 @@ class DayData:
 
 def replay_day(data: DayData, market: Market, base: AppConfig, options: dict[str, Any]) -> list[Trade]:
     config = base.model_copy(update={
+        "entry_mode": options.get("style", "scored"),
         "reentry_score_boost": D(options["boost"]),
         "mover_weight_spread": D(options["spread"]),
         "mover_volume_current": bool(options["volume_current"]),
@@ -372,6 +380,7 @@ def replay_day(data: DayData, market: Market, base: AppConfig, options: dict[str
     engine = TraderEngine("replay")
     engine.config = config
     weights = engine.mover_weights(config)
+    checks = direction_checks(config)  # none in the weighted style
     boost = max(D("0"), config.reentry_score_boost)
     drop = min(max(config.profit_trail_drop_percent, D("0")), D("50"))
     notional = REPLAY_EQUITY * config.max_trade_percent / D("100")
@@ -456,7 +465,7 @@ def replay_day(data: DayData, market: Market, base: AppConfig, options: dict[str
         readings = data.readings[index]
         candidates: list[tuple[D, str, movers_logic.Readings, D]] = []
         for symbol, reading in readings.items():
-            if symbol in positions or symbol in data.not_buyable or movers_logic.direction_hold_reason(reading):
+            if symbol in positions or symbol in data.not_buyable or movers_logic.direction_hold_reason(reading, *checks):
                 continue
             needed = config.min_entry_score + boost * losses.get(symbol, 0) + (boost if symbol in old_high else D("0"))
             kept = quotes.get(symbol)
@@ -545,7 +554,7 @@ def main() -> int:
     api_key, secret_key, saved = load_account(args.account)
     if not api_key or not secret_key:
         raise SystemExit("That account has no saved keys.")
-    base = saved.model_copy(update={"entry_mode": "movers"})
+    base = saved  # a movers profile of the scored style; each variant sets the settings under test
     market = Market(api_key, secret_key, Path(args.cache))
     tape_dir = Path(args.tape_dir)
     stamps = args.days or sorted(path.stem.split("-")[1] for path in tape_dir.glob("tape-*.jsonl"))

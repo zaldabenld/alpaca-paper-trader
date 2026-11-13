@@ -74,8 +74,10 @@ class FrontendDomContractTests(unittest.TestCase):
     def test_orb_entry_controls_are_wired(self) -> None:
         for element_id in ("entryMode", "orbMinutes", "orbMaxBreakoutPercent"):
             self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
-        for value in ("momentum", "orb"):
+        for value in ("scored", "weighted", "orb", "allocation", "inplay"):
             self.assertIn(f'<option value="{value}"', self.index_html)
+        for retired in ("momentum", "movers"):  # both are profiles of the scored style now
+            self.assertNotIn(f'<option value="{retired}"', self.index_html)
         config_start = self.app_js.index("const configKeys = [")
         config_text = self.app_js[config_start : self.app_js.index("];", config_start)]
         profile_start = self.app_js.index("const strategyProfileKeys = new Set([")
@@ -84,7 +86,7 @@ class FrontendDomContractTests(unittest.TestCase):
             self.assertIn(f'"{key}"', config_text)
             self.assertIn(f'"{key}"', profile_text)
         self.assertIn("entry_mode: fields.entryMode.value", self.app_js)
-        self.assertIn('entry_mode: "momentum"', self.app_js)
+        self.assertIn('entry_mode: "scored"', self.app_js)
 
     def test_movers_controls_are_wired(self) -> None:
         ids = (
@@ -113,7 +115,7 @@ class FrontendDomContractTests(unittest.TestCase):
         )
         for element_id in ids:
             self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
-        self.assertIn('<option value="movers"', self.index_html)
+        self.assertNotIn('data-modes="movers"', self.index_html)  # no movers mode: the mover weights are scored settings
         self.assertNotIn("moverStop", self.index_html)  # movers exits are the Basic Settings stop fields
         for key in keys:
             self.assertIn(f'"{key}"', self.app_js)
@@ -130,13 +132,30 @@ class FrontendDomContractTests(unittest.TestCase):
         self.assertNotIn("Movers Score Weights", self.index_html)
         self.assertNotIn("Score Weights (momentum)", self.index_html)
         self.assertEqual(self.index_html.count("<h3>Score Weights</h3>"), 1)  # the backtest panel's own
+        # The mover weights belong to the scored and weighted styles; the old-style checks and score
+        # weights to the scored style only. Each sits in a group the menu hides when the profile has
+        # switched that group off.
         for element_id in ("moverWeightVolume", "moverVolumeFullAt", "moverWeightSpread", "moverVolumeCurrent"):
-            self.assertRegex(rules, rf'(?s)<label data-modes="movers"[^>]*>(?:(?!</label>).)*id="{element_id}"')
-        for element_id in ("scoreWeightRsi", "buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice",
+            self.assertRegex(rules, rf'(?s)<label data-modes="scored weighted" data-group="mover"[^>]*>(?:(?!</label>).)*id="{element_id}"')
+        for element_id in ("buyRsiMax", "maxEntryRsi", "maxVwapDistancePercent", "requireRisingPrice",
                            "momentumPeriod", "smiPeriod", "atrPeriod", "volumePeriod"):
-            self.assertRegex(rules, rf'(?s)<label data-modes="momentum"[^>]*>(?:(?!</label>).)*id="{element_id}"')
-        self.assertRegex(rules, r'(?s)<label data-modes="momentum orb"[^>]*>(?:(?!</label>).)*id="minBuyVolumeRatio"')  # ORB's order-flow check
-        self.assertRegex(rules, r'(?s)<label data-modes="momentum orb movers"[^>]*>(?:(?!</label>).)*id="minEntryScore"')
+            self.assertRegex(rules, rf'(?s)<label data-modes="scored" data-group="trend"[^>]*>(?:(?!</label>).)*id="{element_id}"')
+        for element_id in ("scoreWeightRsi", "scoreWeightVwap"):
+            self.assertRegex(rules, rf'(?s)<label data-modes="scored" data-group="oldscore"[^>]*>(?:(?!</label>).)*id="{element_id}"')
+        self.assertRegex(rules, r'(?s)<label data-modes="scored orb" data-group="trend"[^>]*>(?:(?!</label>).)*id="minBuyVolumeRatio"')  # ORB's order-flow check
+        self.assertRegex(rules, r'(?s)<label data-modes="scored weighted orb"[^>]*>(?:(?!</label>).)*id="minEntryScore"')
+        # Every yes/no check is a visible switch of the scored style, and none of them shows for weighted.
+        for element_id in ("useTrendChecks", "requireUpOnSession", "requireAboveVwap", "requireNotFalling", "reentryRule"):
+            self.assertRegex(rules, rf'(?s)<label data-modes="scored"[^>]*>(?:(?!</label>).)*id="{element_id}"')
+        self.assertIn("scoredGroupsInUse", self.app_js)
+
+    def test_each_account_has_its_own_settings_menu(self) -> None:
+        for element_id in ("accountTabs", "accountMenuTitle", "showUnusedSettings"):
+            self.assertEqual(1, len(re.findall(rf'(?<![\w-])id="{element_id}"', self.index_html)))
+        self.assertIn("function renderAccountTabs()", self.app_js)
+        self.assertIn("await switchToAccount(account.account_id)", self.app_js)
+        self.assertIn("This menu shows only what this account uses.", self.app_js)
+        self.assertNotIn('"show_unused_settings"', self.app_js)  # a view switch, never a saved setting
         # Limits and inverse funds are their own sections, out of the buy decision.
         for heading, ids in (("Buy Limits", ("maxEntriesPerSymbolPerDay", "maxEntriesPerScan", "entrySpacingSeconds")),
                              ("Inverse ETFs", ("inverseEtfMode", "inverseTrendHold", "inverseTrendMaxEntries"))):

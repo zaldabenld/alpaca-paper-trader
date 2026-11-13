@@ -342,7 +342,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "inverse_trend_trail_percent": "2",
         "inverse_trend_max_entries": 2,
         "universe_mode": "most_active",
-        "entry_mode": "momentum",
+        "entry_mode": "scored",
         "orb_minutes": 15,
         "orb_max_breakout_percent": "1.0",
         "volume_period": 20,
@@ -411,7 +411,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "inverse_trend_trail_percent": "2",
         "inverse_trend_max_entries": 2,
         "universe_mode": "most_active",
-        "entry_mode": "momentum",
+        "entry_mode": "scored",
         "orb_minutes": 15,
         "orb_max_breakout_percent": "1.0",
         "volume_period": 20,
@@ -480,7 +480,7 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "inverse_trend_trail_percent": "2",
         "inverse_trend_max_entries": 2,
         "universe_mode": "most_active",
-        "entry_mode": "momentum",
+        "entry_mode": "scored",
         "orb_minutes": 15,
         "orb_max_breakout_percent": "1.0",
         "volume_period": 20,
@@ -499,7 +499,44 @@ PROFILE_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
-ENTRY_MODES = {"momentum", "orb", "allocation", "inplay", "movers"}
+# "scored": one buy path for every scored style; the profile's settings decide which readings earn
+# points and which yes/no checks run. "weighted": the same readings with no yes/no checks at all.
+# The other three are different mechanics, not scores.
+ENTRY_MODES = {"scored", "weighted", "orb", "allocation", "inplay"}
+MOVER_WEIGHT_DEFAULTS = {
+    "mover_weight_volume": "45",
+    "mover_weight_half_hour_move": "15",
+    "mover_weight_vwap": "15",
+    "mover_weight_five_min_move": "10",
+    "mover_weight_range": "10",
+    "mover_weight_session": "5",
+    "mover_weight_rsi": "0",
+    "mover_weight_spread": "40",
+}
+MOVER_WEIGHT_KEYS = tuple(MOVER_WEIGHT_DEFAULTS)
+DIRECTION_CHECK_KEYS = ("require_up_on_session", "require_above_vwap", "require_not_falling")
+OLD_SCORE_WEIGHT_KEYS = (
+    "score_weight_rsi",
+    "score_weight_relative_volume",
+    "score_weight_momentum",
+    "score_weight_recent_momentum",
+    "score_weight_long_momentum",
+    "score_weight_session_change",
+    "score_weight_vwap",
+    "score_weight_smi",
+    "score_weight_volatility",
+    "score_weight_liquidity_bonus",
+    "score_weight_flow",
+    "score_weight_pullback_penalty",
+    "score_weight_overbought_penalty",
+    "score_weight_volatility_penalty",
+    "score_weight_session_extension_penalty",
+    "score_weight_vwap_extension_penalty",
+    "score_weight_session_pullback_penalty",
+    "score_weight_recent_pullback_penalty",
+    "score_weight_smi_overheat_penalty",
+)
+REENTRY_RULES = {"floor", "climb"}
 # Accounts in these modes do not put their held positions at the front of the shared price stream.
 STREAM_LEFTOVER_ENTRY_MODES = {"allocation", "inplay"}
 
@@ -583,6 +620,11 @@ PROFILE_STRATEGY_KEYS = {
     "mover_volume_full_at",
     "mover_weight_spread",
     "mover_volume_current",
+    "use_trend_checks",
+    "require_up_on_session",
+    "require_above_vwap",
+    "require_not_falling",
+    "reentry_rule",
     "volume_period",
     "volume_multiplier",
     "min_avg_volume",
@@ -666,10 +708,25 @@ class AppConfig(BaseModel):
     # Scale the VWAP and session extension caps by each symbol's own 1-min ATR%: a stock at this ATR%
     # gets the flat caps, one twice as volatile gets twice the room. 0 keeps the flat percent caps.
     extension_atr_reference_percent: Decimal = Decimal("0")
-    # Entry style. "momentum": the trend/RSI/VWAP/score checks above. "orb": opening-range breakout,
-    # buy once per symbol per day when price clears the first orb_minutes' high while above VWAP,
-    # at most orb_max_breakout_percent past it (0 = no cap). Exits stay the take-profit/stop settings.
-    entry_mode: str = "momentum"
+    # Entry style. "scored": one buy path whose settings decide what it does (see the trend checks,
+    # direction checks, old-style score weights and mover weights below); the old "momentum" and
+    # "movers" styles are profiles of it. "weighted": the mover readings with no yes/no checks at
+    # all. "orb": opening-range breakout, buy once per symbol per day when price clears the first
+    # orb_minutes' high while above VWAP, at most orb_max_breakout_percent past it (0 = no cap).
+    # Exits stay the take-profit/stop settings.
+    entry_mode: str = "scored"
+    # Scored style: run the old-style yes/no checks (RSI range, trend, momentum floors, VWAP band,
+    # pullback limits, rising price, SMI, volume, order flow) before scoring.
+    use_trend_checks: bool = True
+    # Scored style: the three checks that define "going up" for a mover. Each one is a flat no when
+    # on. The weighted style has none of them: the same readings count for and against the score.
+    require_up_on_session: bool = False
+    require_above_vwap: bool = False
+    require_not_falling: bool = False
+    # After a losing exit. "floor": the next buy needs the exit's score plus reentry_score_boost,
+    # once. "climb": every losing exit that day adds reentry_score_boost to min_entry_score, and a
+    # sale at a gain adds it once until the stock trades above the high it was sold from.
+    reentry_rule: str = "floor"
     orb_minutes: int = 15
     orb_max_breakout_percent: Decimal = Decimal("1.0")
     # entry_mode "allocation": buy and hold with a trend switch. Hold the risk-on set in equal
@@ -703,24 +760,23 @@ class AppConfig(BaseModel):
     inplay_max_picks: int = 10
     inplay_max_chase_percent: Decimal = Decimal("1")
     inplay_stop: str = "range_mid"
-    # entry_mode "movers": a weighted buy score with no technical vetoes. A stock that is up on the
-    # session, above VWAP and not falling over the last five minutes earns points for each reading;
-    # it is bought when the total reaches min_entry_score. Volume is today's total so far against
-    # the stock's own usual total by this time of day (consolidated data, read about 16 minutes
-    # late), worth full points at mover_volume_full_at times usual. RSI is a weight, never a
-    # ceiling. Exits are the account's own Stop Loss %, Take Profit %, Break-even and Profit Trail
-    # settings, the same ones every other mode shows; movers mode has no stop of its own.
-    mover_weight_volume: Decimal = Decimal("45")
-    mover_weight_half_hour_move: Decimal = Decimal("15")
-    mover_weight_vwap: Decimal = Decimal("15")
-    mover_weight_five_min_move: Decimal = Decimal("10")
-    mover_weight_range: Decimal = Decimal("10")
-    mover_weight_session: Decimal = Decimal("5")
+    # Mover readings (scored and weighted styles): each earns points toward min_entry_score, and 0
+    # leaves a reading out. Volume is today's total so far against the stock's own usual total by
+    # this time of day (consolidated data, read about 16 minutes late), worth full points at
+    # mover_volume_full_at times usual. RSI is a weight, never a ceiling. A movers profile sets
+    # these (45/15/15/10/10/5) and turns the old-style score weights and trend checks off. Exits
+    # are the account's own Stop Loss %, Take Profit %, Break-even and Profit Trail settings.
+    mover_weight_volume: Decimal = Decimal("0")
+    mover_weight_half_hour_move: Decimal = Decimal("0")
+    mover_weight_vwap: Decimal = Decimal("0")
+    mover_weight_five_min_move: Decimal = Decimal("0")
+    mover_weight_range: Decimal = Decimal("0")
+    mover_weight_session: Decimal = Decimal("0")
     mover_weight_rsi: Decimal = Decimal("0")
     mover_volume_full_at: Decimal = Decimal("5")
     # Points taken off the movers score for the bid/ask spread: all of them when the spread is as
     # wide as the stop distance, in proportion below that (0 = off). Every round trip pays the spread.
-    mover_weight_spread: Decimal = Decimal("40")
+    mover_weight_spread: Decimal = Decimal("0")
     # Volume points use the lower of today's volume so far and the last half hour's, each against
     # the stock's usual, so one block print does not hold full volume points all day.
     mover_volume_current: bool = True
@@ -950,13 +1006,60 @@ class AppConfig(BaseModel):
             raise ValueError(f"Not a known inverse ETF: {', '.join(bad)}. The inverse set only takes known inverse ETFs.")
         return result
 
+    @model_validator(mode="before")
+    @classmethod
+    def read_legacy_entry_mode(cls, data: Any) -> Any:
+        """Settings saved before the scored styles were merged say entry_mode "momentum" or "movers".
+
+        Each is the scored style with the other family switched off, which is exactly how it behaved:
+        a movers account never ran the trend checks or the old-style score, and a momentum account
+        never used the mover readings. Whatever those unused settings held is set to off here, so the
+        account trades as it did. Runs once; the result says "scored".
+        """
+        if not isinstance(data, dict):
+            return data
+        mode = str(data.get("entry_mode") or "").strip().lower()
+        if mode == "movers":
+            data = dict(data)
+            data["entry_mode"] = "scored"
+            for key, value in MOVER_WEIGHT_DEFAULTS.items():
+                data.setdefault(key, value)
+            for key in OLD_SCORE_WEIGHT_KEYS:
+                data[key] = "0"
+            data["use_trend_checks"] = False
+            for key in DIRECTION_CHECK_KEYS:
+                data[key] = True
+            data["reentry_rule"] = "climb"
+        elif mode == "momentum":
+            data = dict(data)
+            data["entry_mode"] = "scored"
+            for key in MOVER_WEIGHT_KEYS:
+                data[key] = "0"
+            data["use_trend_checks"] = True
+            for key in DIRECTION_CHECK_KEYS:
+                data[key] = False
+            data["reentry_rule"] = "floor"
+        elif mode == "weighted":
+            data = dict(data)
+            for key, value in MOVER_WEIGHT_DEFAULTS.items():
+                data.setdefault(key, value)
+        return data
+
     @field_validator("entry_mode", mode="before")
     @classmethod
     def validate_entry_mode(cls, value: str) -> str:
-        mode = str(value or "momentum").strip().lower()
+        mode = str(value or "scored").strip().lower()
         if mode not in ENTRY_MODES:
             raise ValueError("Entry mode must be one of: " + ", ".join(sorted(ENTRY_MODES)) + ".")
         return mode
+
+    @field_validator("reentry_rule", mode="before")
+    @classmethod
+    def validate_reentry_rule(cls, value: str) -> str:
+        rule = str(value or "floor").strip().lower()
+        if rule not in REENTRY_RULES:
+            raise ValueError("Re-entry rule must be one of: " + ", ".join(sorted(REENTRY_RULES)) + ".")
+        return rule
 
     @field_validator("allocation_risk_on_symbols", "allocation_risk_off_symbols", mode="before")
     @classmethod
@@ -2047,6 +2150,37 @@ def cash_percent_of_equity(cash: Any, equity: Any) -> Decimal:
     return (decimal_value(cash) / equity_value * Decimal("100")).quantize(Decimal("0.1"))
 
 
+def uses_mover_readings(config: AppConfig) -> bool:
+    """The buy decision reads the mover readings: always in the weighted style, and in the scored
+    style whenever a mover weight is above zero or one of the direction checks is on."""
+    if config.entry_mode == "weighted":
+        return True
+    if config.entry_mode != "scored":
+        return False
+    return any(getattr(config, key) > 0 for key in MOVER_WEIGHT_KEYS) or any(
+        getattr(config, key) for key in DIRECTION_CHECK_KEYS
+    )
+
+
+def uses_old_score(config: AppConfig) -> bool:
+    return config.entry_mode == "scored" and any(getattr(config, key) != 0 for key in OLD_SCORE_WEIGHT_KEYS)
+
+
+def uses_climbing_reentry(config: AppConfig) -> bool:
+    return config.entry_mode == "weighted" or (config.entry_mode == "scored" and config.reentry_rule == "climb")
+
+
+def uses_reentry_floor(config: AppConfig) -> bool:
+    return config.entry_mode == "orb" or (config.entry_mode == "scored" and config.reentry_rule == "floor")
+
+
+def direction_checks(config: AppConfig) -> tuple[bool, bool, bool]:
+    """(up on the session, above VWAP, not falling): which of the three yes/no checks run."""
+    if config.entry_mode != "scored":
+        return False, False, False
+    return bool(config.require_up_on_session), bool(config.require_above_vwap), bool(config.require_not_falling)
+
+
 def entry_profile_limits(config: AppConfig) -> dict[str, Decimal]:
     limits = dict(ENTRY_PROFILE_LIMITS.get(config.profile, ENTRY_PROFILE_LIMITS["neutral"]))
     limits["min_recent_momentum"] = config.min_recent_momentum_percent
@@ -2144,11 +2278,11 @@ class TraderEngine:
         self.consecutive_refresh_failures = 0
         self.processed_reentry_exit_ids: set[str] = set()
         self.reentry_reset_at: datetime | None = None
-        # Movers mode: today's losing round trips per symbol, keyed by the buy that opened each.
+        # Climbing re-entry rule: today's losing round trips per symbol, keyed by the buy that opened each.
         self.reentry_losses_today: dict[str, set[str]] = {}
         self.reentry_losses_date: Any = None
         self.reentry_open_buys: dict[str, tuple[str, Decimal]] = {}  # symbol -> (buy id, fill price)
-        # Movers mode: a stock sold at a gain needs a higher score until it trades above this price.
+        # Climbing re-entry rule: a stock sold at a gain needs a higher score until it trades above this price.
         self.reentry_new_highs: dict[str, tuple[str, Decimal]] = {}  # symbol -> (sell id, price to beat)
         self.reentry_released_sells: set[str] = set()
         # Today's filled orders by id, kept all day. The regular read is only the newest 100 closed
@@ -2192,7 +2326,7 @@ class TraderEngine:
         self.inplay_retry_at = 0.0
         self.inplay_failures = 0
         self.inplay_view: dict[str, Any] = {}
-        # Movers mode (entry_mode "movers"): each symbol's usual volume by time of day and today's
+        # Mover readings: each symbol's usual volume by time of day and today's
         # relative volume, loaded on a worker thread from consolidated data.
         self.mover_session = ""
         self.mover_profiles: dict[str, list[float] | None] = {}
@@ -2889,7 +3023,7 @@ class TraderEngine:
             if config.entry_mode == "inplay":
                 inplay_status = self.inplay_pass(clock, market_open)
                 entry_symbols = self.mode_entry_symbols()
-            elif config.entry_mode == "movers":
+            elif uses_mover_readings(config):
                 inplay_status = self.movers_pass(clock, market_open)
 
             position_map = {str(item.get("symbol", "")).upper(): item for item in position_dicts}
@@ -4200,7 +4334,7 @@ class TraderEngine:
         self.strategy_state.last_action[symbol] = "Candidate in-play breakout"
         return {"symbol": symbol, "rank": pick_rank, "score": score}
 
-    # ----- Movers mode (entry_mode "movers") ---------------------------------------------------
+    # ----- Mover readings (scored and weighted accounts) ----------------------------------------
 
     MOVERS_PATH = APP_DIR / "movers_volume.json"
     MOVERS_REFRESH_SECONDS = 150
@@ -4218,6 +4352,7 @@ class TraderEngine:
             volume_full_at=config.mover_volume_full_at,
             spread=config.mover_weight_spread,
             volume_current=bool(config.mover_volume_current),
+            two_sided=config.entry_mode == "weighted",
         )
 
     def mover_price_change(
@@ -4294,27 +4429,39 @@ class TraderEngine:
         return spread / price * Decimal("100")
 
     def movers_entry_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
-        """Why this stock is not a buy right now; empty when its weighted score clears the bar.
+        """Why this stock is not a buy right now, for a scored or weighted account that uses the
+        mover readings; empty when its score clears the bar.
 
-        Only three readings are yes/no (up on the session, above VWAP, not falling over the last
-        five minutes). Everything else, RSI included, only moves the score.
+        The account's settings decide every step. Scored style: the old-style trend checks run first
+        when they are switched on, then whichever of the three direction checks are on (up on the
+        session, above VWAP, not falling over the last five minutes). Weighted style: no yes/no
+        check at all. Then the score: the mover readings by their weights, plus the old-style score
+        when any of its weights is above zero. RSI only ever moves the score.
         """
         clean = symbol.strip().upper()
         for reason in (self.inverse_etf_hold_reason(symbol, config), self.halt_hold_reason(symbol)):
             if reason:
                 return reason
+        if config.entry_mode == "scored" and config.use_trend_checks:
+            trend = self.trend_checks_hold_reason(symbol, snapshot, config)
+            if trend:
+                return trend
         readings = self.mover_readings(symbol, snapshot)
-        direction = movers_logic.direction_hold_reason(readings)
+        direction = movers_logic.direction_hold_reason(readings, *direction_checks(config))
         if direction:
             return direction
-        # No other yes/no checks. A stock with no volume reading yet (no history on record, or
-        # before the first reading about 09:51 ET) or no daily range simply earns no points for it.
+        # A stock with no volume reading yet (no history on record, or before the first reading
+        # about 09:51 ET) or no daily range simply earns no points for it.
         result = movers_logic.score(readings, self.mover_weights(config))
+        if uses_old_score(config):
+            result = result.plus("old-style score", self.entry_score(snapshot, config, self.order_flow_ratio(symbol)))
         with self.lock:
             self.mover_scores[clean] = result
         self.set_entry_score(symbol, result.total)
         if result.total < config.min_entry_score:
             return f"Hold (score {result.total:.0f} of {config.min_entry_score:.0f}: {result.describe() or 'no points yet'})"
+        if not uses_climbing_reentry(config):
+            return self.asset_tradeability_hold_reason(symbol)  # the floor rule is checked with the candidate
         needed, losses = self.movers_reentry_bar(clean, config)
         old_high = self.movers_unbeaten_high(clean, readings.price)
         if old_high is not None:
@@ -4363,6 +4510,10 @@ class TraderEngine:
         with self.lock:
             result = self.mover_scores.get(symbol.strip().upper())
         total = result.total if result is not None else Decimal("0")
+        reentry_floor = self.reentry_score_floors.get(symbol)
+        if uses_reentry_floor(config) and reentry_floor is not None and total < reentry_floor:
+            self.strategy_state.last_action[symbol] = f"Hold (re-entry needs {reentry_floor:.1f})"
+            return None
         self.strategy_state.last_action[symbol] = f"Candidate movers score {total:.0f}"
         return {"symbol": symbol, "rank": rank, "score": total}
 
@@ -4924,15 +5075,28 @@ class TraderEngine:
             return self.inverse_trend_entry_hold_reason(symbol, snapshot, config)
         if config.entry_mode == "inplay":
             return self.inplay_entry_hold_reason(symbol, snapshot, config)
-        if config.entry_mode == "movers":
+        if uses_mover_readings(config):
             return self.movers_entry_hold_reason(symbol, snapshot, config)
-        limits = entry_profile_limits(config)
         inverse_reason = self.inverse_etf_hold_reason(symbol, config)
         if inverse_reason:
             return inverse_reason
         halt_reason = self.halt_hold_reason(symbol)
         if halt_reason:
             return halt_reason
+        if config.entry_mode != "scored" or config.use_trend_checks:
+            trend_reason = self.trend_checks_hold_reason(symbol, snapshot, config)
+            if trend_reason:
+                return trend_reason
+        asset_reason = self.asset_tradeability_hold_reason(symbol)
+        if asset_reason:
+            return asset_reason
+        return ""
+
+    def trend_checks_hold_reason(self, symbol: str, snapshot: Any, config: AppConfig) -> str:
+        """The old-style yes/no checks, in their order: RSI range, trend, momentum floors, session and
+        VWAP bands, pullback limits, rising price, SMI, volume and order flow. A scored account runs
+        them when "use trend checks" is on; opening-range accounts always do."""
+        limits = entry_profile_limits(config)
         if snapshot.rsi is None:
             return "Hold (RSI warming)"
         if snapshot.rsi < config.buy_rsi_min:
@@ -5009,9 +5173,6 @@ class TraderEngine:
         flow_reason = self.order_flow_hold_reason(symbol, config)
         if flow_reason:
             return flow_reason
-        asset_reason = self.asset_tradeability_hold_reason(symbol)
-        if asset_reason:
-            return asset_reason
         return ""
 
     def remember_stream_trade(self, symbol: str, price: Decimal, timestamp: Any) -> None:
@@ -5176,10 +5337,10 @@ class TraderEngine:
             return self.inverse_trend_entry_candidate(symbol, rank, snapshot, config)
         if config.entry_mode == "inplay":
             return self.inplay_entry_candidate(symbol, rank, snapshot, config)
-        if config.entry_mode == "movers":
-            return self.movers_entry_candidate(symbol, rank, snapshot, config)
         if config.entry_mode == "orb":
             return self.orb_entry_candidate(symbol, rank, snapshot, config)
+        if uses_mover_readings(config):
+            return self.movers_entry_candidate(symbol, rank, snapshot, config)
         quality_hold = self.entry_quality_hold_reason(symbol, snapshot, config)
         if quality_hold:
             self.strategy_state.last_action[symbol] = quality_hold
@@ -5190,12 +5351,29 @@ class TraderEngine:
         if score < config.min_entry_score:
             self.strategy_state.last_action[symbol] = f"Hold (score {score:.1f} < {config.min_entry_score})"
             return None
+        climb_hold = self.climbing_reentry_hold_reason(symbol, score, config)
+        if climb_hold:
+            self.strategy_state.last_action[symbol] = climb_hold
+            return None
         reentry_floor = self.reentry_score_floors.get(symbol)
-        if reentry_floor is not None and score < reentry_floor:
+        if uses_reentry_floor(config) and reentry_floor is not None and score < reentry_floor:
             self.strategy_state.last_action[symbol] = f"Hold (re-entry needs {reentry_floor:.1f})"
             return None
         self.strategy_state.last_action[symbol] = f"Candidate score {score:.1f}"
         return {"symbol": symbol, "rank": rank, "score": score}
+
+    def climbing_reentry_hold_reason(self, symbol: str, score: Decimal, config: AppConfig) -> str:
+        """The climbing re-entry bar for a scored account that does not use the mover readings (those
+        accounts are checked in movers_entry_hold_reason, where the new-high rule also has a price)."""
+        if not uses_climbing_reentry(config) or uses_mover_readings(config):
+            return ""
+        needed, losses = self.movers_reentry_bar(symbol.strip().upper(), config)
+        if losses and score < needed:
+            return (
+                f"Hold (re-entry needs {needed:.0f} after {losses} losing exit{'' if losses == 1 else 's'} today;"
+                f" score {score:.0f})"
+            )
+        return ""
 
     def inverse_trend_active(self, symbol: str, config: AppConfig) -> bool:
         """True when this symbol trades by the inverse trend-hold rules instead of the profile's own."""
@@ -5530,9 +5708,13 @@ class TraderEngine:
             if scored_entry and entry_score < config.min_entry_score:
                 self.strategy_state.last_action[symbol] = f"Hold (score {entry_score:.1f} < {config.min_entry_score})"
                 return events, False, None
+            climb_hold = self.climbing_reentry_hold_reason(symbol, entry_score, config) if scored_entry else ""
+            if climb_hold:
+                self.strategy_state.last_action[symbol] = climb_hold
+                return events, False, None
             reentry_floor = self.reentry_score_floors.get(symbol)
-            # Re-entry floors are set on the momentum score's scale; the movers score has its own.
-            if scored_entry and config.entry_mode != "movers" and reentry_floor is not None and entry_score < reentry_floor:
+            # A floor only binds an account on the floor rule; the climbing rule keeps its own count.
+            if scored_entry and uses_reentry_floor(config) and reentry_floor is not None and entry_score < reentry_floor:
                 self.strategy_state.last_action[symbol] = f"Hold (re-entry needs {reentry_floor:.1f})"
                 return events, False, None
             if config.max_open_positions > 0 and open_position_count >= config.max_open_positions:
@@ -5540,7 +5722,7 @@ class TraderEngine:
                 return events, False, None
 
             order_price = self.current_trade_price(symbol, snapshot.price)
-            if config.entry_mode == "movers" and scored_entry:
+            if uses_mover_readings(config) and scored_entry:
                 # The order lookup can reveal a more recent trade than the one used for ranking.
                 self.clear_entry_score(symbol)
                 hold = self.movers_entry_hold_reason(symbol, self.snapshot(symbol), config)
@@ -5572,7 +5754,7 @@ class TraderEngine:
                 events.append(("warn", f"Skipped {symbol}: calculated quantity is zero."))
                 return events, False, None
             entry_notes = [entry_guard_detail]
-            if config.entry_mode == "movers":
+            if uses_mover_readings(config):
                 with self.lock:
                     mover_score = self.mover_scores.get(symbol)
                 if mover_score is not None:
@@ -6579,7 +6761,7 @@ class TraderEngine:
             price = decimal_value(raw.get("price"))
             if price > 0:
                 candidates.append(price)
-                if self.config.entry_mode == "movers" and not self.inverse_trend_active(symbol, self.config):
+                if uses_mover_readings(self.config) and not self.inverse_trend_active(symbol, self.config):
                     traded_at = self.parse_order_datetime(raw.get("timestamp"))
                     if traded_at is not None:
                         with self.lock:
@@ -6595,7 +6777,7 @@ class TraderEngine:
             raw_quote = model_dict(quote)
             bid = decimal_value(raw_quote.get("bid_price"))
             ask = decimal_value(raw_quote.get("ask_price"))
-            if self.config.entry_mode == "movers":
+            if uses_mover_readings(self.config):
                 with self.lock:
                     self.mover_quotes[symbol.strip().upper()] = (bid, ask, time.monotonic())
             if bid > 0:
@@ -7310,14 +7492,14 @@ class TraderEngine:
         lots: dict[str, list[dict[str, Decimal]]] = {}
         with self.lock:
             reset_at = self.reentry_reset_at
-        movers = self.config.entry_mode == "movers"
+        movers = uses_climbing_reentry(self.config)  # count losing round trips, not a score floor
         today = datetime.now(MARKET_TIMEZONE).date()
         opening_buy: dict[str, str] = {}
         losing_trips: dict[str, set[str]] = {}
         last_sale: dict[str, tuple[str, Decimal, bool, datetime]] = {}  # symbol -> (sell id, price, won, when)
-        # The old score floor belongs to the modes that score a re-entry on the momentum scale. Hold
-        # and day-trade accounts never read it, and their order lists reach back days.
-        uses_score_floor = self.config.entry_mode in {"momentum", "orb"}
+        # The score floor belongs to accounts on the floor rule. Hold and day-trade accounts never
+        # read it, and their order lists reach back days.
+        uses_score_floor = uses_reentry_floor(self.config)
         rebuilt = False
         if movers:
             with self.lock:
@@ -7367,7 +7549,7 @@ class TraderEngine:
                 realized_pl = filled_value - cost_basis
 
             if movers:
-                # Movers mode counts losing round trips instead (movers_reentry_bar). A trip is keyed
+                # The climbing rule counts losing round trips instead (movers_reentry_bar). A trip is keyed
                 # by its buy, so a stop that fills in two pieces is one loss. The list is only the
                 # newest orders: on a busy day a position's buy has scrolled out by the time it is
                 # sold, so the buy is remembered from the pass that saw it. A sell with no known buy
