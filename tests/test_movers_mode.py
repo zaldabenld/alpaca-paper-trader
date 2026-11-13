@@ -314,8 +314,11 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual([(order.symbol, order.side.value) for order in broker.submitted], [("HOT", "buy")])
 
     def test_held_mover_gets_the_accounts_stop_loss(self) -> None:
-        for entry, expected in (("1.215", "1.20"), ("0.8463", "0.8358"), ("11.00", "10.87"),
-                                ("1.0126", "1.00"), ("100", "98.75")):
+        # The stop is the valid price nearest 1.25% under the fill, and never the tick right under
+        # it: on a penny-spread stock that tick is the bid ($1.19 has only $1.18 and $1.17 below).
+        for entry, expected in (("1.215", "1.20"), ("0.8463", "0.8357"), ("11.00", "10.86"),
+                                ("1.0126", "0.9999"), ("100", "98.75"), ("3.19", "3.15"), ("3.02", "2.98"),
+                                ("1.19", "1.17"), ("1.34", "1.32"), ("1.36", "1.34")):
             with self.subTest(entry=entry):
                 held = {"symbol": "HOT", "qty": "0.25", "qty_available": "0.25",
                         "avg_entry_price": entry, "current_price": entry, "side": "long"}
@@ -325,16 +328,32 @@ class RefreshTests(unittest.TestCase):
                 self.assertEqual(len(broker.submitted), 1)
                 order = broker.submitted[0]
                 self.assertEqual((order.side.value, order.type.value, order.qty), ("sell", "stop", 0.25))
-                self.assertEqual(D(str(order.stop_price)), D(expected))
-                self.assertGreaterEqual(D(str(order.stop_price)), D(entry) * D("0.9875"))
+                stop = D(str(order.stop_price))
+                tick = D("0.0001") if stop < 1 else D("0.01")
+                self.assertEqual(stop, D(expected))
+                self.assertLess(abs(stop - D(entry) * D("0.9875")), tick)
+                self.assertGreater(D(entry) - stop, tick)
 
-    def test_existing_wide_stop_is_replaced_across_the_dollar_boundary(self) -> None:
+    def test_a_fill_trading_at_its_bid_is_held_with_a_stop_under_the_bid(self) -> None:
+        # MRLN on 2026-11-13: bought at the ask, last trade at the bid a penny lower. That is the
+        # spread, not a 1.25% loss: the position stays and its stop goes a penny under the bid.
+        for entry, bid, expected in (("1.19", "1.18", "1.17"), ("1.34", "1.33", "1.32"), ("1.36", "1.35", "1.34")):
+            with self.subTest(entry=entry):
+                held = {"symbol": "HOT", "qty": "0.25", "qty_available": "0.25",
+                        "avg_entry_price": entry, "current_price": bid, "side": "long"}
+                broker = Broker(positions=[held])
+                engine = movers_engine(broker, bars=150)
+                refresh(engine)
+                self.assertEqual([(order.side.value, order.type.value, D(str(order.stop_price)))
+                                  for order in broker.submitted], [("sell", "stop", D(expected))])
+
+    def test_a_live_stop_sitting_on_the_bid_is_replaced_by_one_under_it(self) -> None:
         held = {"symbol": "HOT", "qty": "0.25", "qty_available": "0.25",
-                "avg_entry_price": "1.0126", "current_price": "1.0126", "side": "long"}
+                "avg_entry_price": "1.19", "current_price": "1.19", "side": "long"}
         broker = Broker(positions=[held])
         engine = movers_engine(broker, bars=150)
         old_stop = {"id": "s1", "symbol": "HOT", "side": "sell", "type": "stop", "qty": "0.25",
-                    "stop_price": "0.9999", "client_order_id": "apt-protect-sl-hot-1"}
+                    "stop_price": "1.18", "client_order_id": "apt-protect-sl-hot-1"}
         with (
             patch.object(broker, "get_orders", return_value=[old_stop]),
             patch.object(broker, "cancel_order_by_id") as cancel,
@@ -343,7 +362,7 @@ class RefreshTests(unittest.TestCase):
         cancel.assert_called_once_with("s1")
         self.assertEqual(broker.submitted, [])
         refresh(engine)
-        self.assertEqual(D(str(broker.submitted[0].stop_price)), D("1.00"))
+        self.assertEqual(D(str(broker.submitted[0].stop_price)), D("1.17"))
 
     def test_momentum_accounts_never_touch_the_movers_code(self) -> None:
         engine = movers_engine()
