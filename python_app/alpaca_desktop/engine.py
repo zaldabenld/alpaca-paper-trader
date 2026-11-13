@@ -1694,6 +1694,24 @@ def is_pending_cancel_error(exc: Exception) -> bool:
     return "pending cancel" in str(exc or "").lower()
 
 
+def crossed_sell_stop_market_price(exc: OrderExecutionError, stop_price: Decimal) -> Decimal | None:
+    """Alpaca's market reference when it rejected a sell stop that had already been reached."""
+    try:
+        payload = json.loads(str(exc))
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("code") != 42210000
+        or payload.get("message") != "stop price must be less than current price"
+    ):
+        return None
+    market_price = decimal_value(payload.get("market_price"))
+    if market_price.is_finite() and Decimal("0") < market_price <= stop_price:
+        return market_price
+    return None
+
+
 def credential_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -5709,7 +5727,7 @@ class TraderEngine:
         if current_price <= stop_loss_price:
             self.strategy_state.last_action[symbol] = "Below stop; exits at the open"
             return []
-        submitted, events = self.submit_protective_exit_order(
+        submitted, events, _ = self.submit_protective_exit_order(
             symbol,
             qty,
             "stop_loss",
@@ -5868,7 +5886,9 @@ class TraderEngine:
             step = entry_price * Decimal("0.0025")
             if trailed > entry_price and step > 0:
                 trailed = entry_price + ((trailed - entry_price) // step) * step
-            stop = max(stop, trailed)
+            # Round the stepped trail up so a broker tick does not erode the locked-in gain.
+            if trailed > stop:
+                return self.round_exit_price(trailed, ROUND_UP)
         if stop <= 0:
             return Decimal("0")
         return self.round_exit_price(stop, ROUND_DOWN)
@@ -5984,28 +6004,7 @@ class TraderEngine:
         current_gain = percent_change(current_price, entry_price)
 
         if stop_loss_price > 0 and current_price <= stop_loss_price and not stop_loss_orders:
-            sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
-            if sell_hold:
-                self.strategy_state.last_action[symbol] = sell_hold
-                return events, False, True, False
-            cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
-            if cancelled is None or (cancelled and not self.wait_for_symbol_app_orders_cleared(symbol)):
-                self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
-                events.append(("warn", f"Waiting for existing exit order cancellation before selling {symbol}."))
-                return events, False, True, False
-            if stop_loss_price >= entry_price:
-                reason = f"local trailing stop {money(stop_loss_price)} (gain {current_gain:.2f}%, manual stop missing)"
-            else:
-                reason = (
-                    f"local stop-loss {self.position_stop_percent(symbol, self.config)}%"
-                    f" (gain {current_gain:.2f}%, manual stop missing)"
-                )
-            qty_to_sell = self.sellable_qty(position)
-            if qty_to_sell <= 0:
-                self.strategy_state.last_action[symbol] = "Hold (shares held by a working order)"
-                return events, False, True, False
-            events.extend(self.submit_exit_order(symbol, qty_to_sell, snapshot, reason))
-            return events, True, False, False
+            return self.submit_missing_stop_exit(symbol, position, snapshot, active_orders, stop_loss_price, current_price)
 
         if take_profit_price > 0 and current_price >= take_profit_price and not take_profit_orders:
             cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
@@ -6029,22 +6028,28 @@ class TraderEngine:
         # not also send a local exit now (Alpaca would reject the sell: the stop holds the qty).
         placed_protective = False
         if stop_loss_price > 0 and not stop_loss_orders:
-            submitted, submit_events = self.submit_protective_exit_order(
+            submitted, submit_events, crossed_price = self.submit_protective_exit_order(
                 symbol,
                 qty,
                 "stop_loss",
                 stop_loss_price,
                 snapshot,
                 f"manual stop-loss {self.position_stop_percent(symbol, self.config)}%",
+                recover_crossed_stop=True,
             )
             events.extend(submit_events)
+            if crossed_price is not None:
+                exit_events, exiting, protected, placed = self.submit_missing_stop_exit(
+                    symbol, position, snapshot, active_orders, stop_loss_price, crossed_price, verify_at_broker=True
+                )
+                return events + exit_events, exiting, protected, placed
             protection_active = protection_active or submitted
             placed_protective = placed_protective or submitted
         if take_profit_price > 0 and not take_profit_orders:
             if stop_loss_price > 0 or stop_loss_orders:
                 self.strategy_state.last_action[symbol] = f"Hold (profit target armed at {money(take_profit_price)})"
             else:
-                submitted, submit_events = self.submit_protective_exit_order(
+                submitted, submit_events, _ = self.submit_protective_exit_order(
                     symbol,
                     qty,
                     "take_profit",
@@ -6056,6 +6061,57 @@ class TraderEngine:
                 protection_active = protection_active or submitted
                 placed_protective = placed_protective or submitted
         return events, False, protection_active, placed_protective
+
+    def submit_missing_stop_exit(
+        self,
+        symbol: str,
+        position: dict[str, Any],
+        snapshot: Any,
+        active_orders: list[dict[str, Any]],
+        stop_price: Decimal,
+        market_price: Decimal,
+        *,
+        verify_at_broker: bool = False,
+    ) -> tuple[list[tuple[str, str]], bool, bool, bool]:
+        sell_hold = self.order_hold_reason(symbol, OrderSide.SELL)
+        if sell_hold:
+            self.strategy_state.last_action[symbol] = sell_hold
+            return [], False, True, False
+        cancelled = self.cancel_orders_for_symbol(active_orders, symbol)
+        if cancelled is None or (cancelled and not self.wait_for_symbol_app_orders_cleared(symbol)):
+            self.strategy_state.last_action[symbol] = "Hold (waiting for exit order cancellation)"
+            return [("warn", f"Waiting for existing exit order cancellation before selling {symbol}.")], False, True, False
+        if verify_at_broker:
+            try:
+                client = self.require_trading_client()
+                orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], nested=True))
+            except Exception as exc:
+                self.record_runtime_exception(
+                    "order_execution", "Crossed stop open-order check failed", OrderExecutionError(str(exc))
+                )
+                return [], False, False, False
+            open_orders = self.flatten_orders([model_dict(item) for item in orders])
+            if any(str(order.get("symbol") or "").upper() == symbol for order in open_orders):
+                self.strategy_state.last_action[symbol] = "Hold (working order after stop rejection)"
+                return [], False, False, False
+        check_quantity = verify_at_broker or bool(cancelled)
+        qty_to_sell = self.fresh_sellable_qty(symbol) if check_quantity else self.sellable_qty(position)
+        if qty_to_sell is None or qty_to_sell <= 0:
+            self.strategy_state.last_action[symbol] = (
+                "Hold (no confirmed shares available to sell)" if check_quantity
+                else "Hold (shares held by a working order)"
+            )
+            return [], False, True, False
+
+        entry_price = decimal_value(position.get("avg_entry_price"))
+        gain = percent_change(market_price, entry_price)
+        detail = "broker confirmed stop crossed" if verify_at_broker else "manual stop missing"
+        stop = (
+            f"trailing stop {money(stop_price)}" if stop_price >= entry_price
+            else f"stop-loss {self.position_stop_percent(symbol, self.config)}%"
+        )
+        events = self.submit_exit_order(symbol, qty_to_sell, snapshot, f"local {stop} (gain {gain:.2f}%, {detail})")
+        return events, True, False, False
 
     def cancel_stale_protective_order(
         self,
@@ -6103,10 +6159,12 @@ class TraderEngine:
         snapshot: Any,
         reason: str,
         reject_hold_until: Any = None,
-    ) -> tuple[bool, list[tuple[str, str]]]:
+        *,
+        recover_crossed_stop: bool = False,
+    ) -> tuple[bool, list[tuple[str, str]], Decimal | None]:
         events: list[tuple[str, str]] = []
         if self.protective_order_blocked(symbol, kind):
-            return False, events
+            return False, events, None
         client_kind = "tp" if kind == "take_profit" else "sl"
         client_order_id = f"apt-protect-{client_kind}-{symbol.lower()}-{int(time.time() * 1000)}"
         role = "Protective Exit"
@@ -6144,11 +6202,13 @@ class TraderEngine:
                 client_order_id,
             )
             events.append(("info", f"Dry run: would place {kind.replace('_', ' ')} for {qty} {symbol} at {price}."))
-            return True, events
+            return True, events, None
         try:
             submitted = self.submit_order_request(order)
         except OrderExecutionError as exc:
-            self.hold_rejected_protective_order(symbol, kind, until=reject_hold_until)
+            crossed_price = crossed_sell_stop_market_price(exc, price) if recover_crossed_stop else None
+            if crossed_price is None:
+                self.hold_rejected_protective_order(symbol, kind, until=reject_hold_until)
             self.record_order_intent(
                 symbol,
                 OrderSide.SELL,
@@ -6159,7 +6219,7 @@ class TraderEngine:
                 client_order_id,
             )
             events.append(("error", f"Protective {kind.replace('_', ' ')} rejected for {symbol}: {exc}"))
-            return False, events
+            return False, events, crossed_price
         submitted_id = getattr(submitted, "id", "")
         self.record_order_intent(
             symbol,
@@ -6172,7 +6232,7 @@ class TraderEngine:
             str(submitted_id),
         )
         events.append(("success", f"Submitted protective {kind.replace('_', ' ')} for {symbol}: {submitted_id}"))
-        return True, events
+        return True, events, None
 
     def local_protection_exit_decision(
         self,
@@ -6438,6 +6498,13 @@ class TraderEngine:
             for symbol in list(self.entry_times):
                 if symbol not in active and self.entry_lock_dates.get(symbol) != self.trade_day_key():
                     self.entry_times.pop(symbol, None)
+            for key in list(self.protective_order_reject_holds):
+                if key[0] not in active:
+                    self.protective_order_reject_holds.pop(key, None)
+            for holds in (self.order_submit_holds, self.order_reject_holds):
+                for key in list(holds):
+                    if key[1] == "sell" and key[0] not in active:
+                        holds.pop(key, None)
 
     def update_position_peak(self, symbol: str, entry_price: Decimal, current_price: Decimal) -> Decimal:
         clean_symbol = symbol.strip().upper()

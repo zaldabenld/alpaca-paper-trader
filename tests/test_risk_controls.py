@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from alpaca.common.exceptions import APIError
+from alpaca.trading.enums import OrderSide
+
 from .helpers import configure_test_environment
 
 
@@ -176,6 +179,92 @@ class StopProtectionTests(unittest.TestCase):
 
         del position["qty_available"]  # replay positions: sell the whole quantity
         self.assertEqual(engine.sellable_qty(position), Decimal("32.7446"))
+
+    def test_mrln_crossed_stop_exits_in_the_same_pass_at_broker_available_quantity(self) -> None:
+        for remaining in ("0.14", "0"):
+            with self.subTest(remaining=remaining):
+                client = FakeTradingClient(is_open=True, entry="1.36", price="1.3583")
+                engine = connected_engine(client)
+                original_submit = client.submit_order
+                attempts = []
+
+                def submit(order: Any) -> Any:
+                    attempts.append(order)
+                    if order.type.value == "stop":
+                        raise APIError(
+                            '{"code":42210000,"market_price":"1.35",'
+                            '"message":"stop price must be less than current price","stop_price":"1.35"}'
+                        )
+                    return original_submit(order)
+
+                client.submit_order = submit
+                client.get_open_position = lambda symbol: client.get_all_positions()[0] | {"qty_available": remaining}
+                run_refresh(engine)
+
+                self.assertEqual(attempts[0].stop_price, 1.35)
+                self.assertEqual(kinds(client), [("sell", "market")] if remaining != "0" else [])
+                if remaining != "0":
+                    self.assertEqual(client.submitted[0].qty, 0.14)
+                    self.assertIn("broker confirmed stop crossed", engine.order_intents[-1]["reason"])
+                self.assertFalse(engine.protective_order_blocked("AAA", "stop_loss"))
+
+    def test_crossed_stop_rechecks_for_an_order_that_appeared_after_the_scan(self) -> None:
+        client = FakeTradingClient(is_open=True, entry="1.36", price="1.3583")
+        engine = connected_engine(client)
+        attempts = []
+
+        def reject(order: Any) -> Any:
+            attempts.append(order.type.value)
+            client.open_orders.append({"symbol": "AAA", "type": "market", "side": "sell"})
+            raise APIError(
+                '{"code":42210000,"market_price":"1.35",'
+                '"message":"stop price must be less than current price","stop_price":"1.35"}'
+            )
+
+        client.submit_order = reject
+        run_refresh(engine)
+        self.assertEqual(attempts, ["stop"])
+
+    def test_offhours_or_other_stop_rejections_keep_their_retry_hold(self) -> None:
+        for is_open, error in (
+            (False, '{"code":42210000,"market_price":"1.35",'
+                    '"message":"stop price must be less than current price","stop_price":"1.35"}'),
+            (True, '{"code":42210000,"message":"insufficient qty available"}'),
+        ):
+            with self.subTest(is_open=is_open):
+                client = FakeTradingClient(is_open=is_open, entry="1.36", price="1.3583")
+                engine = connected_engine(client)
+                clock = client.get_clock()
+                clock.next_open = datetime.now(timezone.utc) + timedelta(hours=1)
+                client.get_clock = lambda: clock
+                attempts = []
+
+                def reject(order: Any) -> Any:
+                    attempts.append(order.type.value)
+                    raise APIError(error)
+
+                client.submit_order = reject
+                run_refresh(engine)
+                run_refresh(engine)
+                self.assertEqual(attempts, ["stop"])
+                self.assertTrue(engine.protective_order_blocked("AAA", "stop_loss"))
+
+    def test_mrln_trail_uses_the_new_positions_peak_without_the_prior_positions_hold(self) -> None:
+        client = FakeTradingClient(is_open=True, entry="1.35", price="1.3799")
+        engine = connected_engine(client, profit_trail_start_percent="2", profit_trail_drop_percent="1")
+        engine.hold_rejected_protective_order("AAA", "stop_loss")
+        engine.hold_submitted_order("AAA", OrderSide.SELL)
+        engine.hold_rejected_order("AAA", OrderSide.SELL, 60)
+        engine.hold_rejected_order("AAA", OrderSide.BUY, 60)
+        engine.prune_position_trackers(set())  # the broker reported the previous position flat
+        self.assertFalse(engine.order_hold_reason("AAA", OrderSide.SELL))
+        self.assertTrue(engine.order_hold_reason("AAA", OrderSide.BUY))
+
+        run_refresh(engine)
+
+        self.assertEqual(kinds(client), [("sell", "stop")])
+        self.assertEqual(client.submitted[0].stop_price, 1.37)
+        self.assertEqual(engine.position_stop_price("AAA", Decimal("1.35"), Decimal("1.36"), engine.config), Decimal("1.37"))
 
     def test_dry_run_account_that_is_stopped_sends_nothing(self) -> None:
         client = FakeTradingClient(is_open=True)
