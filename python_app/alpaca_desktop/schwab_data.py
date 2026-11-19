@@ -18,6 +18,7 @@ Alpaca market clock says the market is open, at most once per COMPARE_INTERVAL_S
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import os
 import statistics
@@ -75,11 +76,22 @@ def _urllib_http(method: str, url: str, headers: dict[str, str], body: bytes | N
     except urllib.error.HTTPError as exc:
         status = exc.code
         raw = exc.read()
+    return status, _decode_body(raw)
+
+
+def _decode_body(raw: bytes) -> Any:
+    # Schwab gzips its replies even when the request asks for identity encoding (seen live
+    # 2026-11-19 on /v1/oauth/token), so unpack by the gzip magic bytes rather than trust headers.
+    if raw[:2] == b"\x1f\x8b":
+        try:
+            raw = gzip.decompress(raw)
+        except (OSError, EOFError):
+            pass
     try:
         payload = json.loads(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
         payload = {"raw": raw[:200].decode("utf-8", "replace")}
-    return status, payload
+    return payload
 
 
 def _failure(prefix: str, status: int, payload: Any) -> str:
