@@ -293,3 +293,48 @@ class SchwabSettingsApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SchwabHttpDecodingTests(unittest.TestCase):
+    """Schwab gzips replies even when asked for identity encoding (seen live 2026-11-19)."""
+
+    def _response(self, raw: bytes, status: int = 200) -> Any:
+        class Response:
+            def __init__(self) -> None:
+                self.status = status
+
+            def read(self) -> bytes:
+                return raw
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                return None
+
+        return Response()
+
+    def test_gzipped_success_body_is_unpacked(self) -> None:
+        import gzip
+
+        raw = gzip.compress(json.dumps({"access_token": "a", "expires_in": 1800}).encode())
+        with patch.object(schwab_data.urllib.request, "urlopen", return_value=self._response(raw)):
+            status, payload = schwab_data._urllib_http("POST", schwab_data.TOKEN_URL, {}, b"")
+        self.assertEqual((status, payload), (200, {"access_token": "a", "expires_in": 1800}))
+
+    def test_gzipped_error_body_is_unpacked(self) -> None:
+        import gzip
+        import io
+        import urllib.error
+
+        raw = gzip.compress(b'{"error":"invalid_grant","error_description":"Authorization code is invalid"}')
+        error = urllib.error.HTTPError(schwab_data.TOKEN_URL, 400, "Bad Request", {}, io.BytesIO(raw))
+        with patch.object(schwab_data.urllib.request, "urlopen", side_effect=error):
+            status, payload = schwab_data._urllib_http("POST", schwab_data.TOKEN_URL, {}, b"")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_grant")
+        self.assertIn("Authorization code is invalid", schwab_data._failure("Schwab refused the login", status, payload))
+
+    def test_plain_json_still_works(self) -> None:
+        with patch.object(schwab_data.urllib.request, "urlopen", return_value=self._response(b'{"SPY": {}}')):
+            self.assertEqual(schwab_data._urllib_http("GET", schwab_data.QUOTES_URL, {}, None), (200, {"SPY": {}}))
