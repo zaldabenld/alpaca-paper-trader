@@ -85,6 +85,7 @@ from .strategy import _bar_local_time, _latest_session_points
 from . import allocation as allocation_logic
 from . import inplay as inplay_logic
 from . import movers as movers_logic
+from . import schwab_data
 from . import app_settings
 from . import market_overview
 from . import symbol_info as symbol_info_logic
@@ -3351,6 +3352,7 @@ class TraderEngine:
             cached_rows = load_dashboard_cache_rows()
             latest_statuses = dict(self.latest_trading_statuses)
             halted_symbols = dict(self.halted_symbols)
+            market_open = bool(self.market_clock.get("is_open"))
 
         if data_client is None or screener_client is None:
             with self.lock:
@@ -3366,6 +3368,7 @@ class TraderEngine:
 
             rows: list[dict[str, Any]] = []
             symbols: list[str] = []
+            schwab_compare_rows: list[dict[str, Any]] = []
             for index, item in enumerate(ranked[:DASHBOARD_TOP_LIMIT], start=1):
                 symbol = str(item.get("symbol", "")).strip().upper()
                 if not symbol:
@@ -3385,6 +3388,20 @@ class TraderEngine:
                     previous_close_raw = model_dict(getattr(snapshot, "previous_daily_bar", None)).get("close")
                 change_pct_raw = market_overview.percent_change(
                     market_overview.number(last_price_raw), market_overview.number(previous_close_raw)
+                )
+                latest_quote = model_dict(getattr(snapshot, "latest_quote", None))
+                schwab_compare_rows.append(
+                    {
+                        "symbol": symbol,
+                        "last": last_price_raw,
+                        "bid": latest_quote.get("bid_price"),
+                        "ask": latest_quote.get("ask_price"),
+                        "feed_volume": whole_number_value(daily_bar.get("volume")),
+                        "screener_volume": daily_volume_raw,
+                        "prev_close": previous_close_raw,
+                        "change_pct": change_pct_raw,
+                        "trade_time": latest_trade.get("timestamp"),
+                    }
                 )
                 rows.append(
                     {
@@ -3447,6 +3464,11 @@ class TraderEngine:
 
             if restart_stream and symbols != old_symbols:
                 self.log("info", "Top-volume symbols refreshed; shared market-data websocket will resubscribe.")
+
+            # Side-by-side Schwab quotes for the same symbols, logged for comparison only. Runs in
+            # the background, at most once a minute, and only while the market is open.
+            if market_open:
+                schwab_data.COMPARE.submit(schwab_compare_rows, feed, self.log)
 
         except Exception as exc:
             with self.lock:
