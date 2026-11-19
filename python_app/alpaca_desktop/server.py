@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import schwab_data
 from .app_settings import AppWideSettings
 from .currentness import currentness_payload
 from .heartbeat import HEARTBEAT
@@ -378,6 +379,58 @@ async def post_app_settings(payload: AppWideSettings) -> dict[str, Any]:
     if stream_limit_changed:
         await asyncio.to_thread(manager.ensure_market_data_stream, False, True)
     return {"app_settings": manager.app_settings_payload()}
+
+
+class SchwabKeysPayload(BaseModel):
+    app_key: str = ""
+    app_secret: str = ""
+    callback_url: str = ""
+
+
+class SchwabLoginPayload(BaseModel):
+    redirect_url: str
+
+
+def schwab_status_payload() -> dict[str, Any]:
+    """Schwab login state for the settings screen; never includes a key, secret or token."""
+    try:
+        status = schwab_data.SchwabClient().status()
+    except Exception as exc:
+        status = {"saved": False, "error": f"Could not read the saved Schwab login: {exc}"}
+    return {**status, **schwab_data.COMPARE.status()}
+
+
+@app.get("/api/schwab")
+async def get_schwab_status() -> dict[str, Any]:
+    return schwab_status_payload()
+
+
+@app.post("/api/schwab/keys")
+async def save_schwab_keys(payload: SchwabKeysPayload) -> dict[str, Any]:
+    # Market data only: Schwab is logged beside the Alpaca data for comparison, never used to trade.
+    client = schwab_data.SchwabClient()
+    try:
+        await asyncio.to_thread(client.save_keys, payload.app_key, payload.app_secret, payload.callback_url)
+        authorize_url = client.saved_authorize_url()
+    except schwab_data.SchwabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**schwab_status_payload(), "authorize_url": authorize_url}
+
+
+@app.post("/api/schwab/login")
+async def finish_schwab_login(payload: SchwabLoginPayload) -> dict[str, Any]:
+    client = schwab_data.SchwabClient()
+    try:
+        await asyncio.to_thread(client.login, payload.redirect_url)
+    except schwab_data.SchwabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # One SPY quote proves the saved login reaches Schwab market data.
+    try:
+        quotes = await asyncio.to_thread(client.get_quotes, ["SPY"])
+        test_quote, test_error = schwab_data.schwab_quote_fields(quotes.get("SPY")), ""
+    except schwab_data.SchwabError as exc:
+        test_quote, test_error = None, str(exc)
+    return {**schwab_status_payload(), "test_quote": test_quote, "test_quote_error": test_error}
 
 
 @app.post("/api/profile")

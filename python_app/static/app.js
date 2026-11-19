@@ -244,6 +244,14 @@ const els = {
   profileStatus: document.querySelector("#profileStatus"),
   saveAppSettingsButton: document.querySelector("#saveAppSettingsButton"),
   appSettingsStatus: document.querySelector("#appSettingsStatus"),
+  schwabAppKey: document.querySelector("#schwabAppKey"),
+  schwabAppSecret: document.querySelector("#schwabAppSecret"),
+  schwabCallbackUrl: document.querySelector("#schwabCallbackUrl"),
+  schwabSaveKeysButton: document.querySelector("#schwabSaveKeysButton"),
+  schwabLoginLink: document.querySelector("#schwabLoginLink"),
+  schwabRedirectUrl: document.querySelector("#schwabRedirectUrl"),
+  schwabFinishLoginButton: document.querySelector("#schwabFinishLoginButton"),
+  schwabStatus: document.querySelector("#schwabStatus"),
   applyParametersButton: document.querySelector("#applyParametersButton"),
   parameterStatus: document.querySelector("#parameterStatus"),
   connectButton: document.querySelector("#connectButton"),
@@ -884,6 +892,8 @@ fields.autoConnect.addEventListener("change", syncAutoConnectControl);
 
 els.saveCustomProfileButton.addEventListener("click", saveCustomProfile);
 els.saveAppSettingsButton.addEventListener("click", saveAppSettings);
+els.schwabSaveKeysButton.addEventListener("click", saveSchwabKeys);
+els.schwabFinishLoginButton.addEventListener("click", finishSchwabLogin);
 
 configKeys
   .filter((key) => key !== "profile")
@@ -1941,6 +1951,71 @@ async function saveAppSettings() {
     els.appSettingsStatus.textContent = "App settings saved.";
   } catch (error) {
     els.appSettingsStatus.textContent = error.message || String(error);
+  }
+}
+
+function schwabStatusText(status) {
+  if (!status) return "";
+  if (status.error) return status.error;
+  if (!status.saved) return "Schwab: no keys saved.";
+  const parts = [];
+  if (status.logged_in) {
+    const expires = status.login_expires_at ? new Date(status.login_expires_at).toLocaleString() : "";
+    parts.push(expires ? `Schwab: logged in until ${expires}.` : "Schwab: logged in.");
+  } else {
+    parts.push("Schwab: keys saved, not logged in.");
+  }
+  if (status.comparison) parts.push(status.comparison);
+  return parts.join(" ");
+}
+
+function renderSchwabStatus(status, extra = "") {
+  if (status?.callback_url) els.schwabCallbackUrl.value = status.callback_url;
+  els.schwabStatus.textContent = [schwabStatusText(status), extra].filter(Boolean).join(" ");
+}
+
+async function loadSchwabStatus() {
+  try {
+    const response = await fetchWithRecovery("/api/schwab", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.statusText);
+    renderSchwabStatus(await response.json());
+  } catch (error) {
+    els.schwabStatus.textContent = `Schwab status unavailable: ${error.message || error}`;
+  }
+}
+
+async function saveSchwabKeys() {
+  try {
+    const result = await postJson("/api/schwab/keys", {
+      app_key: els.schwabAppKey.value.trim(),
+      app_secret: els.schwabAppSecret.value.trim(),
+      callback_url: els.schwabCallbackUrl.value.trim(),
+    });
+    els.schwabAppKey.value = "";
+    els.schwabAppSecret.value = "";
+    els.schwabLoginLink.href = result.authorize_url;
+    els.schwabLoginLink.hidden = false;
+    renderSchwabStatus(
+      result,
+      "Next: click \"Open the Schwab login\", approve, then paste the address you land on below and press Finish."
+    );
+  } catch (error) {
+    els.schwabStatus.textContent = error.message || String(error);
+  }
+}
+
+async function finishSchwabLogin() {
+  try {
+    const result = await postJson("/api/schwab/login", { redirect_url: els.schwabRedirectUrl.value.trim() });
+    els.schwabRedirectUrl.value = "";
+    els.schwabLoginLink.hidden = true;
+    const quote = result.test_quote;
+    const check = quote
+      ? `Test quote OK: SPY ${quote.last} (bid ${quote.bid}, ask ${quote.ask}, realtime ${quote.realtime}).`
+      : `Logged in, but the test quote failed: ${result.test_quote_error || "no SPY quote returned"}.`;
+    renderSchwabStatus(result, check);
+  } catch (error) {
+    els.schwabStatus.textContent = error.message || String(error);
   }
 }
 
@@ -3693,6 +3768,7 @@ checkRuntimeHealth().then(() => loadSettings()).then(async () => {
   await loadState({ accountId: selectedAccountId, source: "startup" });
   await loadDashboard({ accountId: selectedAccountId, source: "startup" });
   loadMarketOverview();
+  loadSchwabStatus();
 }).catch(async (error) => {
   if (await recoverStaleInstance(error)) return;
   els.statusText.textContent = error.message;
@@ -3701,3 +3777,4 @@ checkRuntimeHealth().then(() => loadSettings()).then(async () => {
 setInterval(() => loadState({ source: "poll" }), 2000);
 setInterval(() => loadDashboard({ source: "poll" }), 5000);
 setInterval(loadMarketOverview, MARKET_OVERVIEW_POLL_MS);
+setInterval(loadSchwabStatus, 60000);

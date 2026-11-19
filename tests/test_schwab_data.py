@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import patch
 
 from .helpers import configure_test_environment
+from . import test_api_lockdown as api
 
 
 configure_test_environment()
@@ -69,7 +70,8 @@ class SchwabDataTests(unittest.TestCase):
     def logged_in_client(self, http: FakeHttp, clock: Clock) -> schwab_data.SchwabClient:
         client = schwab_data.SchwabClient(http=http, now=clock)
         http.responses.insert(0, (200, {"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 1800}))
-        client.login("key", "secret", "https://127.0.0.1", "https://127.0.0.1/?code=C0DE%40&session=abc")
+        client.save_keys("key", "secret", "https://127.0.0.1")
+        client.login("https://127.0.0.1/?code=C0DE%40&session=abc")
         return client
 
     def test_login_sends_decoded_code_with_basic_auth_and_saves_no_plain_tokens(self) -> None:
@@ -87,6 +89,28 @@ class SchwabDataTests(unittest.TestCase):
         saved = schwab_data.credentials_path().read_text(encoding="utf-8")
         for secret in ("access-1", "refresh-1", '"secret"', '"key"'):
             self.assertNotIn(secret, saved)
+
+    def test_save_keys_keeps_blank_fields_and_drops_login_when_key_changes(self) -> None:
+        http = FakeHttp([])
+        client = self.logged_in_client(http, Clock(1000.0))
+        client.save_keys("", "", "")
+        state = client.load()
+        self.assertEqual((state["app_key"], state["app_secret"]), ("key", "secret"))
+        self.assertEqual(state["refresh_token"], "refresh-1")  # same app: login kept
+
+        client.save_keys("other-key", "", "")
+        state = client.load()
+        self.assertEqual((state["app_key"], state["app_secret"]), ("other-key", "secret"))
+        self.assertEqual(state["refresh_token"], "")  # new app: old tokens dropped
+        self.assertIn("client_id=other-key", client.saved_authorize_url())
+
+        with self.assertRaises(schwab_data.SchwabError):
+            client.save_keys("k", "s", "http://127.0.0.1")
+
+    def test_login_needs_saved_keys(self) -> None:
+        client = schwab_data.SchwabClient(http=FakeHttp([]))
+        with self.assertRaises(schwab_data.SchwabError):
+            client.login("https://127.0.0.1/?code=abc")
 
     def test_access_token_refreshes_when_expired_and_keeps_login_date(self) -> None:
         clock = Clock(1000.0)
@@ -211,6 +235,60 @@ class SchwabEngineHookTests(unittest.TestCase):
         self.assertEqual(rows[0]["bid"], "23.44")
         self.assertEqual(rows[0]["feed_volume"], 900)
         self.assertEqual(rows[0]["screener_volume"], 1500)
+
+
+class SchwabSettingsApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.app_dir_patch = patch.object(storage, "APP_DIR", Path(self.temp.name) / "AlpacaPaperTrader")
+        self.app_dir_patch.start()
+
+    def tearDown(self) -> None:
+        self.app_dir_patch.stop()
+        self.temp.cleanup()
+
+    def test_keys_then_login_through_the_app_never_return_secrets(self) -> None:
+        status, _, body = api.call("GET", "/api/schwab")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["saved"])
+
+        status, _, body = api.call(
+            "POST", "/api/schwab/keys", headers=api.TOKEN,
+            body={"app_key": "my-key", "app_secret": "my-secret", "callback_url": "https://127.0.0.1"},
+        )
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertTrue(payload["saved"])
+        self.assertFalse(payload["logged_in"])
+        self.assertIn("client_id=my-key", payload["authorize_url"])
+        self.assertNotIn("my-secret", body.decode())
+
+        http = FakeHttp([
+            (200, {"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 1800}),
+            (200, {"SPY": quote(600.0, 599.99, 600.01, 1000, 598.0, 0.33)}),
+        ])
+        real_client = schwab_data.SchwabClient
+        with patch.object(schwab_data, "SchwabClient", lambda: real_client(http=http)):
+            status, _, body = api.call(
+                "POST", "/api/schwab/login", headers=api.TOKEN,
+                body={"redirect_url": "https://127.0.0.1/?code=abc%40&session=x"},
+            )
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertTrue(payload["logged_in"])
+        self.assertEqual(payload["test_quote"]["last"], 600.0)
+        for secret in ("my-secret", "access-1", "refresh-1"):
+            self.assertNotIn(secret, body.decode())
+
+    def test_bad_redirect_is_a_400(self) -> None:
+        api.call("POST", "/api/schwab/keys", headers=api.TOKEN, body={"app_key": "k", "app_secret": "s"})
+        status, _, body = api.call("POST", "/api/schwab/login", headers=api.TOKEN, body={"redirect_url": "https://127.0.0.1/"})
+        self.assertEqual(status, 400)
+        self.assertIn("code=", json.loads(body)["detail"])
+
+    def test_schwab_endpoints_need_the_token(self) -> None:
+        status, _, _ = api.call("POST", "/api/schwab/keys", body={"app_key": "k", "app_secret": "s"})
+        self.assertEqual(status, 403)
 
 
 if __name__ == "__main__":

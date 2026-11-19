@@ -6,8 +6,10 @@ reads the comparison log: stock ranking, entries, exits and sizing still use Alp
 
 Saved state lives in `schwab-credentials.json` in the app folder. The app key, secret and both
 tokens are DPAPI-protected on Windows the same way the Alpaca keys are (storage.protect_text); the
-callback URL and expiry times are plain. Schwab access tokens last 30 minutes and are refreshed
-here; the refresh token lasts 7 days, after which `python_app/schwab_login.py` has to be run again.
+callback URL and expiry times are plain (on Linux there is no DPAPI: values are base64 in an
+owner-only file, like the Alpaca keys). Keys and login are entered in the app's settings screen
+(App-wide, "Schwab market data"). Schwab access tokens last 30 minutes and are refreshed here; the
+refresh token lasts 7 days, after which the login has to be done again from that screen.
 
 Each comparison is one JSON line in `schwab_compare/<session date>.jsonl`, written only while the
 Alpaca market clock says the market is open, at most once per COMPARE_INTERVAL_SECONDS.
@@ -206,21 +208,47 @@ class SchwabClient:
         self.save(state)
         return state
 
-    def login(self, app_key: str, app_secret: str, callback_url: str, received_url: str) -> None:
-        state = {"app_key": app_key.strip(), "app_secret": app_secret.strip(), "callback_url": callback_url.strip()}
-        code = self.code_from_redirect(received_url)
-        payload = self._token_request(
-            state,
-            {"grant_type": "authorization_code", "code": code, "redirect_uri": state["callback_url"]},
-        )
+    def save_keys(self, app_key: str, app_secret: str, callback_url: str) -> None:
+        """Save the App Key, Secret and callback URL. A blank key or secret keeps the saved one.
+        Changing the key or callback drops the old login, since its tokens belong to the old app."""
         with self.lock:
+            state = self.load()
+            new_key = app_key.strip() or state.get("app_key", "")
+            new_secret = app_secret.strip() or state.get("app_secret", "")
+            new_callback = callback_url.strip() or state.get("callback_url") or DEFAULT_CALLBACK_URL
+            if not new_key or not new_secret:
+                raise SchwabError("Enter both the Schwab App Key and Secret.")
+            if not new_callback.startswith("https://"):
+                raise SchwabError("The callback URL must start with https:// and match the Schwab app exactly.")
+            if new_key != state.get("app_key") or new_callback != state.get("callback_url"):
+                state = {}
+            state.update({"app_key": new_key, "app_secret": new_secret, "callback_url": new_callback})
+            self.save(state)
+
+    def saved_authorize_url(self) -> str:
+        state = self.load()
+        if not state.get("app_key"):
+            raise SchwabError("Save the Schwab App Key and Secret first.")
+        return self.authorize_url(str(state["app_key"]), str(state["callback_url"]))
+
+    def login(self, received_url: str) -> None:
+        """Finish the login with the address Schwab redirected the browser to."""
+        code = self.code_from_redirect(received_url)
+        with self.lock:
+            state = self.load()
+            if not state.get("app_key") or not state.get("app_secret"):
+                raise SchwabError("Save the Schwab App Key and Secret first.")
+            payload = self._token_request(
+                state,
+                {"grant_type": "authorization_code", "code": code, "redirect_uri": str(state["callback_url"])},
+            )
             self._store_tokens(state, payload, new_login=True)
 
     def access_token(self) -> str:
         with self.lock:
             state = self.load()
             if not state.get("refresh_token"):
-                raise SchwabLoginNeeded("No Schwab login saved. Run python_app/schwab_login.py.")
+                raise SchwabLoginNeeded("Not logged in to Schwab.")
             if state.get("access_token") and state.get("access_expires_at", 0) - ACCESS_REFRESH_MARGIN_SECONDS > self.now():
                 return str(state["access_token"])
             payload = self._token_request(
@@ -381,6 +409,8 @@ class CompareWorker:
         self.running = False
         self.last_started = 0.0
         self.last_status = ""
+        self.last_message = ""
+        self.last_finished_at = ""
 
     def submit(self, alpaca_rows: list[dict[str, Any]], feed: str, log: Callable[[str, str], None]) -> bool:
         """Start one comparison unless Schwab is not set up, one is running, or one ran recently."""
@@ -400,6 +430,8 @@ class CompareWorker:
 
     def _report(self, status: str, level: str, message: str, log: Callable[[str, str], None]) -> None:
         # Log once per change of state, not on every minute's comparison.
+        self.last_message = message
+        self.last_finished_at = datetime.now(timezone.utc).isoformat()
         if status != self.last_status:
             self.last_status = status
             log(level, message)
@@ -412,12 +444,18 @@ class CompareWorker:
             path = append_compare_record(record, now.astimezone(MARKET_TIMEZONE).date().isoformat())
             self._report("ok", "info", f"Schwab comparison logging to {path.name} (data only; no effect on trades).", log)
         except SchwabLoginNeeded as exc:
-            self._report("login", "error", f"Schwab comparison paused: {exc} Run python_app/schwab_login.py.", log)
+            self._report(
+                "login", "error", f"Schwab comparison paused: {exc} Log in again under App-wide settings.", log
+            )
         except Exception as exc:  # the comparison must never disturb the trading loop
             self._report(f"error:{exc.__class__.__name__}", "error", f"Schwab comparison failed: {exc}", log)
         finally:
             with self.lock:
                 self.running = False
+
+
+    def status(self) -> dict[str, Any]:
+        return {"comparison": self.last_message, "comparison_at": self.last_finished_at}
 
 
 COMPARE = CompareWorker()
