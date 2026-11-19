@@ -1024,6 +1024,33 @@
                 <div class="button-row"><button id="saveAppSettingsButton" type="button" class="secondary align-input">Save App Settings</button></div>
                 <small id="appSettingsStatus" class="helper-text"></small>
               </div>
+
+              <div class="compact-section">
+                <h3>Schwab market data (comparison only)</h3>
+                <small class="helper-text">Schwab quotes are logged next to the Alpaca data while the market is open, to compare the two. They are never used to pick, buy or sell. Leave a key field blank to keep the saved one.</small>
+                <div class="strategy-grid">
+                  <label>
+                    Schwab App Key
+                    <input id="schwabAppKey" name="schwab-app-key-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter App Key" />
+                  </label>
+                  <label>
+                    Schwab Secret
+                    <input id="schwabAppSecret" name="schwab-secret-field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="none" data-lpignore="true" data-1p-ignore="true" placeholder="Enter Secret" />
+                  </label>
+                  <label title="Must match the Callback URL on the Schwab app exactly.">
+                    Callback URL
+                    <input id="schwabCallbackUrl" type="text" spellcheck="false" autocapitalize="none" value="https://127.0.0.1" />
+                  </label>
+                </div>
+                <div class="button-row"><button id="schwabSaveKeysButton" type="button" class="secondary align-input">Save Keys &amp; Get Login Link</button></div>
+                <small class="helper-text"><a id="schwabLoginLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Open the Schwab login</a></small>
+                <label title="After you approve, Schwab sends the browser to the callback URL. That page shows an error; copy its whole address.">
+                  Address Schwab sent you to (paste right away; it expires quickly)
+                  <input id="schwabRedirectUrl" type="text" spellcheck="false" autocapitalize="none" placeholder="https://127.0.0.1/?code=..." />
+                </label>
+                <div class="button-row"><button id="schwabFinishLoginButton" type="button" class="secondary align-input">Finish Schwab Login</button></div>
+                <small id="schwabStatus" class="helper-text"></small>
+              </div>
             </details>
 
             <div class="compact-section">
