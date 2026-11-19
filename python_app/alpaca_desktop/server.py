@@ -332,6 +332,11 @@ def record_background_error(account_engine: Any | None, message: str) -> None:
 async def index() -> HTMLResponse:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     html = html.replace('content="__APT_API_TOKEN__"', f'content="{API_TOKEN}"', 1)
+    # Version the script and stylesheet by file time so an update never pairs this page with a
+    # browser-cached copy of the old app.js.
+    for name in ("app.js", "styles.css"):
+        version = int((STATIC_DIR / name).stat().st_mtime)
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={version}"', 1)
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
