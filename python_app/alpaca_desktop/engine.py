@@ -8567,6 +8567,7 @@ class TraderManager:
             changed = settings.market_stream_symbol_limit != self.app_settings.market_stream_symbol_limit
             self.app_settings = settings
             self.app_settings_load_failed = load_failed
+        NOTIFIER.set_muted(settings.alerts_muted)
         return changed
 
     def app_settings_payload(self) -> dict[str, Any]:

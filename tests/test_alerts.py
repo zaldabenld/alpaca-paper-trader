@@ -54,6 +54,24 @@ class DesktopNotifierTests(unittest.TestCase):
             ],
         )
 
+    def test_muted_notifier_sends_nothing_and_no_suppressed_summary_after(self) -> None:
+        now = [1000.0]
+        bodies: list[str] = []
+        notifier = DesktopNotifier(
+            sender=lambda args: bodies.append(args[-1]), enabled=True, max_per_minute=1, clock=lambda: now[0]
+        )
+        self.assertTrue(notifier.notify("T", "before"))
+        self.assertFalse(notifier.notify("T", "rate limited"))  # counted as suppressed
+        notifier.set_muted(True)
+        self.assertTrue(notifier.muted)
+        for index in range(10):
+            self.assertFalse(notifier.notify("T", f"muted {index}"))
+        notifier.set_muted(False)
+        now[0] += 61
+        self.assertTrue(notifier.notify("T", "after"))
+        notifier.flush()
+        self.assertEqual(bodies, ["before", "after"])
+
     def test_disabled_notifier_never_calls_sender(self) -> None:
         sent: list[list[str]] = []
         notifier = DesktopNotifier(sender=sent.append, enabled=False)

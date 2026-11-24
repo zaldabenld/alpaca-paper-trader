@@ -183,6 +183,7 @@ const els = {
   reconnectStreamButton: document.querySelector("#reconnectStreamButton"),
   lookupButton: document.querySelector("#lookupButton"),
   marketOverviewToggle: document.querySelector("#marketOverviewToggle"),
+  alertsMuteToggle: document.querySelector("#alertsMuteToggle"),
   tickerTrack: document.querySelector("#tickerTrack"),
   symbolTip: document.querySelector("#symbolTip"),
   indexCharts: document.querySelector("#indexCharts"),
@@ -1922,6 +1923,7 @@ const appSettingKeys = {
 let appSettingsDirty = false;
 
 function applyAppSettings(settings, { force = false } = {}) {
+  if (settings && typeof settings.alerts_muted === "boolean") syncAlertsMuteToggle(settings.alerts_muted);
   // Unsaved edits survive settings reloads (Apply Changes, account switches) until saved.
   if (!settings || (appSettingsDirty && !force)) return;
   Object.entries(appSettingKeys).forEach(([name, key]) => {
@@ -1941,8 +1943,35 @@ function readAppSettings() {
     rvol_lookback_sessions: readAppInt("appRvolLookbackSessions", 20),
     rvol_min_sessions: readAppInt("appRvolMinSessions", 5),
     market_stream_symbol_limit: readAppInt("appMarketStreamSymbolLimit", 30),
+    alerts_muted: alertsMuted,  // owned by the top-bar button; saving the form must not unmute
   };
 }
+
+// Top-bar mute: one click silences every desktop notification for all accounts, saved server-side.
+let alertsMuted = false;
+
+function syncAlertsMuteToggle(muted) {
+  alertsMuted = Boolean(muted);
+  els.alertsMuteToggle.setAttribute("aria-pressed", String(alertsMuted));
+  els.alertsMuteToggle.title = alertsMuted
+    ? "Alerts are muted. Click to turn desktop notifications back on"
+    : "Silence every desktop notification, all accounts";
+  const label = els.alertsMuteToggle.querySelector("span");
+  if (label) label.textContent = alertsMuted ? "Alerts muted" : "Mute alerts";
+}
+
+els.alertsMuteToggle.addEventListener("click", async () => {
+  const wanted = !alertsMuted;
+  els.alertsMuteToggle.disabled = true;
+  try {
+    const result = await postJson("/api/alerts-muted", { muted: wanted });
+    syncAlertsMuteToggle(result.app_settings?.alerts_muted ?? wanted);
+  } catch (error) {
+    els.alertsMuteToggle.title = `Could not change alerts: ${error.message || error}`;
+  } finally {
+    els.alertsMuteToggle.disabled = false;
+  }
+});
 
 async function saveAppSettings() {
   try {

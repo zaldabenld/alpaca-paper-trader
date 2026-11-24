@@ -45,7 +45,19 @@ class DesktopNotifier:
         self._dedupe: dict[str, float] = {}
         self._recent: list[float] = []
         self._suppressed = 0
+        self._muted = False
         self._lock = threading.Lock()
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    def set_muted(self, muted: bool) -> None:
+        """App-wide mute switch: while muted nothing is shown or counted as suppressed."""
+        with self._lock:
+            self._muted = bool(muted)
+            if self._muted:
+                self._suppressed = 0  # no "N alerts suppressed" pop-up after unmuting
 
     def _run_notify_send(self, args: list[str]) -> None:
         env = os.environ.copy()
@@ -89,8 +101,8 @@ class DesktopNotifier:
         ttl_seconds: float = 0,
         urgency: str = "normal",
     ) -> bool:
-        """Queue an alert; False if disabled, deduped, rate-limited, or full."""
-        if not self._enabled:
+        """Queue an alert; False if disabled, muted, deduped, rate-limited, or full."""
+        if not self._enabled or self._muted:
             return False
         now = self._clock()
         if urgency not in _URGENCIES:

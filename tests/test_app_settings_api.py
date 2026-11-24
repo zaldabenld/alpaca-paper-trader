@@ -34,6 +34,35 @@ class AppSettingsApiTests(unittest.TestCase):
                 self.assertEqual(status, 200, content)
                 self.assertEqual(json.loads(content)["app_settings"]["rvol_lookback_sessions"], 10)
 
+    def test_mute_switch_saves_silences_and_survives_a_form_save(self) -> None:
+        from alpaca_desktop.alerts import NOTIFIER
+
+        with patched_storage_paths() as (_, settings_path), patched_server_manager({}) as manager:
+            with patch.object(server, "load_settings", side_effect=storage.load_settings):
+                try:
+                    status, _, content = call("POST", "/api/alerts-muted", headers=TOKEN, body={"muted": True})
+                    self.assertEqual(status, 200, content)
+                    self.assertTrue(json.loads(content)["app_settings"]["alerts_muted"])
+                    self.assertTrue(manager.app_settings.alerts_muted)
+                    self.assertTrue(NOTIFIER.muted)
+                    saved = json.loads(settings_path.read_text(encoding="utf-8"))["app_settings"]
+                    self.assertTrue(saved["alerts_muted"])
+
+                    # loading the saved file (app restart, protect job) keeps alerts muted
+                    NOTIFIER.set_muted(False)
+                    server.load_saved_settings_to_manager()
+                    self.assertTrue(NOTIFIER.muted)
+
+                    status, _, content = call("POST", "/api/alerts-muted", headers=TOKEN, body={"muted": False})
+                    self.assertEqual(status, 200, content)
+                    self.assertFalse(NOTIFIER.muted)
+                finally:
+                    NOTIFIER.set_muted(False)
+
+    def test_mute_endpoint_needs_the_token(self) -> None:
+        status, _, _ = call("POST", "/api/alerts-muted", body={"muted": True})
+        self.assertEqual(status, 403)
+
     def test_endpoint_needs_the_token(self) -> None:
         status, _, _ = call("POST", "/api/app-settings", body={"daily_pick_minutes_after_open": 30})
         self.assertEqual(status, 403)

@@ -386,6 +386,20 @@ async def post_app_settings(payload: AppWideSettings) -> dict[str, Any]:
     return {"app_settings": manager.app_settings_payload()}
 
 
+class AlertsMutedPayload(BaseModel):
+    muted: bool
+
+
+@app.post("/api/alerts-muted")
+async def post_alerts_muted(payload: AlertsMutedPayload) -> dict[str, Any]:
+    """One-click mute for every desktop notification; saved, so it survives a restart."""
+    current = AppWideSettings.model_validate(manager.app_settings_payload())
+    manager.set_app_settings(current.model_copy(update={"alerts_muted": payload.muted}),
+                             load_failed=manager.app_settings_load_failed)
+    save_manager_settings()
+    return {"app_settings": manager.app_settings_payload()}
+
+
 class SchwabKeysPayload(BaseModel):
     app_key: str = ""
     app_secret: str = ""

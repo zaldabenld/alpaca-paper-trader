@@ -226,6 +226,20 @@ select {
   gap: 12px;
 }
 
+/* Top-bar alert mute: the bell gets a slash and the button stays lit while muted. */
+#alertsMuteToggle .mute-slash {
+  display: none;
+}
+
+#alertsMuteToggle[aria-pressed="true"] .mute-slash {
+  display: inline;
+}
+
+#alertsMuteToggle[aria-pressed="true"] {
+  border-color: var(--warning, #b7791f);
+  color: var(--warning, #b7791f);
+}
+
 .topnav {
   background: var(--nav-bg);
   border: 1px solid var(--nav-border);
