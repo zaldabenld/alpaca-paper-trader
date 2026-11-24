@@ -196,41 +196,78 @@ async def auto_connect_when_lock_held() -> None:
     await auto_connect_saved_accounts()
 
 
-async def auto_connect_saved_accounts() -> None:
+# At boot the service can start before the network is up (DNS fails), so a failed auto-connect
+# keeps retrying instead of leaving the accounts disconnected until someone presses Connect.
+AUTO_CONNECT_RETRY_DELAYS = (5, 10, 15, 30)  # seconds; the last delay repeats
+AUTO_CONNECT_GIVE_UP_SECONDS = 30 * 60
+
+
+def auto_connect_candidates() -> list[Any]:
+    candidates = []
+    for account_engine in manager.list_engines():
+        settings = account_engine.settings(include_keys=True)
+        if (
+            not settings.get("auto_connect", settings.get("remember", True))
+            or not settings.get("remember")
+            or not settings.get("api_key")
+            or not settings.get("secret_key")
+        ):
+            continue
+        candidates.append(account_engine)
+    return candidates
+
+
+async def auto_connect_saved_accounts(sleep=asyncio.sleep, clock=time.monotonic) -> None:
     global _auto_connect_complete
-    connected_accounts = []
-    auto_start_accounts = []
     auto_start_disabled = os.environ.get("ALPACA_TRADER_DISABLE_AUTO_START", "").lower() in {"1", "true", "yes"}
+    started_at = clock()
+    attempt = 0
     try:
-        for account_engine in manager.list_engines():
-            settings = account_engine.settings(include_keys=True)
-            if (
-                not settings.get("auto_connect", settings.get("remember", True))
-                or not settings.get("remember")
-                or not settings.get("api_key")
-                or not settings.get("secret_key")
-            ):
-                continue
-            try:
-                await asyncio.to_thread(account_engine.connect_saved)
-                connected_accounts.append(account_engine)
-                if settings.get("auto_start_trading", False) and not auto_start_disabled:
-                    auto_start_accounts.append(account_engine)
-                elif settings.get("auto_start_trading", False) and auto_start_disabled:
+        pending = auto_connect_candidates()
+        while pending:
+            connected_now = []
+            failed = []
+            for account_engine in pending:
+                if account_engine.connected:
+                    continue  # connected by hand while we were retrying: the user has taken over
+                try:
+                    await asyncio.to_thread(account_engine.connect_saved)
+                    connected_now.append(account_engine)
+                except Exception as exc:
+                    failed.append(account_engine)
+                    if attempt == 0:
+                        account_engine.log(
+                            "error",
+                            f"Auto-connect failed, retrying for up to {AUTO_CONNECT_GIVE_UP_SECONDS // 60} min: {exc}",
+                        )
+            if connected_now:
+                source = manager.shared_market_source() or connected_now[0]
+                await asyncio.to_thread(manager.sync_top_volume_from, source)
+                await asyncio.to_thread(manager.ensure_market_data_stream)
+                await asyncio.to_thread(manager.backfill_dashboard_recent_trades, "startup trade-volume backfill")
+                await asyncio.to_thread(manager.backfill_dashboard_latest_trades, "startup dashboard backfill")
+            for account_engine in connected_now:
+                if attempt > 0:
+                    account_engine.log("success", "Auto-connect succeeded after retrying.")
+                if not account_engine.auto_start_trading:
+                    continue
+                if auto_start_disabled:
                     account_engine.log("info", "Auto-start trading skipped by launch override.")
-            except Exception as exc:
-                account_engine.log("error", f"Auto-connect failed: {exc}")
-        if connected_accounts:
-            source = manager.shared_market_source() or connected_accounts[0]
-            await asyncio.to_thread(manager.sync_top_volume_from, source)
-            await asyncio.to_thread(manager.ensure_market_data_stream)
-            await asyncio.to_thread(manager.backfill_dashboard_recent_trades, "startup trade-volume backfill")
-            await asyncio.to_thread(manager.backfill_dashboard_latest_trades, "startup dashboard backfill")
-        for account_engine in auto_start_accounts:
-            try:
-                await asyncio.to_thread(account_engine.start_trading)
-            except Exception as exc:
-                account_engine.log("error", f"Auto-start trading failed: {exc}")
+                    continue
+                try:
+                    await asyncio.to_thread(account_engine.start_trading)
+                except Exception as exc:
+                    account_engine.log("error", f"Auto-start trading failed: {exc}")
+            _auto_connect_complete = True  # the dashboard can serve whatever is connected so far
+            pending = failed
+            if not pending:
+                break
+            if clock() - started_at >= AUTO_CONNECT_GIVE_UP_SECONDS:
+                for account_engine in pending:
+                    account_engine.log("error", "Auto-connect gave up; press Connect, then Start.")
+                break
+            await sleep(AUTO_CONNECT_RETRY_DELAYS[min(attempt, len(AUTO_CONNECT_RETRY_DELAYS) - 1)])
+            attempt += 1
     finally:
         _auto_connect_complete = True
 
