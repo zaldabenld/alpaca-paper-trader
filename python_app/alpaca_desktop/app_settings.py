@@ -1,4 +1,4 @@
-"""App-wide settings shared by every account (the daily list's timing and lookback, the stream size)."""
+"""App-wide settings shared by every account (the daily list's timing and lookback, the stream size, alert mute)."""
 from __future__ import annotations
 
 from typing import Any
@@ -16,6 +16,7 @@ class AppWideSettings(BaseModel):
     rvol_lookback_sessions: int = rvol_universe.LOOKBACK_SESSIONS
     rvol_min_sessions: int = rvol_universe.MIN_SESSIONS
     market_stream_symbol_limit: int = DEFAULT_MARKET_STREAM_SYMBOL_LIMIT
+    alerts_muted: bool = False  # top-bar switch: silences every desktop notification, all accounts
 
     def model_post_init(self, __context: Any) -> None:
         self.daily_pick_minutes_after_open = min(max(int(self.daily_pick_minutes_after_open), 1), 120)
